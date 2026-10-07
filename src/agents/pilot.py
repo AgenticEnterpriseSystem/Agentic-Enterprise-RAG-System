@@ -3,35 +3,21 @@
 import argparse
 import json
 import os
-from collections import Counter, defaultdict
+from collections import Counter
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 
 from src.agents.search_agent import AgentConfig, SearchAgent
 from src.agents.search_critic import EvidenceCritic, SYSTEM_PROMPT as CRITIC_PROMPT
-from src.config import CORPUS_DIR, ROOT
+from src.config import CORPUS_DIR, ROOT, runtime_versions
 from src.contracts import UserContext, SearchRequest
 from src.evaluation.run_retrieval import git_state, load_questions
+from src.evaluation.splits import select_questions
 from src.generation.generator import (
     AnthropicConfig, AnthropicProvider, GenerationConfig, GroundedGenerator,
     ProviderError, SYSTEM_PROMPT as GENERATOR_PROMPT, combined_usage,
 )
-
-
-def select_questions(questions, count):
-    """Deterministic category round-robin, independent of model outcomes."""
-    if not 1 <= count <= len(questions):
-        raise ValueError("Question count must fit the development set")
-    groups = defaultdict(list)
-    for q in sorted(questions, key=lambda q: q['question_id']):
-        groups[q['question_type']].append(q)
-    selected = []
-    while len(selected) < count:
-        for category in sorted(groups):
-            if groups[category] and len(selected) < count:
-                selected.append(groups[category].pop(0))
-    return selected
 
 
 def write_json(path, value):
@@ -114,6 +100,11 @@ def parser():
     p.add_argument('--splits', type=Path, default=ROOT / 'evaluation/splits.json')
     p.add_argument('--corpus', type=Path, default=CORPUS_DIR / 'documents.parquet')
     p.add_argument('--index', type=Path, default=CORPUS_DIR / 'indexes/bm25')
+    p.add_argument('--retrieval', choices=('bm25', 'hybrid'), default='bm25')
+    p.add_argument('--dense-index', type=Path, default=CORPUS_DIR / 'indexes/dense')
+    p.add_argument('--device', default='cpu', help='Device for hybrid query embeddings')
+    p.add_argument('--fp16', action=argparse.BooleanOptionalAction, default=None,
+                   help='Match dense index precision; default is fp16 on CUDA, fp32 otherwise')
     p.add_argument('--output', type=Path)
     p.add_argument('--live', action='store_true', help='Allow paid model calls')
     p.add_argument('--model')
@@ -127,6 +118,8 @@ def main():
     p = parser()
     args = p.parse_args()
     required = [args.questions, args.splits, args.corpus, args.index / 'manifest.json']
+    if args.retrieval == 'hybrid':
+        required.append(args.dense_index / 'manifest.json')
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         p.error('Missing local artifacts:\n' + '\n'.join(missing) +
@@ -140,8 +133,16 @@ def main():
     questions = select_questions(load_questions(args.questions, args.splits, 'development'), args.count)
     # Loading also verifies the actual corpus hash against the index manifest.
     retriever = CorpusBM25.load(args.index, corpus_path=args.corpus)
+    if args.retrieval == 'hybrid':
+        from src.retrieval.corpus_dense import BGEModel, CorpusDense
+        from src.retrieval.hybrid import HybridRetriever
+
+        dense = CorpusDense.load(args.dense_index, model=BGEModel(args.device, fp16=args.fp16),
+                                 corpus_path=args.corpus, corpus=retriever.corpus)
+        retriever = HybridRetriever(retriever, dense)
     if not args.live:
-        print(json.dumps({'ready': True, 'paid_calls': False, 'documents': len(retriever.doc_ids),
+        print(json.dumps({'ready': True, 'paid_calls': False, 'retrieval': args.retrieval,
+                          'documents': len(retriever.doc_ids),
                           'questions': [{'id': q['question_id'], 'type': q['question_type']} for q in questions]}, indent=2))
         return
     output = args.output or ROOT / '.cache/agent-pilot' / datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
@@ -151,7 +152,8 @@ def main():
         input_usd_per_million=args.input_price, output_usd_per_million=args.output_price,
         max_output_tokens=1024, timeout_seconds=30)
     config = AgentConfig(max_rounds=2, max_cost_usd=args.budget_usd, max_seconds=120, max_tokens=16000)
-    manifest = {'code': git_state(), 'provider': provider_config.model_dump(), 'temperature': 0,
+    manifest = {'code': git_state(), 'runtime': runtime_versions(),
+                'provider': provider_config.model_dump(), 'temperature': 0,
                 'agent': config.model_dump(), 'top_k': 5, 'router': 'TextRouter',
                 'scope': 'benchmark-only access to all documents in this index; no production ACL claims',
                 'question_ids': [q['question_id'] for q in questions],

@@ -17,6 +17,7 @@ import numpy as np
 import pyarrow.parquet as pq
 from pydantic import Field
 
+from src.retrieval.passages import bounded_passage
 from src.config import CORPUS_DIR
 from src.contracts import Chunk, Contract, Evidence, SearchRequest, validate_evidence
 
@@ -127,6 +128,8 @@ class CorpusBM25:
 
     def rank(self, query: str, top_k: int, mask: np.ndarray | None = None):
         """Return (doc_id, score) pairs for documents sharing at least one query term."""
+        if top_k < 1:
+            raise ValueError("top_k must be positive")
         ids = [
             self.model.vocab_dict[t]
             for t in tokenize(query)
@@ -141,15 +144,17 @@ class CorpusBM25:
             matched[~mask] = 0
         candidates = np.flatnonzero(matched > 0)
         if len(candidates) > top_k:
-            candidates = candidates[
-                np.argpartition(-matched[candidates], top_k - 1)[:top_k]
-            ]
+            cutoff = np.partition(matched[candidates], len(candidates) - top_k)[len(candidates) - top_k]
+            above = candidates[matched[candidates] > cutoff]
+            ties = candidates[matched[candidates] == cutoff]
+            chosen_ties = sorted(ties, key=lambda i: self.doc_ids[i])[:top_k - len(above)]
+            candidates = np.concatenate((above, np.asarray(chosen_ties, dtype=np.int64)))
         offset = float(self.model.nonoccurrence_array[ids].sum())
         ranked = sorted(candidates, key=lambda i: (-matched[i], self.doc_ids[i]))
         return [(self.doc_ids[i], float(matched[i]) + offset) for i in ranked]
 
     def search(self, request: SearchRequest):
-        """Contract-compatible search returning whole documents as evidence."""
+        """Contract-compatible search returning bounded query-relevant evidence."""
         if self.corpus is None:
             raise ValueError("Load the index with a corpus to return document text")
         if request.after or request.before:
@@ -168,19 +173,20 @@ class CorpusBM25:
             chunk = self._chunk(doc_id)
             if chunk:  # The mask already applied permissions and sources.
                 results.append(
-                    Evidence(
+                    bounded_passage(Evidence(
                         citation_id=chunk.chunk_id,
                         chunk=chunk,
                         score=score,
                         retrieval_method="bm25",
-                    )
+                    ), request.query)
                 )
         results = tuple(results)
         validate_evidence(request.user, results)
         return results
 
     def _chunk(self, doc_id):
-        row = self.corpus.take([self.position[doc_id]]).to_pylist()[0]
+        # Slice one row without concatenating the full chunked string columns.
+        row = self.corpus.slice(self.position[doc_id], 1).to_pylist()[0]
         text = document_text(row["title"], row["content"])
         if not text.strip():
             return None
@@ -219,19 +225,23 @@ class CorpusBM25:
         )
 
     @classmethod
-    def load(cls, directory: Path, corpus_path: Path | None = None, mmap=True):
+    def load(cls, directory: Path, corpus_path: Path | None = None, mmap=True, *, corpus=None):
         manifest = json.loads((directory / "manifest.json").read_text())
         if manifest["version"] != INDEX_VERSION:
             raise ValueError("Unsupported corpus BM25 index version")
-        corpus = None
+        if corpus is not None and corpus_path is None:
+            raise ValueError("A shared corpus requires corpus_path for hash validation")
         if corpus_path is not None:
             if file_sha256(corpus_path) != manifest["corpus_sha256"]:
                 raise ValueError("Corpus differs from the one used to build the index")
-            corpus = pq.read_table(
-                corpus_path, columns=["doc_id", "source_type", "title", "content"]
-            )
+            if corpus is None:
+                corpus = pq.read_table(
+                    corpus_path, columns=["doc_id", "source_type", "title", "content"]
+                )
         model = bm25s.BM25.load(directory, mmap=mmap)
         doc_ids = json.loads((directory / "doc_ids.json").read_text())
+        if corpus is not None and corpus.column("doc_id").to_pylist() != doc_ids:
+            raise ValueError("Corpus document order differs from the index")
         if len(doc_ids) != model.scores["num_docs"]:
             raise ValueError("Document ID count does not match the index")
         return cls(

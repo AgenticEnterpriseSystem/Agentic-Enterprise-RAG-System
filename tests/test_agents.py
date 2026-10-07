@@ -1,12 +1,19 @@
 import json
+import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
+from src.agents.pilot import main, run_pilot, select_questions
 from src.agents.routing import ModelRouter, Route, ToolCall, ToolSpec
 from src.agents.search_agent import AgentConfig, SearchAgent
 from src.agents.search_critic import AgentError, EvidenceCritic, SYSTEM_PROMPT
 from src.contracts import Answer, Chunk, CriticDecision, Evidence, GenerationRequest, SearchRequest, ToolResult, Usage, UserContext
-from src.generation.generator import Completion, ProviderError
+from src.generation.generator import Completion, GroundedGenerator, ProviderError
+from src.retrieval.corpus_bm25 import CorpusBM25
+from src.retrieval.corpus_dense import CorpusDense
+from src.retrieval.hybrid import HybridRetriever
+from src.retrieval.reranker import CrossEncoderReranker
 from tests.fakes import FakeProvider
-from src.agents.pilot import main, run_pilot, select_questions
 
 
 # Critic, routing, and search loop
@@ -366,3 +373,204 @@ def test_context_budget_preserves_search_ranking():
                          config=AgentConfig(max_context_chars=len(second.chunk.text))).run(request())
     assert result.answer.status == "answered"
     assert critic.requests[0].evidence == (best,)
+
+
+def test_conflicting_chunk_identity_in_one_batch_is_rejected_atomically():
+    first = evidence()
+    conflicting = evidence("b", text="Different document").model_copy(
+        update={"chunk": evidence("b", text="Different document").chunk.model_copy(
+            update={"chunk_id": first.chunk.chunk_id})})
+    critic = Critic([])
+    result = SearchAgent(Search([(first, conflicting)]), critic, Generator()).run(request())
+    assert result.trace.stop_reason == "error"
+    assert not result.sources and not critic.requests
+
+
+@pytest.mark.parametrize("bad_query", ["   ", "x" * 8001])
+def test_entire_text_plan_is_validated_before_any_search(bad_query):
+    search = Search([(evidence(),)])
+    result = SearchAgent(search, Critic([]), Generator(), router=Router([
+        Route(reason="Followup", text_queries=("valid query", bad_query))
+    ])).run(request())
+    assert result.trace.stop_reason == "error" and not search.requests
+
+
+def test_text_router_ignores_out_of_scope_and_blank_critic_suggestions():
+    search = Search([(evidence(),), (evidence("b"),)])
+    critic = Critic([decision(suggested_queries=(" ", "upload size"),
+                              suggested_sources=("gmail", "docs")), decision(True)])
+    result = SearchAgent(search, critic, Generator()).run(request(source_types=("docs",)))
+    assert result.answer.status == "answered"
+    assert search.requests[-1].query == "upload size"
+    assert search.requests[-1].source_types == ("docs",)
+
+
+def test_positive_cost_budget_stops_at_exact_limit():
+    generator = Generator()
+    usage = Usage(api_calls=1, estimated_cost_usd=0.1)
+    result = SearchAgent(Search([(evidence(),)]), Critic([decision(True)], usage), generator,
+                         config=AgentConfig(max_cost_usd=0.1)).run(request())
+    assert result.trace.stop_reason == "budget" and not generator.requests
+
+
+def test_generator_abstention_is_not_traced_as_sufficient():
+    class AbstainingGenerator:
+        def generate(self, request):
+            return Answer(status="insufficient_evidence", text="Conflicting policies."), ZERO
+    result = SearchAgent(Search([(evidence(),)]), Critic([decision(True)]),
+                         AbstainingGenerator()).run(request())
+    assert result.answer.status == "insufficient_evidence"
+    assert result.trace.stop_reason == "no_new_evidence"
+
+
+def test_critic_revalidates_copied_authorization_before_model_call():
+    provider = FakeProvider([])
+    context = GenerationRequest(question="Limit?", user=USER).model_copy(
+        update={"evidence": (evidence("secret"),)})
+    with pytest.raises(ValueError, match="authorized"):
+        EvidenceCritic(provider).assess(context)
+    assert not provider.calls
+
+
+def test_model_router_receives_date_constraints():
+    from datetime import datetime, timezone
+    after = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    before = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    provider = FakeProvider([Completion(Route(reason="Dated search", text_queries=("policy",)).model_dump_json(), ZERO)])
+    ModelRouter(provider).route(request(after=after, before=before), None, {})
+    payload = json.loads(provider.calls[0][1])
+    assert payload['after'] == after.isoformat() and payload['before'] == before.isoformat()
+
+
+# Cooperating providers receive remaining allowances without changing interfaces.
+def test_model_phases_receive_remaining_run_budget_and_scope_is_reset():
+    from src.agents.budget import current_call_budget
+    observed = []
+    clock = [0.0]
+
+    class BudgetRouter:
+        def route(self, request, feedback, tools):
+            budget = current_call_budget()
+            observed.append((budget.remaining_tokens, budget.remaining_seconds, budget.remaining_cost_usd))
+            clock[0] = 1
+            return Route(reason="Search", text_queries=(request.query,)), Usage(
+                input_tokens=2, output_tokens=1, estimated_cost_usd=0.01)
+
+    class BudgetCritic:
+        def assess(self, context):
+            budget = current_call_budget()
+            observed.append((budget.remaining_tokens, budget.remaining_seconds, budget.remaining_cost_usd))
+            clock[0] = 3
+            return decision(True), Usage(input_tokens=4, output_tokens=2, estimated_cost_usd=0.02)
+
+    class BudgetGenerator(Generator):
+        def generate(self, context):
+            budget = current_call_budget()
+            observed.append((budget.remaining_tokens, budget.remaining_seconds, budget.remaining_cost_usd))
+            return super().generate(context)
+
+    result = SearchAgent(Search([(evidence(),)]), BudgetCritic(), BudgetGenerator(),
+                         router=BudgetRouter(), clock=lambda: clock[0],
+                         config=AgentConfig(max_tokens=20, max_seconds=10, max_cost_usd=0.1)).run(request())
+    assert result.trace.stop_reason == "sufficient"
+    assert [item[:2] for item in observed] == [(20, 10), (17, 9), (11, 7)]
+    assert [item[2] for item in observed] == pytest.approx([0.1, 0.09, 0.07])
+    assert current_call_budget() is None
+
+
+def test_provider_preflight_denial_is_budget_stop_and_preserves_usage():
+    from src.agents.budget import RunBudgetExceeded, current_call_budget
+
+    class DeniedCritic:
+        def assess(self, context):
+            assert current_call_budget().remaining_tokens == 10
+            raise RunBudgetExceeded(usage=Usage(api_calls=1, estimated_cost_usd=0))
+
+    generator = Generator()
+    result = SearchAgent(Search([(evidence(),)]), DeniedCritic(), generator,
+                         config=AgentConfig(max_tokens=10)).run(request())
+    assert result.trace.stop_reason == "budget" and not generator.requests
+    assert result.trace.usage.api_calls == 1
+    assert result.trace.steps[-1].tool == "critic:budget"
+    assert current_call_budget() is None
+
+
+def test_slow_synchronous_retriever_stops_before_next_model_operation():
+    clock = [0.0]
+
+    class SlowSearch(Search):
+        def search(self, request):
+            clock[0] = 2
+            return super().search(request)
+
+    critic = Critic([])
+    result = SearchAgent(SlowSearch([(evidence(),)]), critic, Generator(),
+                         clock=lambda: clock[0], config=AgentConfig(max_seconds=1)).run(request())
+    assert result.trace.stop_reason == "budget" and not critic.requests
+    # A synchronous search cannot be forcibly interrupted; elapsed time is honest.
+    assert result.trace.total_latency_ms == 2000
+
+
+def test_call_budget_debits_multiple_attempts_and_restores_outer_scope():
+    from src.agents.budget import CallBudget, call_budget, current_call_budget
+    outer = CallBudget(100, 10, 1)
+    inner = CallBudget(10, 2, 0.1)
+    with call_budget(outer):
+        with call_budget(inner):
+            inner.consume(tokens=3, seconds=0.5, cost_usd=0.03)
+            inner.consume(tokens=20, seconds=3, cost_usd=1)
+            assert current_call_budget() == CallBudget(0, 0, 0)
+        assert current_call_budget() is outer
+    assert current_call_budget() is None
+
+
+# Retrieval-to-agent integration (offline)
+
+
+
+def test_hybrid_agent_scopes_reranker_critic_and_answer(tmp_path):
+    corpus = pa.table({
+        "doc_id": ["public", "denied", "other-source"],
+        "source_type": ["docs", "docs", "email"],
+        "title": ["", "", ""],
+        "content": ["Upload limit is 10 MB.", "Secret upload limit is 100 MB.",
+                    "Email upload limit is 20 MB."],
+    })
+    path = tmp_path / "corpus.parquet"
+    pq.write_table(corpus, path)
+    bm25 = CorpusBM25.build(path)
+    bm25.corpus = corpus
+
+    class Embeddings:
+        def encode(self, texts, query=False):
+            assert query
+            return np.asarray([[1.0, 0.0]], dtype=np.float32)
+
+    dense = CorpusDense(np.asarray([[0.8, 0.6], [1., 0.], [0.9, 0.4]], dtype=np.float32),
+                        np.asarray([0, 1, 2]), corpus.column("doc_id").to_pylist(),
+                        Embeddings(), {}, corpus=corpus,
+                        spans=np.asarray([(0, len(text)) for text in corpus.column("content").to_pylist()]))
+    scored = []
+
+    def score(pairs):
+        scored.extend(pairs)
+        return [1.] * len(pairs)
+
+    hybrid = HybridRetriever(bm25, dense, reranker=CrossEncoderReranker(
+        "offline-test", "a" * 40, scorer=score))
+    citation = "public:0:22"
+    zero = Usage(estimated_cost_usd=0)
+    provider = FakeProvider([
+        Completion('{"sufficient":true,"confidence":0.95,"reason":"Supported"}', zero),
+        Completion('{"status":"answered","text":"10 MB","citation_ids":["' + citation + '"]}', zero),
+    ])
+    request = SearchRequest(query="upload limit", source_types=("docs",),
+                            user=UserContext(user_id="test", allowed_doc_ids=frozenset({"public", "other-source"})))
+    response = SearchAgent(hybrid, EvidenceCritic(provider), GroundedGenerator(provider)).run(request)
+    assert response.answer.status == "answered"
+    assert response.answer.citation_ids == (citation,)
+    assert {item.chunk.doc_id for item in response.sources} == {"public"}
+    assert scored == [("upload limit", "Upload limit is 10 MB.")]
+    assert all("Secret upload" not in prompt and "Email upload" not in prompt
+               for _, prompt in provider.calls)
+    assert response.trace.stop_reason == "sufficient"

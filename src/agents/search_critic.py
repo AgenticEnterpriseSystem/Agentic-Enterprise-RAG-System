@@ -2,7 +2,7 @@
 
 import json
 
-from src.contracts import CriticDecision, GenerationRequest, Usage
+from src.contracts import CriticDecision, GenerationRequest, Usage, validate_evidence
 from src.generation.generator import GenerationConfig, Provider, ProviderError, select_context
 
 SYSTEM_PROMPT = """Assess evidence for the question; do not write the final answer.
@@ -42,6 +42,7 @@ class EvidenceCritic:
         self.config = config or GenerationConfig()
 
     def assess(self, request: GenerationRequest) -> tuple[CriticDecision, Usage]:
+        validate_evidence(request.user, request.evidence)
         if len(request.question) > self.config.max_question_chars:
             raise AgentError("Question exceeds the configured length limit.")
         selected = select_context(request, self.config.max_context_chars)

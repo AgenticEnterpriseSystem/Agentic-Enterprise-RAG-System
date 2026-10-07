@@ -1,9 +1,9 @@
-numpy
-bm25s>=0.3.11,<0.4
-pyarrow
-sentence-transformers
-faiss-cpu
-pytest>=8.3,<9
-
-pydantic>=2.10,<3
-anthropic>=0.49,<1
+# Tested with Python 3.11; full environment snapshot: requirements.lock.txt
+numpy==2.4.6
+bm25s==0.3.11
+pyarrow==25.0.1
+sentence-transformers==6.0.1
+faiss-cpu==1.15.1
+pytest==8.4.2
+pydantic==2.13.5
+anthropic==0.125.0

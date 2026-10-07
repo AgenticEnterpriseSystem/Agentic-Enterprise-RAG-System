@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from pydantic import Field
 
+from src.agents.budget import CallBudget, RunBudgetExceeded, call_budget
 from src.agents.routing import TextRouter
 from src.agents.search_critic import AgentError
 from src.contracts import (
@@ -45,7 +46,19 @@ class SearchAgent:
                     or usage.input_tokens + usage.output_tokens >= config.max_tokens
                     or (usage.estimated_cost_usd is None and usage.api_calls > 0)
                     or (usage.estimated_cost_usd is not None
-                        and usage.estimated_cost_usd > config.max_cost_usd))
+                        and (usage.estimated_cost_usd > config.max_cost_usd
+                             or (config.max_cost_usd > 0
+                                 and usage.estimated_cost_usd >= config.max_cost_usd))))
+
+        def model_call(operation, *args):
+            usage = combined_usage(usages)
+            allowance = CallBudget(
+                remaining_tokens=max(0, config.max_tokens - usage.input_tokens - usage.output_tokens),
+                remaining_seconds=max(0, config.max_seconds - (self.clock() - started)),
+                remaining_cost_usd=max(0, config.max_cost_usd - (usage.estimated_cost_usd or 0)),
+            )
+            with call_budget(allowance):
+                return operation(*args)
 
         def record(tool, began, *, query=None, hits=(), decision=None, usage=None, sources=()):
             usage = usage or Usage(estimated_cost_usd=0)
@@ -68,6 +81,7 @@ class SearchAgent:
         def accept(hits, source_scope):
             hits = tuple(hits)
             validate_evidence(request.user, hits)
+            checked_chunks = {e.chunk.chunk_id: e.chunk for e in evidence.values()}
             for item in hits:
                 chunk = item.chunk
                 if source_scope and chunk.source_type not in source_scope:
@@ -79,9 +93,9 @@ class SearchAgent:
                 previous = evidence.get(item.citation_id)
                 if previous and previous.chunk != chunk:
                     raise AgentError("A citation ID was reused for different evidence.")
-                for previous in evidence.values():
-                    if previous.chunk.chunk_id == chunk.chunk_id and previous.chunk != chunk:
-                        raise AgentError("A chunk ID was reused for different evidence.")
+                if chunk.chunk_id in checked_chunks and checked_chunks[chunk.chunk_id] != chunk:
+                    raise AgentError("A chunk ID was reused for different evidence.")
+                checked_chunks[chunk.chunk_id] = chunk
             known_chunks = {e.chunk.chunk_id for e in evidence.values()}
             for item in hits:
                 if item.chunk.chunk_id not in known_chunks:
@@ -98,7 +112,7 @@ class SearchAgent:
             before = len(evidence)
             active_tool, began = "route", self.clock()
             try:
-                route, usage = self.router.route(request, feedback, self.tools)
+                route, usage = model_call(self.router.route, request, feedback, self.tools)
                 record("route", began, query=route.reason, usage=usage)
                 if exhausted():
                     return finish("budget", "Search budget reached.")
@@ -108,6 +122,11 @@ class SearchAgent:
                 if request.source_types and not set(sources) <= set(request.source_types):
                     raise AgentError("Router tried to widen the source scope.")
                 # Validate every operation before executing any part of this plan.
+                searches = [SearchRequest(query=query, user=request.user, top_k=request.top_k,
+                                          source_types=sources, after=request.after, before=request.before)
+                            for query in route.text_queries]
+                if any(len(search.query) > config.max_question_chars for search in searches):
+                    raise AgentError("Search query exceeds the configured length limit.")
                 calls = []
                 for call in route.tool_calls:
                     if call.tool not in self.tools:
@@ -115,14 +134,12 @@ class SearchAgent:
                     spec = self.tools[call.tool]
                     scoped = request.model_copy(update={"source_types": sources})
                     calls.append((call, spec, spec.request(call, scoped)))
-                for query in route.text_queries:
+                for search in searches:
                     if exhausted():
                         return finish("budget", "Search budget reached.")
                     active_tool, began = "text_search", self.clock()
-                    search = SearchRequest(query=query, user=request.user, top_k=request.top_k,
-                                           source_types=sources, after=request.after, before=request.before)
                     hits = accept(self.retriever.search(search), sources)
-                    record(active_tool, began, query=query, hits=hits, sources=sources)
+                    record(active_tool, began, query=search.query, hits=hits, sources=sources)
                 for call, spec, tool_request in calls:
                     if exhausted():
                         return finish("budget", "Search budget reached.")
@@ -145,19 +162,24 @@ class SearchAgent:
                                             evidence=tuple(context_order))
                 context = context.model_copy(update={"evidence": tuple(select_context(context, config.max_context_chars))})
                 active_tool, began = "critic", self.clock()
-                feedback, usage = self.critic.assess(context)
+                feedback, usage = model_call(self.critic.assess, context)
                 record(active_tool, began, hits=context.evidence, decision=feedback, usage=usage)
                 if exhausted():
                     return finish("budget", "Search budget reached.")
                 if feedback.sufficient and not feedback.missing_facts and feedback.confidence >= config.confidence_threshold:
                     active_tool, began = "generate", self.clock()
-                    answer, usage = self.generator.generate(context)
+                    answer, usage = model_call(self.generator.generate, context)
                     record(active_tool, began, hits=context.evidence, usage=usage)
                     if not set(answer.citation_ids) <= {e.citation_id for e in context.evidence}:
                         raise AgentError("Generator returned an unknown citation.")
                     if exhausted():
                         return finish("budget", "Answer generation exceeded the run budget.")
-                    return finish("error" if answer.status == "error" else "sufficient", "", answer, context.evidence)
+                    reason = {"error": "error", "answered": "sufficient",
+                              "insufficient_evidence": "no_new_evidence"}[answer.status]
+                    return finish(reason, "", answer, context.evidence)
+            except RunBudgetExceeded as exc:
+                record(active_tool + ":budget", began, usage=exc.usage)
+                return finish("budget", "Model call exceeds remaining run budget.")
             except Exception as exc:
                 # Preserve accounting without exposing provider messages or source text.
                 record(active_tool + ":error", began,

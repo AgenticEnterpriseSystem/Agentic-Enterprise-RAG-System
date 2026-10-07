@@ -1,5 +1,10 @@
 # Evaluation files
 
+This folder contains **saved data, not executable code**. Evaluation commands and
+metrics live in `src/evaluation/`; automated correctness checks live in `tests/`.
+Large corpus/index files and new local experiment outputs live in `.cache/`.
+Start with the [README commands](../README.md#everyday-commands).
+
 | File or folder | What it is |
 | --- | --- |
 | `splits.json` | Which questions are in the development (300), calibration (100), and final (100) splits. Fixed; do not tune on the final split. |
@@ -13,5 +18,6 @@ benchmark's own format).
 
 The data comes from Onyx's
 [EnterpriseRAG-Bench](https://github.com/onyx-dot-app/EnterpriseRAG-Bench) (MIT).
-See the [data card](../docs/DATA_CARD.md) and
-[baseline results](../docs/FULL_CORPUS.md).
+Read [Baseline Results](../docs/FULL_CORPUS.md) for measured retrieval scores,
+[Evaluation](../docs/EVALUATION.md) for scoring rules and the paused C3 plan,
+and the [Data Card](../docs/DATA_CARD.md) for provenance and limitations.

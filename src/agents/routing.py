@@ -44,8 +44,11 @@ class ToolSpec:
 
 class TextRouter:
     def route(self, request, feedback, tools):
-        queries = feedback.suggested_queries if feedback else ()
+        queries = tuple(q for q in feedback.suggested_queries if q.strip()) if feedback else ()
         sources = feedback.suggested_sources if feedback else ()
+        # Critic suggestions cannot widen the server-resolved source scope.
+        if request.source_types:
+            sources = tuple(s for s in sources if s in request.source_types)
         return Route(reason="Search for the missing facts." if feedback else "Initial text search.",
                      text_queries=queries[:4] or (request.query,), source_types=sources), Usage(estimated_cost_usd=0)
 
@@ -69,6 +72,8 @@ Do not guess a count from a limited sample of text search results.""", {
             "question": request.query,
             "feedback": feedback.model_dump() if feedback else None,
             "source_scope": request.source_types,
+            "after": request.after.isoformat() if request.after else None,
+            "before": request.before.isoformat() if request.before else None,
             "tools": {name: {"source_type": spec.source_type,
                               "description": spec.description, "operations": spec.operations,
                               "filter_fields": spec.filter_fields} for name, spec in tools.items()},

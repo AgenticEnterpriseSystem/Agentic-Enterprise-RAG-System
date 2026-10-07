@@ -3,8 +3,10 @@
 A course project that answers questions about a company's internal documents
 (Slack, email, tickets, wikis, and more) and cites the documents it used.
 
-**Status:** the two retrieval baselines are done and evaluated on the full
-dataset. The agentic search (Search Agent and Search Critic) is next.
+**Status:** the two retrieval baselines are evaluated on the full dataset.
+Hybrid retrieval, reranking, and the search agent have offline implementations;
+live quality and performance validation remain pending. C3 answer evaluation is
+currently on hold.
 
 ## How it will work
 
@@ -60,6 +62,11 @@ python -m pip install -r requirements.txt
 python -m pytest
 ```
 
+Direct dependencies are pinned to the tested environment. For the complete
+Python 3.11 macOS environment snapshot, use `requirements.lock.txt`; package
+availability may differ on other platforms. Fresh installation from the snapshot
+has not been verified. New pilot/retrieval manifests record runtime versions.
+
 **1. Build the dataset** (downloads about 5 GB, then takes about a minute):
 
 ```sh
@@ -70,36 +77,92 @@ python -m src.data.corpus --clone
 
 ```sh
 python -m src.retrieval.corpus_bm25
-python -m src.evaluation.run_retrieval --method bm25 --split development
+python -m src.evaluation.run_retrieval --method bm25 --split development \
+  --output .cache/retrieval-runs/bm25-development-new
 ```
 
 **3. Run the BGE baseline** (needs a GPU; about 2 hours on a free Colab T4):
 open [`notebooks/dense_baseline_colab.ipynb`](notebooks/dense_baseline_colab.ipynb)
 in Colab and run all cells.
 
-Results are saved to `evaluation/results/`.
+Historical results are in `evaluation/results/`. The command above writes to
+`.cache/retrieval-runs/` to preserve them; choose a fresh output directory per run.
+
+## Everyday commands
+
+With the existing corpus and indexes in `.cache/corpus/`, these are the main
+commands. None makes paid calls or downloads models:
+
+```sh
+# Check code correctness
+.venv/bin/python -m pytest -q
+
+# Check BM25 artifact readiness
+.venv/bin/python -m src.agents.pilot
+
+# Compare 20 development queries (choose a fresh label each time)
+.venv/bin/python -m src.evaluation.compare_fixes --label my-check
+```
+
+Add `--memory` to the comparison command for a separate full dense-index loading
+measurement without a query model. See [evaluation guidance](docs/EVALUATION.md)
+for the distinction between these checks and answer-quality evaluation.
+
+## Pilot options
+
+Reuse matching `.cache/corpus/documents.parquet`, `questions.jsonl`, and the entire
+`indexes/bm25/` directory. Saved result JSON files cannot replace these artifacts.
+Hybrid search also needs `indexes/dense/` and a query model matching its manifest.
+For an fp32 index, use `--retrieval hybrid --device cpu --no-fp16`; for Hira's
+Colab fp16 index, use `--retrieval hybrid --device cuda` on an NVIDIA GPU machine.
+CPU fp16 support varies; hybrid setup may download BGE if it is not cached.
+
+Live runs require `ANTHROPIC_API_KEY` and explicit model, total budget, and current
+prices per million tokens. Replace the placeholders before running:
+
+```sh
+python -m src.agents.pilot --live --count 1 \
+  --model MODEL_ID --budget-usd TOTAL_DOLLARS \
+  --input-price INPUT_DOLLARS_PER_MILLION \
+  --output-price OUTPUT_DOLLARS_PER_MILLION
+```
+
+Paid calls are off by default. One provider shares the run's budget; SDK retries
+are disabled. Use one worker; prices and token counts are estimates. Pilot outputs
+in `.cache/agent-pilot/<timestamp>/` include cases, a reference review sheet,
+usage summary, and a manifest with code/data/model/prompt/runtime versions.
+The pilot is a debugging tool; **C3 answer evaluation remains paused**.
 
 ## Repository layout
 
 | Folder | Contents |
 | --- | --- |
 | `src/data/` | Building the dataset |
-| `src/retrieval/` | Search methods (BM25+, BGE) |
-| `src/evaluation/` | Scoring and the evaluation runner |
+| `src/retrieval/` | BM25+, BGE, hybrid fusion, and optional reranking |
+| `src/evaluation/` | Evaluation code: retrieval metrics, runner, splits, and offline comparisons |
 | `src/generation/` | Writing answers with an LLM (paid calls are off by default) |
-| `src/agents/`, `src/api/` | Planned: Search Agent, Search Critic, web API |
-| `evaluation/` | Question splits, dataset record, and results |
-| `docs/` | Documentation |
+| `src/agents/` | Search Agent, Search Critic, routing, and development pilot |
+| `src/api/` | Planned web API |
+| `evaluation/` | Saved evaluation data only: frozen splits, corpus record, historical results |
+| `.cache/` | Local corpus/index artifacts and temporary experiment outputs (Git-ignored) |
+| `docs/` | Topic guides; start with this README for commands and navigation |
 | `notebooks/` | Colab notebook for the BGE baseline |
-| `tests/` | Automated tests (run on every push) |
+| `tests/` | Four test modules: retrieval, generation/contracts, agents, evaluation |
 
 ## Documentation
 
-- [Baselines on the full dataset](docs/FULL_CORPUS.md): methods, results, findings
-- [Data card](docs/DATA_CARD.md): the dataset in detail
-- [Evaluation plan](docs/EVALUATION.md): metrics and how answers will be graded
-- [Answer generation and metrics](docs/GENERATION.md): the LLM answer writer and search metrics
-- [Shared contracts](docs/CONTRACTS.md): data formats used across the code
+Read these in order; each guide owns one topic:
+
+1. [System](docs/SYSTEM.md): workflow, component roles, status and limitations.
+2. [Baseline Results](docs/FULL_CORPUS.md): measured retrieval scores and exact run
+   settings. Start here after README for a TA progress review.
+3. [Evaluation](docs/EVALUATION.md): measurements, frozen splits and planned answer
+   rubric. C3 LLM answer evaluation is paused.
+4. [Data Card](docs/DATA_CARD.md): provenance, license, counts and dataset risks.
+
+Personal implementation and merge plans are kept separately under `docs/local/`
+and excluded from Git. They are historical planning records, not public status
+reports or evidence that tickets are complete.
 
 ## Contributing
 

@@ -1,16 +1,20 @@
-import json
 import bm25s
+import json
 import numpy as np
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import re
-import pyarrow as pa
-from src.contracts import SearchRequest, UserContext
+from datetime import datetime, timezone
+from hashlib import md5
+from src.contracts import Chunk, Evidence, SearchRequest, UserContext
 from src.data.corpus import build_corpus, extract_document, question_coverage
 from src.evaluation.run_retrieval import load_questions, run
 from src.retrieval.corpus_bm25 import BM25Config, CorpusBM25, build_bm25, tokenize
-from hashlib import md5
 from src.retrieval.corpus_dense import CorpusDense, embed_corpus, windows
+from src.retrieval.fusion import reciprocal_rank_fusion
+from src.retrieval.hybrid import HybridConfig, HybridRetriever
+from src.retrieval.reranker import CrossEncoderReranker
 
 
 # Corpus and BM25
@@ -228,6 +232,30 @@ def test_windows_cover_document_with_overlap():
         windows(offsets, window=3, overlap=3)
 
 
+def test_dense_streaming_matches_reference_and_reuses_corpus(corpus, tmp_path):
+    import faiss
+    out = tmp_path / "dense"
+    model = FakeModel()
+    manifest = embed_corpus(corpus, out, model, shard_docs=2, window=4, overlap=1)
+    names = [f"shard_{i:05d}" for i in range(manifest["shards"])]
+    vectors = np.concatenate([np.load(out / f"{n}.npy") for n in names]).astype(np.float32)
+    faiss.normalize_L2(vectors)
+    metadata = [pq.read_table(out / f"{n}.parquet") for n in names]
+    docs = np.concatenate([t.column("doc_index").to_numpy() for t in metadata])
+    ids = json.loads((out / "doc_ids.json").read_text())
+    reference = CorpusDense(vectors, docs, ids, model, manifest)
+    shared = pq.read_table(corpus)
+    loaded = CorpusDense.load(out, model, corpus_path=corpus, corpus=shared)
+    assert loaded.corpus is shared
+    assert loaded.index.ntotal == len(vectors)
+    for query in ("canary rollback", "grid elevation", "quarterly forecast"):
+        assert loaded.rank(query, 4) == reference.rank(query, 4)
+    first = out / "shard_00000.npy"
+    np.save(first, np.load(first)[:-1])
+    with pytest.raises(ValueError, match="inconsistent"):
+        CorpusDense.load(out, model)
+
+
 @pytest.fixture
 def corpus(tmp_path):
     table = {
@@ -290,3 +318,200 @@ def test_load_rejects_incomplete_or_mismatched_embeddings(corpus, tmp_path):
     (out / "manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="incomplete"):
         CorpusDense.load(out, FakeModel())
+
+
+def test_bm25_cutoff_ties_are_independent_of_document_order():
+    for doc_ids in (["z", "y", "x", "w", "v", "a"], ["v", "a", "w", "x", "y", "z"]):
+        model, _ = build_bm25(["shared"] * len(doc_ids), BM25Config())
+        index = CorpusBM25(model, doc_ids, BM25Config())
+        assert [doc for doc, _ in index.rank("shared", 2)] == ["a", "v"]
+        mask = np.array([doc != "a" for doc in doc_ids])
+        assert [doc for doc, _ in index.rank("shared", 2, mask)] == ["v", "w"]
+
+
+def test_passages_keep_exact_offsets_and_dense_representative():
+    from src.contracts import Chunk, Evidence
+    from src.retrieval.passages import bounded_passage
+    from src.retrieval.fusion import reciprocal_rank_fusion
+    text = "irrelevant filler " * 400 + " rollback canary recovery procedure " + "more filler " * 200
+    chunk = Chunk(chunk_id="original", doc_id="d", source_type="slack", text=text,
+                  start_char=17, end_char=17 + len(text))
+    whole = Evidence(citation_id="original", chunk=chunk, score=2, retrieval_method="bm25")
+    selected = bounded_passage(whole, "What is the canary rollback recovery procedure?", 500)
+    assert "rollback canary recovery procedure" in selected.chunk.text
+    lo, hi = selected.chunk.start_char - 17, selected.chunk.end_char - 17
+    assert selected.chunk.text == text[lo:hi]
+    assert selected.citation_id == f"d:{17 + lo}:{17 + hi}"
+    assert selected.chunk.chunk_id == selected.citation_id
+    assert len(selected.chunk.text) == 500
+    dense = selected.model_copy(update={"retrieval_method": "dense"})
+    fused = reciprocal_rank_fusion(((whole,), (dense,)))
+    assert fused[0].chunk == dense.chunk
+    assert fused[0].citation_id == dense.citation_id
+    assert fused[0].score == pytest.approx(2 / 61)
+    assert bounded_passage(dense, "other query", 500) is dense
+
+
+def test_bm25_search_bounds_long_document_without_changing_rank(tmp_path):
+    text = "filler " * 1200 + " rollback canary recovery procedure " + "filler " * 500
+    path = tmp_path / "long.parquet"
+    table = pa.table({"doc_id": ["d"], "title": [""], "content": [text], "source_type": ["slack"]})
+    pq.write_table(table, path)
+    index = CorpusBM25.build(path)
+    index.corpus = table
+    request = SearchRequest(query="canary rollback", user=UserContext(user_id="u", allowed_doc_ids={"d"}))
+    result = index.search(request)[0]
+    assert len(result.chunk.text) == 3000
+    assert "rollback canary recovery" in result.chunk.text
+    assert result.chunk.text == text[result.chunk.start_char:result.chunk.end_char]
+    assert result.score == pytest.approx(index.rank(request.query, 1)[0][1])
+
+
+def test_bm25_load_reuses_validated_corpus_table(corpus_index, tmp_path):
+    existing, path = corpus_index
+    shared = CorpusBM25.load(tmp_path / "index", corpus_path=path, corpus=existing.corpus)
+    assert shared.corpus is existing.corpus
+    with pytest.raises(ValueError, match="order"):
+        CorpusBM25.load(tmp_path / "index", corpus_path=path, corpus=existing.corpus.take(pa.array([4, 3, 2, 1, 0])))
+
+
+def test_reranker_receives_bounded_text_and_records_token_limit():
+    from src.contracts import Chunk, Evidence
+    from src.retrieval.reranker import CrossEncoderReranker
+    text = "filler " * 2000 + " canary rollback procedure "
+    chunk = Chunk(chunk_id="whole", doc_id="d", source_type="docs", text=text,
+                  start_char=0, end_char=len(text))
+    item = Evidence(citation_id="whole", chunk=chunk, score=1, retrieval_method="bm25")
+    seen = []
+    def score(pairs):
+        seen.extend(pairs)
+        return [1]
+    reranker = CrossEncoderReranker("offline", "a" * 40, scorer=score, max_length=256)
+    result = reranker.rerank("canary rollback", (item,), 1)[0]
+    assert len(seen[0][1]) == 3000
+    assert "canary rollback procedure" in seen[0][1]
+    assert result.chunk.text == seen[0][1]
+    assert result.citation_id == result.chunk.chunk_id
+    assert reranker.identity["max_length"] == 256
+
+
+# Hybrid fusion, reranking, and dense evidence
+
+
+
+def evidence(doc, *, source="slack", timestamp=None, text="text"):
+    chunk = Chunk(chunk_id=f"{doc}:0:{len(text)}", doc_id=doc, source_type=source,
+                  text=text, start_char=0, end_char=len(text), timestamp=timestamp)
+    return Evidence(citation_id=chunk.chunk_id, chunk=chunk, score=1, retrieval_method="bm25")
+
+
+class Fixed:
+    def __init__(self, *items):
+        self.items = items
+        self.requests = []
+    def search(self, request):
+        self.requests.append(request)
+        return self.items
+
+
+def request(**kwargs):
+    return SearchRequest(query="question", user=UserContext(user_id="u", allowed_doc_ids={"a", "b", "c"}), **kwargs)
+
+
+def test_rrf_deduplicates_documents_and_deterministic_ties():
+    a, b = evidence("a"), evidence("b")
+    duplicate = evidence("a", text="second passage")
+    out = reciprocal_rank_fusion(((b, a, duplicate), (a, b)))
+    assert [x.chunk.doc_id for x in out] == ["a", "b"]
+    assert out[0].score == pytest.approx(1 / 61 + 1 / 62)
+    assert out[0].chunk.text == "text"
+    assert all(x.retrieval_method == "hybrid" for x in out)
+    assert reciprocal_rank_fusion(((a,), (b,)), weights=(0, 1))[0].chunk.doc_id == "b"
+    with pytest.raises(ValueError):
+        reciprocal_rank_fusion(((a,),), weights=(float("nan"),))
+
+
+def test_hybrid_filters_before_reranker_and_preserves_scope():
+    old = evidence("a", timestamp=datetime(2020, 1, 1, tzinfo=timezone.utc))
+    fresh = evidence("b", timestamp=datetime(2025, 1, 1, tzinfo=timezone.utc))
+    wrong = evidence("c", source="wiki", timestamp=fresh.chunk.timestamp)
+    scored = []
+    def scorer(pairs):
+        scored.extend(pairs)
+        return [5] * len(pairs)
+    ranker = CrossEncoderReranker("offline", "a" * 40, scorer=scorer)
+    left, right = Fixed(old, fresh, wrong), Fixed(fresh)
+    hybrid = HybridRetriever(left, right, config=HybridConfig(candidate_k=30), reranker=ranker)
+    req = request(top_k=1, source_types=("slack",), after=datetime(2024, 1, 1, tzinfo=timezone.utc))
+    out = hybrid.search(req)
+    assert [x.chunk.doc_id for x in out] == ["b"]
+    assert scored == [("question", "text")]
+    assert left.requests[0].user == req.user
+    assert left.requests[0].top_k == 30
+    assert hybrid.manifest["reranker"] == ranker.identity
+    with pytest.raises(ValueError, match="authorized"):
+        HybridRetriever(Fixed(evidence("secret")), right).search(req)
+
+
+def test_unknown_date_filtered_and_empty_identity_skips_search():
+    backend = Fixed(evidence("a"))
+    hybrid = HybridRetriever(backend, backend)
+    assert hybrid.search(request(after=datetime(2024, 1, 1, tzinfo=timezone.utc))) == ()
+    backend.requests.clear()
+    assert hybrid.search(SearchRequest(query="q", user=UserContext())) == ()
+    assert backend.requests == []
+
+
+def test_reranker_checks_scores_and_pin():
+    with pytest.raises(ValueError, match="revision"):
+        CrossEncoderReranker("model", "main")
+    ranker = CrossEncoderReranker("offline", "a" * 40, scorer=lambda pairs: [0, 5])
+    assert ranker.rerank("q", (evidence("a"), evidence("b")), 1)[0].chunk.doc_id == "b"
+    for scores in ([], [float("inf")]):
+        ranker.scorer = lambda pairs: scores
+        with pytest.raises(ValueError):
+            ranker.rerank("q", (evidence("a"),), 1)
+
+
+class Model:
+    def encode(self, texts, query=False):
+        return np.array([[1, 0]], dtype=np.float32)
+
+
+def dense_index(**kwargs):
+    corpus = pa.table({"doc_id": ["a", "b"], "source_type": ["slack", "wiki"],
+                       "title": ["Title", ""], "content": ["some exact passage", "private"]})
+    options = {"corpus": corpus, "spans": np.array([[6, 10], [11, 24], [0, 7]])}
+    options.update(kwargs)
+    return CorpusDense(np.array([[.8, .2], [1., 0], [.99, .1]], dtype=np.float32),
+                       np.array([0, 0, 1]), ["a", "b"], Model(), {}, **options)
+
+
+def test_dense_returns_best_exact_passage_with_scope_and_sources():
+    index = dense_index()
+    req = SearchRequest(query="q", user=UserContext(user_id="u", allowed_doc_ids={"a"}), top_k=1)
+    item = index.search(req)[0]
+    assert item.chunk.text == "exact passage"
+    assert (item.chunk.start_char, item.chunk.end_char) == (11, 24)
+    assert item.citation_id == "a:11:24"
+    assert item.retrieval_method == "dense"
+    assert index.search(req.model_copy(update={"source_types": ("wiki",)})) == ()
+    with pytest.raises(ValueError, match="offsets"):
+        dense_index(spans=np.array([[0, 5], [0, 100], [0, 7]])).search(req)
+    with pytest.raises(ValueError, match="order"):
+        dense_index(corpus=pa.table({"doc_id": ["b", "a"]}))
+
+
+def test_reranker_cannot_inject_or_change_candidates():
+    class Inject:
+        def rerank(self, query, items, top_k):
+            return (evidence("b").model_copy(update={"retrieval_method": "hybrid"}),)
+    with pytest.raises(ValueError, match="outside filtered"):
+        HybridRetriever(Fixed(evidence("a")), Fixed(), reranker=Inject()).search(request())
+
+
+def test_hybrid_requires_matching_index_documents():
+    a, b = Fixed(), Fixed()
+    a.doc_ids, b.doc_ids = ["a"], ["b"]
+    with pytest.raises(ValueError, match="same documents"):
+        HybridRetriever(a, b)
