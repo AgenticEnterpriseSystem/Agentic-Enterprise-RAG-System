@@ -1,7 +1,7 @@
 """Split questions while keeping shared references and duplicate questions together."""
 
 import random
-from collections import Counter
+from collections import Counter, defaultdict
 
 
 def build_splits(questions: list[dict], seed: int = 5980) -> dict:
@@ -73,3 +73,18 @@ def build_splits(questions: list[dict], seed: int = 5980) -> dict:
         "slice_counts": {k: dict(sorted(v.items())) for k, v in counts.items()},
         "golden_development_ids": sorted(golden),
     }
+
+
+def select_questions(questions, count):
+    """Deterministic category round-robin, independent of model outcomes."""
+    if not 1 <= count <= len(questions):
+        raise ValueError("Question count must fit the development set")
+    groups = defaultdict(list)
+    for q in sorted(questions, key=lambda q: q['question_id']):
+        groups[q['question_type']].append(q)
+    selected = []
+    while len(selected) < count:
+        for category in sorted(groups):
+            if groups[category] and len(selected) < count:
+                selected.append(groups[category].pop(0))
+    return selected

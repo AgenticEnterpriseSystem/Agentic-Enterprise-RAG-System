@@ -16,6 +16,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from src.config import CORPUS_DIR, EMBEDDING_MODEL, EMBEDDING_REVISION, ROOT
+from src.contracts import Chunk, Evidence, SearchRequest, validate_evidence
 from src.retrieval.corpus_bm25 import document_text, file_sha256
 
 INDEX_VERSION = 1
@@ -155,19 +156,37 @@ def embed_corpus(
 
 
 class CorpusDense:
-    def __init__(self, vectors, doc_index, doc_ids, model, manifest):
-        self.index = faiss.IndexFlatIP(vectors.shape[1])
-        self.index.add(vectors)
+    def __init__(self, vectors, doc_index, doc_ids, model, manifest, *, corpus=None, spans=None, index=None):
+        self.index = index if index is not None else faiss.IndexFlatIP(vectors.shape[1])
+        if index is None:
+            self.index.add(vectors)
+        if self.index.ntotal != len(doc_index):
+            raise ValueError("Embedding shards are inconsistent")
         self.doc_index = doc_index
         self.doc_ids = doc_ids
         self.model = model
         self.manifest = manifest
+        self.corpus, self.spans = corpus, spans
+        self.position = {doc: i for i, doc in enumerate(doc_ids)}
+        if len(self.position) != len(doc_ids):
+            raise ValueError("Duplicate document IDs")
+        if np.any(doc_index < 0) or np.any(doc_index >= len(doc_ids)):
+            raise ValueError("Passage document index outside corpus")
+        if corpus is not None and corpus.column("doc_id").to_pylist() != list(doc_ids):
+            raise ValueError("Corpus document order differs from embeddings")
+        if spans is not None and len(spans) != len(doc_index):
+            raise ValueError("Passage offset count differs from embeddings")
 
     def rank(self, query: str, top_k: int, mask: np.ndarray | None = None):
         """Return (doc_id, score) for the top documents by best passage score."""
         return self.rank_vector(self.model.encode([query], query=True)[0], top_k, mask)
 
     def rank_vector(self, vector, top_k, mask=None):
+        return [(self.doc_ids[d], score) for d, score, _ in self._rank_passages(vector, top_k, mask)]
+
+    def _rank_passages(self, vector, top_k, mask=None):
+        if top_k < 1:
+            raise ValueError("top_k must be positive")
         vector = np.asarray(vector, dtype=np.float32).reshape(1, -1)
         fetch = min(max(10 * top_k, 100), self.index.ntotal)
         while True:
@@ -178,17 +197,57 @@ class CorpusDense:
                     continue
                 doc = int(self.doc_index[position])
                 if (mask is None or mask[doc]) and doc not in best:
-                    best[doc] = float(score)  # Results are sorted, so first is max.
+                    best[doc] = (float(score), int(position))  # Results are sorted, so first is max.
             if len(best) >= top_k or fetch == self.index.ntotal:
                 break
             fetch = min(fetch * 4, self.index.ntotal)
         ranked = sorted(
-            best.items(), key=lambda item: (-item[1], self.doc_ids[item[0]])
+            best.items(), key=lambda item: (-item[1][0], self.doc_ids[item[0]])
         )
-        return [(self.doc_ids[d], s) for d, s in ranked[:top_k]]
+        return [(d, score, position) for d, (score, position) in ranked[:top_k]]
+
+    def search(self, request: SearchRequest):
+        """Return the best exact title/content passage of each authorized document."""
+        if self.corpus is None or self.spans is None:
+            raise ValueError("Load embeddings with corpus_path to return evidence")
+        if request.user.user_id is None or not request.user.allowed_doc_ids:
+            return ()
+        # The upstream corpus has no timestamp column; unknown dates fail date filters.
+        if request.after or request.before:
+            return ()
+        mask = np.zeros(len(self.doc_ids), dtype=bool)
+        for doc in request.user.allowed_doc_ids:
+            if doc in self.position:
+                mask[self.position[doc]] = True
+        if request.source_types:
+            mask &= np.isin(self.corpus.column("source_type").to_pylist(), request.source_types)
+        if not mask.any():
+            return ()
+        vector = self.model.encode([request.query], query=True)[0]
+        results = []
+        for doc, score, position in self._rank_passages(vector, request.top_k, mask):
+            # Avoid Arrow's 32-bit string-offset overflow on the full corpus.
+            row = self.corpus.slice(doc, 1).to_pylist()[0]
+            text = document_text(row["title"], row["content"])
+            start, end = map(int, self.spans[position])
+            if not 0 <= start < end <= len(text):
+                raise ValueError("Passage offsets outside document text")
+            chunk = Chunk(chunk_id=f"{row['doc_id']}:{start}:{end}", doc_id=row["doc_id"],
+                          source_type=row["source_type"], title=row["title"],
+                          text=text[start:end], start_char=start, end_char=end)
+            results.append(Evidence(citation_id=chunk.chunk_id, chunk=chunk,
+                                    score=score, retrieval_method="dense"))
+        results = tuple(results)
+        validate_evidence(request.user, results)
+        return results
 
     @classmethod
-    def load(cls, directory: Path, model=None, corpus_path: Path | None = None):
+    def load(cls, directory: Path, model=None, corpus_path: Path | None = None, *, corpus=None):
+        """Load exact FAISS search one shard at a time; optionally reuse a corpus table.
+
+        Only one writable float32 shard exists outside FAISS at a time. Passing
+        corpus_path still verifies the index hash when corpus is shared.
+        """
         manifest = json.loads((directory / "manifest.json").read_text())
         if manifest.get("version") != INDEX_VERSION or not manifest.get("complete"):
             raise ValueError("Embedding directory is incomplete or unsupported")
@@ -200,20 +259,39 @@ class CorpusDense:
         if model is not None and model.identity != manifest["model"]:
             raise ValueError("Query model settings differ from the embeddings")
         names = [f"shard_{i:05d}" for i in range(manifest["shards"])]
-        vectors = np.concatenate(
-            [np.load(directory / f"{n}.npy") for n in names]
-        ).astype(np.float32)
-        doc_index = np.concatenate(
-            [
-                pq.read_table(directory / f"{n}.parquet").column("doc_index").to_numpy()
-                for n in names
-            ]
-        )
+        index = None
+        doc_parts, span_parts = [], []
+        for name in names:
+            # A private writable float32 copy is required for normalization;
+            # mmap avoids retaining all original fp16 shards in memory.
+            stored = np.load(directory / f"{name}.npy", mmap_mode="r")
+            if stored.ndim != 2:
+                raise ValueError("Embedding shards are inconsistent")
+            table = pq.read_table(directory / f"{name}.parquet")
+            if len(stored) != len(table):
+                raise ValueError("Embedding shards are inconsistent")
+            if index is None:
+                index = faiss.IndexFlatIP(stored.shape[1])
+            elif stored.shape[1] != index.d:
+                raise ValueError("Embedding shard dimensions differ")
+            vectors = np.array(stored, dtype=np.float32, order="C", copy=True)
+            faiss.normalize_L2(vectors)  # Undo fp16 rounding of vector norms.
+            index.add(vectors)
+            del vectors, stored
+            doc_parts.append(table.column("doc_index").to_numpy())
+            span_parts.append(np.column_stack((table.column("start_char").to_numpy(),
+                                              table.column("end_char").to_numpy())))
+        if index is None:
+            raise ValueError("Embedding directory has no shards")
+        doc_index = np.concatenate(doc_parts)
+        spans = np.concatenate(span_parts)
         doc_ids = json.loads((directory / "doc_ids.json").read_text())
-        if len(vectors) != len(doc_index) or len(doc_ids) != manifest["documents"]:
+        if len(doc_ids) != manifest["documents"]:
             raise ValueError("Embedding shards are inconsistent")
-        faiss.normalize_L2(vectors)  # Undo fp16 rounding of vector norms.
-        return cls(vectors, doc_index, doc_ids, model, manifest)
+        if corpus is None and corpus_path is not None:
+            corpus = pq.read_table(corpus_path, columns=["doc_id", "source_type", "title", "content"])
+        return cls(None, doc_index, doc_ids, model, manifest, corpus=corpus,
+                   spans=spans, index=index)
 
 
 def main():

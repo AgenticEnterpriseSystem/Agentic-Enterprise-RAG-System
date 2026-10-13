@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from statistics import median
 
-from src.config import CORPUS_DIR, ROOT
+from src.config import CORPUS_DIR, ROOT, runtime_versions
 from src.evaluation.retrieval_metrics import evaluate_retrieval
 
 KS = (5, 10, 20)
@@ -128,6 +128,7 @@ def main():
         "questions": len(rows),
         "top_k": args.top_k,
         "code": git_state(),
+        "runtime": runtime_versions(),
         "corpus": {
             k: corpus[k] for k in ("repo", "commit", "documents", "content_sha256")
         },

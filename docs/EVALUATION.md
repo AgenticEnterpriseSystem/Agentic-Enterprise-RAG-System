@@ -1,65 +1,74 @@
-# Evaluation protocol
+# Evaluation
 
-Retrievers, generation adapter, splits, retrieval metrics, and a full-corpus
-retrieval runner are implemented. Answer scoring remains to be built. BM25+ and
-BGE-small development results are in [full-corpus baselines](FULL_CORPUS.md).
+## What works now
 
-## Data splits
+- Retrieval scoring: Recall@5/10/20 and nDCG, overall and by question/source slice.
+- Offline tests: schema, citation references, permissions, and agent behavior.
+- A fixed 20-question development comparison: selected evidence, context size and
+  search timing; a separate dense-load check records process peak memory.
 
-Use the dataset commit in `src/config.py` and the frozen IDs in
-`evaluation/splits.json`, which divide the benchmark's 500 questions:
+**C3 LLM answer evaluation is paused.** Answer correctness, completeness and
+claim-level citation support have not been established by these checks.
 
-| Set | Questions | Use |
-| --- | --- | --- |
-| Development | 300 | Baselines, debugging, and model selection |
-| Calibration | 100 | Critic thresholds and evidence-sufficiency labels |
-| Final | 100 | Evaluation after settings are frozen |
+## Commands and outputs
 
-Seed: 5980. Questions sharing reference documents or identical normalized text
-stay together, including transitive overlap. Assignment balances question types
-at a target ratio of 60/20/20; keeping groups intact takes priority. Other shared
-projects and near-duplicates may still cross splits.
+Use the [README everyday commands](../README.md#everyday-commands) for tests,
+BM25 readiness and `python -m src.evaluation.compare_fixes --label my-check`.
+Use a fresh label; outputs stay in `.cache/fix-comparison/`. Add `--memory` for
+an isolated full dense-index load without a query model. `--legacy-ties` only
+reproduces the earlier cutoff-rule comparison.
 
-The development regression set contains six questions per category (60 total).
-Use the full
-development set for baseline tables. Version changes to splits; do not tune on
-final outcomes. Documents form a shared search corpus. Reference answers belong
-only in the evaluator. We do not train a model or use benchmark data for training.
+Full-development retrieval uses `python -m src.evaluation.run_retrieval`; see
+[README setup](../README.md#quick-start). Pass `--output` with a fresh directory,
+as the default paths target historical results under `evaluation/results/`.
+Evaluation code lives in `src/evaluation/`; frozen inputs/results in `evaluation/`;
+correctness tests in `tests/`; large local artifacts and new outputs in `.cache/`.
 
-## Baselines
+Reference-document retention only checks IDs, not whether passages support answers.
+Single-run timing/memory observations depend on host load and filesystem caches.
+The offline comparison makes no LLM calls, downloads or index builds.
 
-Compare BM25+ and pretrained BGE-small dense retrieval with the same corpus,
-questions, generator/prompt, top-k, context budget, and access policy. Add hybrid
-retrieval and agentic search later. Record code commit, model/dependency versions,
-seed, corpus hash, and settings. These are project comparisons, not official
-leaderboard reproductions.
+## Frozen splits
 
-## Metrics
+| Split | Questions | Purpose |
+| --- | ---: | --- |
+| Development | 300 | Debugging, baselines, model selection |
+| Calibration | 100 | Critic thresholds and sufficiency labels |
+| Final | 100 | Evaluate only after settings are frozen |
 
-| Metric | Definition |
-| --- | --- |
-| Recall@5/10/20 | Relevant documents retrieved / all labeled relevant documents, averaged per question |
-| nDCG@10 | Binary relevance: sum(rel_i / log2(i+1)), divided by ideal DCG |
-| Correctness | Fraction of answers without substantive factual errors; unjustified abstention fails |
-| Completeness | Fraction of reference answer facts correctly covered, averaged per question |
-| Citation support | Supported factual claims / factual claims |
-| Abstention | Report correct abstention on unanswerable questions and unnecessary abstention separately |
-| Efficiency | Median/p95 latency, API calls, tokens, USD/query, and search rounds, including retries |
+IDs are in `evaluation/splits.json`, seed 5980. Shared references or identical
+normalized questions stay together, including transitive overlap. Grouping takes
+priority over the 60/20/20 category balance; projects/near-duplicates may still
+cross splits. The separate regression set has 60 questions, six per category;
+the comparison command uses its own fixed 20-question sample. Do not tune on final
+labels. Documents form one shared corpus; gold answers never enter runtime inputs.
 
-Scoring rules:
+## Comparison and scoring rules
 
-- Deduplicate chunks by document ID, preserving first rank, before applying k.
-- No relevant-document IDs means N/A for retrieval metrics. No answer facts means
-  N/A for completeness; no factual claims means N/A for citation support. Report
-  exclusion counts. Empty relevance labels alone do not establish unanswerability.
-- Keep missing corpus documents in recall denominators and report corpus coverage.
-- Eligible error rows score zero; count errors/timeouts instead of dropping them.
-- Separate judge cost from serving cost, state prices, and mark unknown usage.
-- Report category scores and counts, plus single/multiple-document and source
-  slices. Source slices may overlap. Use paired differences and confidence
-  intervals for later comparisons; avoid strong conclusions from small slices.
+- Keep corpus, questions, access policy, top-k and context limits equal. For
+  answer comparisons, also match the generator and prompt. Record code, model,
+  package versions, corpus hash, seed and settings; count retries once.
+- Deduplicate chunks by document ID before scoring ranks. Recall is retrieved
+  references divided by labeled references; nDCG uses binary relevance discounted
+  by `log2(rank + 1)` and normalizes by the ideal ranking.
+- No reference IDs means N/A for retrieval, with exclusion counts. Empty labels
+  do not establish unanswerability. Keep missing corpus references in denominators.
+  Eligible retrieval errors score zero; count errors and timeouts.
+- Separate synthetic access tests from unrestricted benchmark scores. Schema or
+  citation-reference validity does not establish correctness; access leaks fail.
+- Report sample counts, overall/category/source scores and median/p95 latency,
+  calls, rounds, tokens and cost. Source slices can overlap. Use paired comparisons
+  and confidence intervals; avoid strong conclusions from small samples. Unknown
+  cost is null, and judge costs are separate from serving costs.
 
-## Answer rubric
+<details>
+<summary>Planned C3 answer rubric and review — paused</summary>
+
+Planned measures: correctness (no substantive factual errors), completeness
+(reference facts covered), citation support (supported claims divided by claims),
+and appropriate abstention. Unjustified refusal fails correctness. No answer facts
+means N/A for completeness; no factual claims means N/A for citation support.
+Report correct and unnecessary abstentions separately.
 
 Score each applicable dimension separately from 0 to 2. A usable answer needs 2
 on each; an average should not conceal factual errors.
@@ -93,8 +102,5 @@ abstention. Note uncertainty; a selected failure sample cannot estimate overall
 failure rates. Later add critic confusion counts and useful/redundant search
 rounds. Evaluate fixes on the same development set.
 
-## Milestone 2
 
-Deliver the Data Card, runnable harness, two baseline tables, validated rubric,
-failure analysis, README commands/output, and TA check-in. Hybrid reranking and
-the critic are not required for this checkpoint.
+</details>

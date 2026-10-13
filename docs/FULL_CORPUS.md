@@ -1,90 +1,40 @@
-# Baselines on the full dataset
+# Baseline retrieval results
 
-We compare two standard ways of finding documents, run over all 511,958 documents
-of EnterpriseRAG-Bench. They are the starting point our agentic system must beat.
+BM25+ and BGE-small searched all **511,958 documents**. Each returned its top 20
+for **300 development questions**; 18 lack reference-document labels, leaving
+**282 scored questions**. These are retrieval scores, not answer-quality scores.
 
-## At a glance
+| Method | Recall@5 | Recall@10 | Recall@20 | nDCG@10 |
+| --- | ---: | ---: | ---: | ---: |
+| BM25+ | 0.625 | **0.692** | 0.747 | **0.604** |
+| BGE-small + FAISS | 0.382 | 0.468 | 0.525 | 0.367 |
 
-| | BM25+ | BGE-small + FAISS |
-| --- | --- | --- |
-| **Idea** | Keyword search: find documents that share the question's words | Meaning search: find documents with similar meaning, even with different words |
-| **Assignment role** | Simple baseline | Open-source reference baseline |
-| **Recall@10** | **0.692** | 0.468 |
-| **nDCG@10** | **0.604** | 0.367 |
-| **Time per question** | ~20 ms (CPU) | ~130 ms (GPU) |
-| **Setup time** | ~5 minutes to build the index (CPU) | ~2 hours to embed the documents (GPU) |
+Recall measures the share of reference documents found; nDCG also rewards higher
+ranks. Historical query times were about 20 ms for BM25 on CPU and 130 ms for BGE
+on GPU. Builds took roughly five minutes and two hours respectively. Hardware
+and run settings differ, so these are not controlled latency comparisons.
 
-**Bottom line:** keyword search is clearly better on this dataset. A weighted
-merge of both methods helps slightly, which makes hybrid search a reasonable next
-step.
+## Findings
 
-## How we measure
+- BM25 had higher average scores in every scored category. It won on Recall@10
+  for 88 questions; BGE won on 14; 180 tied. The documented mean gap was 0.22
+  (95% confidence interval 0.17–0.28).
+- BGE retrieved reference documents for 10 of the 72 questions where BM25 found
+  none in its top 10. Both methods failed on 62 questions.
+- A historical saved-ranking merge scored 0.686 with equal weights and 0.705
+  with BM25 weights of 0.6–0.8 (11 questions better, four worse than BM25).
+  Those weights were chosen on development; improvement needs held-out validation.
+  This is not a measurement of the current hybrid pipeline and its defaults.
+- Reworded questions remain difficult: Recall@10 was 0.413 for BM25 and 0.160
+  for BGE. Internal IDs/codenames and closely scored similar documents are possible
+  explanations, not established causes. Earlier analysis reproduced BGE scores
+  on ten missed questions; reference documents ranked below returned documents.
 
-We use the 300 **development** questions. 18 of them (high-level and
-"information not found" questions) have no correct documents to find, so they are
-not scored, leaving **282 scored questions**.
+Live hybrid/reranker and LLM answer quality remain unmeasured. **C3 is paused**;
+the final 100 questions remain untouched until settings are frozen.
 
-For each question, a method returns its 20 best documents. We then check:
-
-- **Recall@k**: what share of the correct documents appear in the top *k*
-  results. Example: a question with 2 correct documents, and 1 of them in the
-  top 10, scores 0.5 Recall@10.
-- **nDCG@k**: like recall, but finding a correct document at rank 1 counts more
-  than at rank 10. 1.0 means every correct document is ranked at the very top.
-
-Scores are averaged over all scored questions.
-
-## The data
-
-We build the dataset from the benchmark's GitHub repository, pinned to one version
-so results are reproducible:
-
-```sh
-python -m src.data.corpus --clone
-```
-
-This downloads the repository (about 5 GB) and saves all documents into one file,
-`.cache/corpus/documents.parquet`. All 722 documents that the 500 questions point
-to are included.
-
-## Baseline 1: BM25+ (keyword search)
-
-**How it works:** BM25+ scores each document by how many of the question's words
-it contains. Rare words (like a project codename) count more than common words
-(like "the" or "update"), and very long documents are not unfairly favored. We
-index each document's title and text as one unit and use the
-[`bm25s`](https://github.com/xhluca/bm25s) library.
-
-**Run it:**
-
-```sh
-python -m src.retrieval.corpus_bm25          # build the index (~5 min, ~8 GB memory)
-python -m src.evaluation.run_retrieval --method bm25 --split development
-```
-
-## Baseline 2: BGE-small + FAISS (meaning search)
-
-**How it works:**
-
-1. The pretrained model [BGE-small](https://huggingface.co/BAAI/bge-small-en-v1.5)
-   turns text into a list of numbers (an "embedding"). Texts with similar meaning
-   get similar numbers.
-2. The model reads at most 512 tokens (word pieces) at a time, and most documents
-   are longer, so each document is split into overlapping passages. The full
-   dataset becomes 1,724,015 passages.
-3. [FAISS](https://github.com/facebookresearch/faiss) finds the passages most
-   similar to the question. Each document gets the score of its best passage.
-
-**Run it:** embedding 1.7 million passages takes more than a day on a normal
-computer, so we run it on a GPU. Open
-[`notebooks/dense_baseline_colab.ipynb`](../notebooks/dense_baseline_colab.ipynb)
-in Google Colab, select a T4 GPU, and run all cells. On a free T4 the embedding
-took 1 hour 50 minutes. Progress is saved to Google Drive, so if Colab
-disconnects, run the cells again and it continues where it stopped.
-
-## Results
-
-Development questions, 282 scored. **Bold** marks the better method.
+<details>
+<summary>Detailed category scores</summary>
 
 | Question type | Questions | BM25+ Recall@10 | BGE Recall@10 | BM25+ nDCG@10 | BGE nDCG@10 |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -107,52 +57,17 @@ Recall at other cutoffs:
 
 Categories with 12–24 questions are small, so treat their scores as rough.
 
-## What we learned
+</details>
 
-1. **Keyword search wins everywhere.** BM25+ is better in every question type.
-   Question by question, BM25+ does better on 88, BGE on 14, and they tie on 180.
-   The average gap in Recall@10 is 0.22 (95% confidence interval 0.17–0.28), so
-   this is not luck.
-2. **The BGE result.** We independently recomputed BGE's
-   scores for 10 questions it missed and got the same numbers. The correct
-   documents simply score lower than the ones BGE returned.
-3. **Why BGE struggles (our current explanation).** BGE gives many related
-   documents nearly the same score (the 1st and 20th results often differ by only
-   0.01–0.05), so similar documents crowd out the right one. The dataset is also
-   full of internal codenames and IDs, which exact word matching handles well and
-   a small general-purpose model does not.
-4. **Reworded questions are hard for both.** "Semantic" questions avoid the
-   document's wording, which should help meaning search, yet BGE scores lower
-   (0.160 vs 0.413). We have not investigated why yet
-5. **Merging helps a little when BM25+ is weighted more.** BGE finds a correct
-   document for 10 of the 72 questions where BM25+'s top 10 has none. Merging the
-   two ranked lists with equal weight (RRF) gives Recall@10 of 0.686, slightly
-   below BM25+ alone (0.692), because BGE's weaker results push out correct ones.
-   Weighting BM25+ at 0.6–0.8 gives 0.705 (11 questions better, 4 worse). The
-   weight was chosen on the development split, so this should be confirmed on the
-   calibration split. 62 questions fail with both methods, so larger gains likely
-   need re-ranking, query rewriting, or a stronger embedding model.
+## Saved results
 
-
-**Ideas to improve meaning search (not tried yet):** shorter passages, a larger
-embedding model, or re-ranking the top results with a stronger model.
-
-**Not run yet:** the final split (100 questions) stays untouched until our
-settings are final.
-
-## Where the results are
-
-| Folder | Contents |
-| --- | --- |
-| `evaluation/results/bm25_full_development/` | BM25+ results |
-| `evaluation/results/dense_full_development/` | BGE results |
-
-Each folder has:
-
-- `summary.json`: all scores, including breakdowns by source and by number of
-  correct documents
-- `predictions.jsonl`: the top 20 documents returned for each question
-- `upstream_answers.jsonl`: the top 10 in the benchmark's own format
+[BM25 results](../evaluation/results/bm25_full_development/) and
+[BGE results](../evaluation/results/dense_full_development/) each contain:
+`summary.json` (scores and slices), `predictions.jsonl` (top 20 IDs/scores), and
+`upstream_answers.jsonl` (top ten in benchmark format). These files do not contain
+the corpus or indexes. Setup and reproduction commands are in
+[README](../README.md#quick-start); dataset provenance is in the
+[Data Card](DATA_CARD.md).
 
 ## Reproducibility details
 

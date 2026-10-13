@@ -25,3 +25,19 @@ class Settings(BaseModel):
 
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 EMBEDDING_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
+
+
+def runtime_versions():
+    """Record installed inference/data libraries without importing model stacks."""
+    import importlib.metadata
+    import platform
+
+    packages = {}
+    for name in ("numpy", "bm25s", "pyarrow", "sentence-transformers",
+                 "faiss-cpu", "pydantic", "anthropic", "torch", "transformers"):
+        try:
+            packages[name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            packages[name] = None
+    return {"python": platform.python_version(), "platform": platform.platform(),
+            "packages": packages}
