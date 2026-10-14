@@ -11,6 +11,7 @@ Start with the [README commands](../README.md#everyday-commands).
 | `corpus_manifest.json` | Record of the exact dataset used: source commit, document counts, and a content fingerprint. Written by `python -m src.data.corpus`. |
 | `results/bm25_full_development/` | BM25+ baseline results on the development split |
 | `results/dense_full_development/` | BGE-small + FAISS baseline results on the development split |
+| `results/dense_titled_full_development/` | BGE-small with the document title on every passage (experiment) |
 
 Each results folder contains `summary.json` (all scores), `predictions.jsonl` (the
 top 20 documents per question), and `upstream_answers.jsonl` (the top 10 in the

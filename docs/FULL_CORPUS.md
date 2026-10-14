@@ -8,6 +8,7 @@ for **300 development questions**; 18 lack reference-document labels, leaving
 | --- | ---: | ---: | ---: | ---: |
 | BM25+ | 0.625 | **0.692** | 0.747 | **0.604** |
 | BGE-small + FAISS | 0.382 | 0.468 | 0.525 | 0.367 |
+| BGE-small, title on every passage | 0.398 | 0.481 | 0.555 | 0.385 |
 
 Recall measures the share of reference documents found; nDCG also rewards higher
 ranks. Historical query times were about 20 ms for BM25 on CPU and 130 ms for BGE
@@ -61,8 +62,9 @@ Categories with 12–24 questions are small, so treat their scores as rough.
 
 ## Saved results
 
-[BM25 results](../evaluation/results/bm25_full_development/) and
-[BGE results](../evaluation/results/dense_full_development/) each contain:
+[BM25 results](../evaluation/results/bm25_full_development/),
+[BGE results](../evaluation/results/dense_full_development/), and
+[titled BGE results](../evaluation/results/dense_titled_full_development/) each contain:
 `summary.json` (scores and slices), `predictions.jsonl` (top 20 IDs/scores), and
 `upstream_answers.jsonl` (top ten in benchmark format). These files do not contain
 the corpus or indexes. Setup and reproduction commands are in
@@ -87,16 +89,38 @@ the corpus or indexes. Setup and reproduction commands are in
   BGE index's corpus file hash differs from the local one because the file was
   rebuilt on Colab; the document content fingerprint is identical.
 
-## Experiment in progress: title on every passage
+## Experiment: title on every passage
 
-In the baseline above, only a document's first passage contains its title, so later
-passages of a long email, ticket, or CRM record lose the customer or feature name.
+**Result: a small, not statistically clear improvement.** In the original BGE run,
+only a document's first passage contains its title, so later passages of a long
+email, ticket, or CRM record lose the customer or feature name.
 `python -m src.retrieval.corpus_dense --title-every-passage` prefixes the title
 (capped at 48 tokens) to every passage; spans still point into the original text.
-Run it with `TITLE_EVERY_PASSAGE = True` in
-[`notebooks/dense_baseline_colab.ipynb`](../notebooks/dense_baseline_colab.ipynb);
-results go to `evaluation/results/dense_titled_full_development/`.
+It was run with `TITLE_EVERY_PASSAGE = True` in
+[`notebooks/dense_baseline_colab.ipynb`](../notebooks/dense_baseline_colab.ipynb)
+on a Colab High-RAM T4, from commit `2ab9ec8` (26 shards, all 511,958 documents).
 
-A small pilot (40 development questions, each ranking about 40 candidate documents
-rather than the full corpus) raised BGE Recall@10 from 0.367 to 0.507 on those
-questions. It is only an indication; the full-corpus run decides the real effect.
+| | Recall@5 | Recall@10 | Recall@20 | nDCG@10 | Reference doc ranked first |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| BGE-small, original | 0.382 | 0.468 | 0.525 | 0.367 | 86 questions |
+| BGE-small, title on every passage | 0.398 | 0.481 | 0.555 | 0.385 | 93 questions |
+| BM25+ (for reference) | **0.625** | **0.692** | **0.747** | **0.604** | **155 questions** |
+
+- Per question (Recall@10): 17 improved, 13 got worse, 252 unchanged. Mean change
+  +0.013, 95% bootstrap confidence interval −0.019 to +0.045, so the gain may be noise.
+- Recall@10 by type: conflicting info 0.625 → 0.708, constrained 0.861 → 0.917,
+  intra-document 0.750 → 0.792, basic 0.505 → 0.533; semantic 0.160 → 0.133 and
+  project related 0.543 → 0.532 dropped slightly. Most categories have 12–24
+  questions, so these are rough.
+- Merged with BM25+ (saved rankings, RRF k=60), Recall@10 was 0.690 with equal
+  weights and 0.701 with BM25 weight 0.7, the same as with the original BGE run.
+- Query time was unchanged (median 127 ms on GPU).
+
+An earlier pilot (40 development questions, each ranking only about 40 candidate
+documents) had predicted a jump from 0.367 to 0.507. Titles help BGE choose among
+a few similar candidates, but on the full corpus the reference document often never
+reaches BGE's top 20 at all. Small-pool pilots are useful for screening ideas but
+overstate full-corpus gains. The passage format is not BGE-small's main weakness;
+the model itself is.
+
+Results: [`evaluation/results/dense_titled_full_development/`](../evaluation/results/dense_titled_full_development/).
