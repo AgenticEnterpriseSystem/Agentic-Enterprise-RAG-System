@@ -515,3 +515,53 @@ def test_hybrid_requires_matching_index_documents():
     a.doc_ids, b.doc_ids = ["a"], ["b"]
     with pytest.raises(ValueError, match="same documents"):
         HybridRetriever(a, b)
+
+
+class RecordingModel(FakeModel):
+    def __init__(self):
+        super().__init__()
+        self.passages = []
+
+    def encode(self, texts, query=False):
+        if not query:
+            self.passages.extend(texts)
+        return super().encode(texts, query)
+
+
+def test_title_on_every_passage_keeps_exact_spans(corpus, tmp_path):
+    from src.retrieval.corpus_bm25 import document_text
+    from src.retrieval.corpus_dense import document_passages
+
+    model = FakeModel()
+    titled = list(document_passages(["Deploy"], ["a b c d e f g"], model.offsets, 4, 1, True))[0]
+    # Title takes one token, so content windows hold three tokens each.
+    assert [text for text, _, _ in titled] == ["Deploy\na b c", "Deploy\nc d e", "Deploy\ne f g"]
+    full = document_text("Deploy", "a b c d e f g")
+    assert [full[s:e] for _, s, e in titled] == ["a b c", "c d e", "e f g"]
+    plain = list(document_passages(["Deploy"], ["a b c d e f g"], model.offsets, 4, 1))[0]
+    assert sum("Deploy" in text for text, _, _ in plain) == 1
+    # Untitled documents fall back to plain windows; title-only documents embed the title.
+    assert list(document_passages(["", "Only"], ["x y", ""], model.offsets, 4, 1, True)) == [
+        [("x y", 0, 3)],
+        [("Only", 0, 4)],
+    ]
+
+    out = tmp_path / "titled"
+    recorder = RecordingModel()
+    manifest = embed_corpus(corpus, out, recorder, shard_docs=2, window=4, overlap=1, title_every=True)
+    assert manifest["title_every_passage"] is True
+    # d0 ("Deploy", 6 words) spans several windows; each carries the title.
+    d0 = [p for p in recorder.passages if p.startswith("Deploy\n")]
+    assert len(d0) > 1 and any("deployment" in p for p in d0)
+    with pytest.raises(ValueError, match="different settings"):
+        embed_corpus(corpus, out, recorder, shard_docs=2, window=4, overlap=1)
+
+    table = pq.read_table(corpus)
+    index = CorpusDense.load(out, FakeModel(), corpus_path=corpus, corpus=table)
+    user = UserContext(user_id="u", allowed_doc_ids=frozenset({"d0", "d1", "d2", "d3"}))
+    evidence = index.search(SearchRequest(query="deploy canary rollback", user=user, top_k=4))
+    assert evidence and evidence[0].chunk.doc_id == "d0"
+    for item in evidence:
+        row = table.slice(index.position[item.chunk.doc_id], 1).to_pylist()[0]
+        text = document_text(row["title"], row["content"])
+        assert text[item.chunk.start_char:item.chunk.end_char] == item.chunk.text

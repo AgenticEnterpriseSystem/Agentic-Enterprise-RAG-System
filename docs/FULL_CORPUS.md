@@ -86,3 +86,17 @@ the corpus or indexes. Setup and reproduction commands are in
 - **Runs:** BM25+ ran on 4 CPUs. BGE ran on a Colab T4 from commit `e924855`. The
   BGE index's corpus file hash differs from the local one because the file was
   rebuilt on Colab; the document content fingerprint is identical.
+
+## Experiment in progress: title on every passage
+
+In the baseline above, only a document's first passage contains its title, so later
+passages of a long email, ticket, or CRM record lose the customer or feature name.
+`python -m src.retrieval.corpus_dense --title-every-passage` prefixes the title
+(capped at 48 tokens) to every passage; spans still point into the original text.
+Run it with `TITLE_EVERY_PASSAGE = True` in
+[`notebooks/dense_baseline_colab.ipynb`](../notebooks/dense_baseline_colab.ipynb);
+results go to `evaluation/results/dense_titled_full_development/`.
+
+A small pilot (40 development questions, each ranking about 40 candidate documents
+rather than the full corpus) raised BGE Recall@10 from 0.367 to 0.507 on those
+questions. It is only an indication; the full-corpus run decides the real effect.

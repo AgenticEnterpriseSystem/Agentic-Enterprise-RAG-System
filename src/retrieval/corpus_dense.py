@@ -23,6 +23,7 @@ INDEX_VERSION = 1
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 WINDOW_TOKENS = 500  # BGE accepts 512 tokens including [CLS]/[SEP]; leave margin.
 OVERLAP_TOKENS = 50
+TITLE_TOKENS = 48  # Cap for the title label repeated on every passage.
 PASSAGE_SCHEMA = pa.schema(
     [("doc_index", pa.int32()), ("start_char", pa.int32()), ("end_char", pa.int32())]
 )
@@ -41,6 +42,37 @@ def windows(offsets, window=WINDOW_TOKENS, overlap=OVERLAP_TOKENS):
         if end == n:
             return spans
         start = end - overlap
+
+
+def document_passages(titles, contents, offsets, window, overlap, title_every=False):
+    """Yield, per document, (text to embed, start, end) with spans into document_text.
+
+    With title_every, the content is windowed and each passage is prefixed with
+    the (capped) title, so passages after the first keep the document's name.
+    Spans then cover only the content part of the combined title + content text.
+    """
+    if not title_every:
+        texts = list(map(document_text, titles, contents))
+        for text, offs in zip(texts, offsets(texts)):
+            yield [(text[s:e], s, e) for s, e in windows(offs, window, overlap)]
+        return
+    for title, content, title_offs, content_offs in zip(
+        titles, contents, offsets(titles), offsets(contents)
+    ):
+        if not title:
+            yield [(content[s:e], s, e) for s, e in windows(content_offs, window, overlap)]
+            continue
+        kept = title_offs[:TITLE_TOKENS]
+        label = title[: kept[-1][1]] if kept else title
+        shift = len(title) + 1  # document_text joins title and content with "\n".
+        if not content_offs:
+            yield [(label, 0, len(title))] if label.strip() else []
+            continue
+        content_window = max(window - len(kept), overlap + 1)
+        yield [
+            (f"{label}\n{content[s:e]}", s + shift, e + shift)
+            for s, e in windows(content_offs, content_window, overlap)
+        ]
 
 
 class BGEModel:
@@ -97,6 +129,7 @@ def embed_corpus(
     shard_docs=20000,
     window=WINDOW_TOKENS,
     overlap=OVERLAP_TOKENS,
+    title_every=False,
 ):
     """Write one embedding shard per `shard_docs` documents; existing shards are kept."""
     output.mkdir(parents=True, exist_ok=True)
@@ -104,7 +137,13 @@ def embed_corpus(
     manifest = {
         "version": INDEX_VERSION,
         "method": "bge-small + faiss (max over passages)",
-        "unit": f"{window}-token windows, {overlap}-token overlap, of title + content",
+        "unit": (
+            f"{window}-token windows, {overlap}-token overlap, of content; "
+            f"title (max {TITLE_TOKENS} tokens) prefixed to every passage"
+            if title_every
+            else f"{window}-token windows, {overlap}-token overlap, of title + content"
+        ),
+        "title_every_passage": title_every,
         "model": model.identity,
         "corpus_sha256": file_sha256(corpus_path),
         "documents": corpus.metadata.num_rows,
@@ -113,6 +152,7 @@ def embed_corpus(
     manifest_path = output / "manifest.json"
     if manifest_path.exists():
         previous = json.loads(manifest_path.read_text())
+        previous.setdefault("title_every_passage", False)  # Older manifests.
         if {k: previous.get(k) for k in manifest} != manifest:
             raise ValueError("Existing shards were made with different settings")
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
@@ -126,11 +166,13 @@ def embed_corpus(
         name = f"shard_{shard:05d}"
         if not (output / f"{name}.npy").exists():
             began = time.perf_counter()
-            texts = list(map(document_text, rows["title"], rows["content"]))
             passages, meta = [], {"doc_index": [], "start_char": [], "end_char": []}
-            for i, (text, offsets) in enumerate(zip(texts, model.offsets(texts))):
-                for s, e in windows(offsets, window, overlap):
-                    passages.append(text[s:e])
+            per_doc = document_passages(
+                rows["title"], rows["content"], model.offsets, window, overlap, title_every
+            )
+            for i, doc_passages in enumerate(per_doc):
+                for text, s, e in doc_passages:
+                    passages.append(text)
                     meta["doc_index"].append(start + i)
                     meta["start_char"].append(s)
                     meta["end_char"].append(e)
@@ -142,7 +184,7 @@ def embed_corpus(
             np.save(output / f"{name}.tmp.npy", vectors)
             (output / f"{name}.tmp.npy").replace(output / f"{name}.npy")
             print(
-                f"{name}: {len(texts)} docs, {len(passages)} passages, "
+                f"{name}: {len(rows['doc_id'])} docs, {len(passages)} passages, "
                 f"{time.perf_counter() - began:.0f}s",
                 flush=True,
             )
@@ -302,12 +344,23 @@ def main():
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--fp32", action="store_true", help="Disable fp16 on GPU")
     parser.add_argument("--shard-docs", type=int, default=20000)
+    parser.add_argument(
+        "--title-every-passage",
+        action="store_true",
+        help="Prefix each document's title to every passage (use a new --output)",
+    )
     args = parser.parse_args()
     model = BGEModel(
         args.device, fp16=False if args.fp32 else None, batch_size=args.batch_size
     )
     started = time.perf_counter()
-    manifest = embed_corpus(args.corpus, args.output, model, args.shard_docs)
+    manifest = embed_corpus(
+        args.corpus,
+        args.output,
+        model,
+        args.shard_docs,
+        title_every=args.title_every_passage,
+    )
     print(
         json.dumps(
             {**manifest, "seconds": round(time.perf_counter() - started)}, indent=2
