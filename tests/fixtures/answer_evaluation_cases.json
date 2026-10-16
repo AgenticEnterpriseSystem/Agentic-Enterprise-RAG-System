@@ -1,0 +1,28 @@
+[
+  {
+    "question_id": "demo-1",
+    "question": "Why was Project Atlas delayed?",
+    "generated_answer": "Integration issues caused the delay.",
+    "reference_answer": "Integration issues and late hardware deliveries delayed Project Atlas.",
+    "citation_ids": ["doc-101"],
+    "evidence": [
+      {
+        "citation_id": "doc-101",
+        "text": "Project Atlas experienced integration issues."
+      }
+    ]
+  },
+  {
+    "question_id": "demo-2",
+    "question": "When was Project Orion completed?",
+    "generated_answer": "Project Orion was completed in March.",
+    "reference_answer": "Project Orion was completed in April.",
+    "citation_ids": ["doc-202"],
+    "evidence": [
+      {
+        "citation_id": "doc-202",
+        "text": "Project Orion was completed in April."
+      }
+    ]
+  }
+]
