@@ -1,0 +1,462 @@
+[
+  {
+    "question_id": "qst_0001",
+    "generation_status": "answered",
+    "scores": {
+      "correctness": 2,
+      "completeness": 2,
+      "citation_support": 2,
+      "abstention_limits": 2,
+      "reasons": {
+        "correctness": "The answer correctly states the default limits of 10\u202fMiB per file and 50\u202fMiB total, matching the reference answer.",
+        "completeness": "It includes both requested limits (per-file and total request) and no information is omitted.",
+        "citation_support": "Both claims are directly supported by the cited evidence, which specifies 10\u202fMiB per part/file and 50\u202fMiB total as defaults.",
+        "abstention_limits": "The answer provides a definitive response without refusing or noting missing evidence."
+      }
+    },
+    "usage": {
+      "input_tokens": 3730,
+      "output_tokens": 506,
+      "api_calls": 1,
+      "estimated_cost_usd": null
+    },
+    "error": null
+  },
+  {
+    "question_id": "qst_0179",
+    "generation_status": "answered",
+    "scores": {
+      "correctness": 0,
+      "completeness": 0,
+      "citation_support": 2,
+      "abstention_limits": 0,
+      "reasons": {
+        "correctness": "The generated answer attributes the routing issue to a policy\u2011cache TTL drift, whereas the reference answer cites a transient control\u2011plane heartbeat lag and stale residency\u2011stamp refresh as the root cause. The central claim is therefore incorrect.",
+        "completeness": "The answer omits the key details from the reference (heartbeat lag, stale stamp, NAT/DNS rebinds, auth timeouts) and does not cover the full causal chain described in the reference.",
+        "citation_support": "The claim about TTL drift is directly supported by the cited evidence (policy\u2011cache TTL mismatch). All factual statements in the answer are backed by the provided citation.",
+        "abstention_limits": "The answer presents a definitive explanation without acknowledging uncertainty or noting that the cited cause differs from the reference. It does not discuss potential alternative explanations or missing evidence."
+      }
+    },
+    "usage": {
+      "input_tokens": 4668,
+      "output_tokens": 891,
+      "api_calls": 1,
+      "estimated_cost_usd": null
+    },
+    "error": null
+  },
+  {
+    "question_id": "qst_0316",
+    "generation_status": "insufficient_evidence",
+    "scores": {
+      "correctness": 0,
+      "completeness": 0,
+      "citation_support": 0,
+      "abstention_limits": 1,
+      "reasons": {
+        "correctness": "The generated answer fails to provide the required facts (default retention period, access request turnaround time, and billing party) and therefore its central claim is incorrect.",
+        "completeness": "All three requested pieces of information are missing from the answer.",
+        "citation_support": "No factual claims are supported by citations.",
+        "abstention_limits": "The answer acknowledges uncertainty about billing but does not address the other two questions, so it is an incomplete refusal rather than a fully justified abstention."
+      }
+    },
+    "usage": {
+      "input_tokens": 4590,
+      "output_tokens": 765,
+      "api_calls": 1,
+      "estimated_cost_usd": null
+    },
+    "error": null
+  },
+  {
+    "question_id": "qst_0315",
+    "generation_status": "answered",
+    "scores": {
+      "correctness": 2,
+      "completeness": 2,
+      "citation_support": 2,
+      "abstention_limits": 2,
+      "reasons": {
+        "correctness": "The answer correctly states the UI indicator (per\u2011tenant escalation mode indicator) and the default grace\u2011window duration (10\u202fseconds), matching the reference answer.",
+        "completeness": "It includes both requested pieces of information and no additional or missing details.",
+        "citation_support": "The cited evidence (dsid_e6c0f4ec1f2d4937925ce9b9ef2c3057) explicitly mentions a per\u2011tenant escalation mode UI element and a 10\u2011second default grace\u2011window, fully supporting the claims.",
+        "abstention_limits": "The answer provides a direct response without refusing or omitting necessary information."
+      }
+    },
+    "usage": {
+      "input_tokens": 4253,
+      "output_tokens": 565,
+      "api_calls": 1,
+      "estimated_cost_usd": null
+    },
+    "error": null
+  },
+  {
+    "question_id": "qst_0309",
+    "generation_status": "answered",
+    "scores": {
+      "correctness": 2,
+      "completeness": 2,
+      "citation_support": 2,
+      "abstention_limits": 2,
+      "reasons": {
+        "correctness": "The answer correctly states the final deploy\u2011bot status as 'success, linkcheck warnings only (no broken fragments)', matching the reference answer.",
+        "completeness": "It fully answers the question with no missing information.",
+        "citation_support": "The claim is directly supported by the cited evidence, which contains the exact final status text.",
+        "abstention_limits": "The answer is provided and no refusal or uncertainty is present."
+      }
+    },
+    "usage": {
+      "input_tokens": 4092,
+      "output_tokens": 370,
+      "api_calls": 1,
+      "estimated_cost_usd": null
+    },
+    "error": null
+  },
+  {
+    "question_id": "qst_0399",
+    "generation_status": "answered",
+    "scores": {
+      "correctness": 2,
+      "completeness": 1,
+      "citation_support": 2,
+      "abstention_limits": 2,
+      "reasons": {
+        "correctness": "The answer correctly identifies the configuration mistake (using the ambiguous label 'latest' for both stable and canary) and accurately describes the key mitigations (forced_variant to stable-quantized, reducing sticky TTL, enabling a circuit\u2011breaker). The details are consistent with the reference answer and the supporting evidence.",
+        "completeness": "While the answer covers the main mistake and most mitigations, it omits the pause of the canary rollout and draining of eu\u2011west canary pods, which were explicitly mentioned in the reference answer and evidence. Thus it is partially complete.",
+        "citation_support": "All factual claims in the answer are backed by the cited evidence (dsid_4cfe0c490c974065bd497f06ad4a1105), which contains the relevant commands and mitigation steps.",
+        "abstention_limits": "The answer provides a definitive response without refusing or expressing uncertainty, and it does not miss any key limitations."
+      }
+    },
+    "usage": {
+      "input_tokens": 4787,
+      "output_tokens": 1189,
+      "api_calls": 1,
+      "estimated_cost_usd": null
+    },
+    "error": null
+  },
+  {
+    "question_id": "qst_0424",
+    "generation_status": "answered",
+    "scores": {
+      "correctness": 2,
+      "completeness": 2,
+      "citation_support": 2,
+      "abstention_limits": 2,
+      "reasons": {
+        "correctness": "The answer correctly states the current token-based prompt_len_bucket cutoffs (short <128, medium 128\u20131024, long >1024), matching the reference answer.",
+        "completeness": "All required information requested by the question is provided; no additional or missing details are necessary.",
+        "citation_support": "The answer cites a source (dsid_7f2a6f2d2de34f94a5b6f3d5d0d1f6a2) that contains the exact bucket definitions, fully supporting the claim.",
+        "abstention_limits": "The answer does not abstain and does not omit any key limitations; it directly addresses the question."
+      }
+    },
+    "usage": {
+      "input_tokens": 4251,
+      "output_tokens": 514,
+      "api_calls": 1,
+      "estimated_cost_usd": null
+    },
+    "error": null
+  },
+  {
+    "question_id": "qst_0412",
+    "generation_status": "answered",
+    "scores": {
+      "correctness": 2,
+      "completeness": 2,
+      "citation_support": 2,
+      "abstention_limits": 2,
+      "reasons": {
+        "correctness": "The answer correctly states that price\u2011normalization correctness is about 96% at temp=0.0 with strict JSON + canonicalization, and that it is compared to about 89% from earlier runs without canonicalization, matching the reference answer.",
+        "completeness": "Both requested pieces of information (the 96% figure and the earlier 89% comparison) are provided, covering all aspects of the question.",
+        "citation_support": "The answer includes a citation ID that points to evidence containing the exact figures and comparison, fully supporting the factual claims.",
+        "abstention_limits": "The answer does not express uncertainty or omit any key limitation; it directly addresses the question with the available evidence."
+      }
+    },
+    "usage": {
+      "input_tokens": 4598,
+      "output_tokens": 516,
+      "api_calls": 1,
+      "estimated_cost_usd": null
+    },
+    "error": null
+  },
+  {
+    "question_id": "qst_0431",
+    "generation_status": "answered",
+    "scores": {
+      "correctness": 2,
+      "completeness": 1,
+      "citation_support": 2,
+      "abstention_limits": 2,
+      "reasons": {
+        "correctness": "The answer accurately describes the emergency rollback procedure for both Hosted and Dedicated environments, matching the reference answer and the supporting runbook.",
+        "completeness": "All major steps (freeze rollout, pin tag, redeploy, verify health, lock tag, coordinate with customers, document evidence) are included. The only missing detail is the specific time windows (~30\u202fmin Hosted, ~60\u202fmin Dedicated) mentioned in the reference answer.",
+        "citation_support": "Each factual claim is backed by citations from the provided runbook and policy documents.",
+        "abstention_limits": "The answer does not abstain and fully addresses the question."
+      }
+    },
+    "usage": {
+      "input_tokens": 4238,
+      "output_tokens": 1180,
+      "api_calls": 1,
+      "estimated_cost_usd": null
+    },
+    "error": null
+  },
+  {
+    "question_id": "qst_0474",
+    "generation_status": "answered",
+    "scores": {
+      "correctness": 1,
+      "completeness": 1,
+      "citation_support": 2,
+      "abstention_limits": 2,
+      "reasons": {
+        "correctness": "The answer correctly identifies some of the optimizations (KV cache, batching, quantization) but omits others from the reference answer (modern attention optimizations, architecture/sequence\u2011length/hardware\u2011aware kernel selection) and adds a detail (batch\u2011boundary signals) that is not in the reference. Thus the main claim is partially correct.",
+        "completeness": "Key optimizations listed in the reference answer are missing, so the answer is incomplete.",
+        "citation_support": "All factual claims made in the answer are backed by the provided evidence (caching strategies, batching, quantization switches, KV cache hints, batch\u2011boundary signals).",
+        "abstention_limits": "The answer does not refuse or omit necessary information; it fully addresses the question with supported claims."
+      }
+    },
+    "usage": {
+      "input_tokens": 4529,
+      "output_tokens": 878,
+      "api_calls": 1,
+      "estimated_cost_usd": null
+    },
+    "error": null
+  },
+  {
+    "question_id": "qst_0488",
+    "generation_status": "insufficient_evidence",
+    "scores": {
+      "correctness": 2,
+      "completeness": 2,
+      "citation_support": 0,
+      "abstention_limits": 2,
+      "reasons": {
+        "correctness": "The answer correctly states that the provided evidence does not contain information about the BIOS settings or defaults, which is consistent with the documents.",
+        "completeness": "It acknowledges the lack of information and therefore covers all required facts (i.e., that the answer cannot be provided).",
+        "citation_support": "The claim that no excerpts mention the settings is not directly cited; no evidence IDs are provided to support this assertion.",
+        "abstention_limits": "The answer appropriately notes the limitation that the query cannot be fully answered from the available documents."
+      }
+    },
+    "usage": {
+      "input_tokens": 4664,
+      "output_tokens": 601,
+      "api_calls": 1,
+      "estimated_cost_usd": null
+    },
+    "error": null
+  },
+  {
+    "question_id": "qst_0139",
+    "generation_status": "insufficient_evidence",
+    "scores": {
+      "correctness": 0,
+      "completeness": 0,
+      "citation_support": 0,
+      "abstention_limits": 0,
+      "reasons": {
+        "correctness": "The generated answer states that no numeric false\u2011positive threshold is specified, which contradicts the reference answer that cites an 8% threshold. The claim is therefore incorrect.",
+        "completeness": "The answer omits the required numeric threshold and does not provide any additional relevant details, leaving the question unanswered.",
+        "citation_support": "No citations are provided to back the claim that no numeric threshold exists; the answer lacks evidence or references.",
+        "abstention_limits": "The answer does not acknowledge uncertainty or explain why the threshold might be missing; it simply asserts the absence of a numeric value."
+      }
+    },
+    "usage": {
+      "input_tokens": 4295,
+      "output_tokens": 894,
+      "api_calls": 1,
+      "estimated_cost_usd": null
+    },
+    "error": null
+  },
+  {
+    "question_id": "qst_0028",
+    "generation_status": "answered",
+    "scores": {
+      "correctness": 2,
+      "completeness": 2,
+      "citation_support": 2,
+      "abstention_limits": 2,
+      "reasons": {
+        "correctness": "The answer reproduces all the steps and commands from the reference answer: updating the branch, creating an annotated tag, signing it, pushing the tag, and creating a draft release with gh CLI. No substantive claim is incorrect.",
+        "completeness": "All required actions are listed, matching the reference answer exactly. No key detail is omitted.",
+        "citation_support": "The answer cites two sources that contain the relevant Slack conversation excerpts, providing evidence for each step. All factual claims are backed by these citations.",
+        "abstention_limits": "The answer does not refuse or omit information; it fully addresses the question and notes any uncertainty only where appropriate."
+      }
+    },
+    "usage": {
+      "input_tokens": 4722,
+      "output_tokens": 602,
+      "api_calls": 1,
+      "estimated_cost_usd": null
+    },
+    "error": null
+  },
+  {
+    "question_id": "qst_0434",
+    "generation_status": "insufficient_evidence",
+    "scores": {
+      "correctness": 0,
+      "completeness": 0,
+      "citation_support": 0,
+      "abstention_limits": 1,
+      "reasons": {
+        "correctness": "The answer states that the data is insufficient and cannot determine the industry segment, which contradicts the reference answer that identifies Fintech as the most featured segment. The central claim is therefore incorrect.",
+        "completeness": "The answer does not provide the requested industry segment or any counts, leaving the question unanswered.",
+        "citation_support": "No factual claims are supported by citations; the answer contains no references to the evidence.",
+        "abstention_limits": "The answer acknowledges uncertainty and explains that the supplied evidence does not contain the necessary data, which is a valid limitation."
+      }
+    },
+    "usage": {
+      "input_tokens": 3780,
+      "output_tokens": 478,
+      "api_calls": 1,
+      "estimated_cost_usd": null
+    },
+    "error": null
+  },
+  {
+    "question_id": "qst_0395",
+    "generation_status": "answered",
+    "scores": {
+      "correctness": 1,
+      "completeness": 1,
+      "citation_support": 2,
+      "abstention_limits": 2,
+      "reasons": {
+        "correctness": "The root\u2011cause claim matches the reference, but the planned fix differs \u2013 the reference calls for signing before compression and adding a canonicalization header, whereas the answer proposes stabilizing content\u2011encoding and adding validation, which is not what the reference states.",
+        "completeness": "The answer covers the root cause and proposes a fix, but it omits the key details from the reference (canonical signing and version header) and thus does not fully satisfy the question\u2019s requirements.",
+        "citation_support": "Both cited excerpts support the root\u2011cause claim and the proposed content\u2011encoding\u2011related fix, so all factual claims are backed by evidence.",
+        "abstention_limits": "The answer provides a definitive response without noting uncertainty or missing evidence, so it meets the abstention/limits criterion."
+      }
+    },
+    "usage": {
+      "input_tokens": 4309,
+      "output_tokens": 894,
+      "api_calls": 1,
+      "estimated_cost_usd": null
+    },
+    "error": null
+  },
+  {
+    "question_id": "qst_0489",
+    "generation_status": "insufficient_evidence",
+    "scores": {
+      "correctness": 2,
+      "completeness": 2,
+      "citation_support": 1,
+      "abstention_limits": 2,
+      "reasons": {
+        "correctness": "The answer correctly states that the provided evidence does not contain any information about the Slack channel, which is a true claim given the excerpts.",
+        "completeness": "It fulfills the requirement to note that the query cannot be answered from the available documents, covering the necessary information.",
+        "citation_support": "The claim is not directly cited; a citation to the evidence that lacks the Slack channel would strengthen it, so it receives a 1.",
+        "abstention_limits": "The answer appropriately acknowledges the limitation and does not provide unsupported or incorrect information, meeting the abstention/limits criteria."
+      }
+    },
+    "usage": {
+      "input_tokens": 4213,
+      "output_tokens": 736,
+      "api_calls": 1,
+      "estimated_cost_usd": null
+    },
+    "error": null
+  },
+  {
+    "question_id": "qst_0354",
+    "generation_status": "answered",
+    "scores": {
+      "correctness": 1,
+      "completeness": 1,
+      "citation_support": 2,
+      "abstention_limits": 2,
+      "reasons": {
+        "correctness": "The answer correctly identifies the double\u2011counting cause, explains the discrepancy between the ledger and the Usage API, and outlines a remediation path involving a credit memo. However, the approvals section diverges from the reference: it cites CFO/Legal approval for credits over $10k, whereas the reference specifies Laura Bennett and Michael Grant for such cases, and it omits the specific approvals required for retroactive ledger changes.",
+        "completeness": "The answer covers the explanation and remediation but does not mention the approvals needed for retroactive ledger changes or the full set of approvals for metering definition changes. Thus it is missing some required details.",
+        "citation_support": "All factual claims in the answer are backed by the provided citations (e.g., PR-27463, PR-27485, Tier\u20111 threshold, CFO/Legal approval). No central claim is unsupported.",
+        "abstention_limits": "The answer does not abstain and fully addresses the question, noting no missing or conflicting evidence."
+      }
+    },
+    "usage": {
+      "input_tokens": 5458,
+      "output_tokens": 1456,
+      "api_calls": 1,
+      "estimated_cost_usd": null
+    },
+    "error": null
+  },
+  {
+    "question_id": "qst_0197",
+    "generation_status": "answered",
+    "scores": {
+      "correctness": 1,
+      "completeness": 1,
+      "citation_support": 2,
+      "abstention_limits": 2,
+      "reasons": {
+        "correctness": "The answer correctly identifies a sequence of actions for the first 60\u201190 minutes, but it adds steps (customer notification, ticket creation) that are not present in the reference answer and omits the precise time\u2011window structure and the synthetic probe validation step. Thus the central claim is partially correct but not fully aligned with the prescribed sequence.",
+        "completeness": "The answer covers many of the required actions but misses the exact time\u2011based milestones and the final validation step described in the reference answer. It also includes additional actions that may not be part of the prescribed sequence, so it is not fully complete relative to the reference.",
+        "citation_support": "All factual claims in the answer are backed by the provided citation IDs, which reference the relevant playbook sections and runbook actions. No unsupported claims are present.",
+        "abstention_limits": "The answer does not abstain or express uncertainty; it provides a fully justified response."
+      }
+    },
+    "usage": {
+      "input_tokens": 4685,
+      "output_tokens": 1469,
+      "api_calls": 1,
+      "estimated_cost_usd": null
+    },
+    "error": null
+  },
+  {
+    "question_id": "qst_0211",
+    "generation_status": "answered",
+    "scores": {
+      "correctness": 0,
+      "completeness": 0,
+      "citation_support": 2,
+      "abstention_limits": 2,
+      "reasons": {
+        "correctness": "The answer proposes a different short\u2011term mitigation (increase polling window and re\u2011request tail tokens) that is not mentioned in the reference answer, which recommends enabling direct SSE passthrough or extending keepalive timeouts.",
+        "completeness": "It omits the two options given in the reference answer, so it fails to cover all required mitigation steps.",
+        "citation_support": "The claim is directly supported by the cited evidence (dsid_23438eef0a4c47f1a8921f4a74353a2b) that describes the same workaround.",
+        "abstention_limits": "The answer is provided without refusal or missing key limitations, and uncertainty is not noted."
+      }
+    },
+    "usage": {
+      "input_tokens": 4277,
+      "output_tokens": 928,
+      "api_calls": 1,
+      "estimated_cost_usd": null
+    },
+    "error": null
+  },
+  {
+    "question_id": "qst_0350",
+    "generation_status": "answered",
+    "scores": {
+      "correctness": 2,
+      "completeness": 2,
+      "citation_support": 2,
+      "abstention_limits": 2,
+      "reasons": {
+        "correctness": "The answer correctly identifies double\u2011counting of retries as the cause of the higher burst billing and explains that the fix uses an idempotency key to dedupe retry attempts, matching the reference.",
+        "completeness": "It covers both the why (retry double\u2011counting) and the how (idempotency key dedupe, backfill, and client retry guidance), addressing all parts of the question.",
+        "citation_support": "Both cited documents provide evidence for the double\u2011counting issue and the dedupe/backfill solution, supporting all factual claims.",
+        "abstention_limits": "The answer does not abstain; it fully addresses the question and notes any remaining actions."
+      }
+    },
+    "usage": {
+      "input_tokens": 4730,
+      "output_tokens": 937,
+      "api_calls": 1,
+      "estimated_cost_usd": null
+    },
+    "error": null
+  }
+]
