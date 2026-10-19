@@ -9,6 +9,7 @@ for **300 development questions**; 18 lack reference-document labels, leaving
 | BM25+ | 0.625 | **0.692** | 0.747 | **0.604** |
 | BGE-small + FAISS | 0.382 | 0.468 | 0.525 | 0.367 |
 | BGE-small, title on every passage | 0.398 | 0.481 | 0.555 | 0.385 |
+| BGE-base, title on every passage | 0.448 | 0.487 | 0.562 | 0.416 |
 
 Recall measures the share of reference documents found; nDCG also rewards higher
 ranks. Historical query times were about 20 ms for BM25 on CPU and 130 ms for BGE
@@ -63,8 +64,9 @@ Categories with 12–24 questions are small, so treat their scores as rough.
 ## Saved results
 
 [BM25 results](../evaluation/results/bm25_full_development/),
-[BGE results](../evaluation/results/dense_full_development/), and
-[titled BGE results](../evaluation/results/dense_titled_full_development/) each contain:
+[BGE results](../evaluation/results/dense_full_development/),
+[titled BGE results](../evaluation/results/dense_titled_full_development/), and
+[BGE-base results](../evaluation/results/dense_base_titled_full_development/) each contain:
 `summary.json` (scores and slices), `predictions.jsonl` (top 20 IDs/scores), and
 `upstream_answers.jsonl` (top ten in benchmark format). These files do not contain
 the corpus or indexes. Setup and reproduction commands are in
@@ -125,14 +127,39 @@ the model itself is.
 
 Results: [`evaluation/results/dense_titled_full_development/`](../evaluation/results/dense_titled_full_development/).
 
-## Experiment in progress: BGE-base
+## Experiment: BGE-base
 
-BGE-small is the smallest BGE v1.5 model. `python -m src.retrieval.corpus_dense --model
-bge-base --title-every-passage` builds the same index with `BAAI/bge-base-en-v1.5` (768-d
-vectors, about 3× slower to embed). The exact model revision is recorded in the index
-`manifest.json`, and searching loads that same model automatically. Run it with
-`MODEL = "bge-base"` in
-[`notebooks/dense_baseline_colab.ipynb`](../notebooks/dense_baseline_colab.ipynb) (T4 with
-High-RAM, roughly 5–6 hours); results go to
-`evaluation/results/dense_base_titled_full_development/` and are compared with titled
-BGE-small (Recall@10 0.481) and BM25+ (0.692).
+**Result: better ranking near the top, about the same coverage; still well behind
+BM25+.** `python -m src.retrieval.corpus_dense --model bge-base --title-every-passage`
+builds the same index with `BAAI/bge-base-en-v1.5` (768-d vectors) at revision
+`a5beb1e3e68b9ab74eb54cfd186867f64f240e1a`; searching loads the model and revision
+recorded in the index `manifest.json`. It ran with `MODEL = "bge-base"` in
+[`notebooks/dense_baseline_colab.ipynb`](../notebooks/dense_baseline_colab.ipynb) on a
+Colab T4 with High-RAM, from commit `d11eb1b` (26 shards, all 511,958 documents). Query
+time was about 250 ms on GPU, twice BGE-small's.
+
+| | Recall@5 | Recall@10 | Recall@20 | nDCG@10 | Reference doc ranked first |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| BGE-small, title on every passage | 0.398 | 0.481 | 0.555 | 0.385 | 93 questions |
+| BGE-base, title on every passage | 0.448 | 0.487 | 0.562 | 0.416 | 103 questions |
+| BM25+ (for reference) | **0.625** | **0.692** | **0.747** | **0.604** | **155 questions** |
+
+- Compared with titled BGE-small, Recall@5 rose by 0.050 (95% bootstrap confidence
+  interval +0.017 to +0.085; 28 questions better, 11 worse). Recall@10 rose by only
+  0.005 (−0.031 to +0.041; 22 better, 16 worse), which may be noise.
+- Recall@10 by type: project related 0.532 → 0.603, conflicting info 0.708 → 0.792,
+  miscellaneous 0.750 → 0.833, completeness 0.334 → 0.399; semantic 0.133 → 0.093 and
+  constrained 0.917 → 0.861 dropped. Most categories have 12–24 questions, so these are rough.
+- Of the 72 questions where BM25+ finds no reference document in its top 10, BGE-base
+  finds one for 7 (titled BGE-small: 9). The larger model ranks documents better but does
+  not reach many documents BM25+ misses.
+
+**Merged with BM25+** (saved top-20 rankings, RRF k=60), Recall@10 was 0.695 with equal
+weights and **0.712 with BM25 weight 0.7**: +0.020 over BM25+ alone (95% confidence
+interval +0.006 to +0.036; 12 questions better, two worse). This is the first merge whose
+gain over BM25+ is clearly above zero, but it is small, and the 0.7 weight was chosen on
+development questions, so it must be confirmed on the calibration split. Together, the
+two top-20 lists contain 77.7% of the reference documents (Recall@10 measures 69–71%),
+so a re-ranker over these candidates has more room than further BGE sizes.
+
+Results: [`evaluation/results/dense_base_titled_full_development/`](../evaluation/results/dense_base_titled_full_development/).

@@ -12,6 +12,7 @@ Start with the [README commands](../README.md#everyday-commands).
 | `results/bm25_full_development/` | BM25+ baseline results on the development split |
 | `results/dense_full_development/` | BGE-small + FAISS baseline results on the development split |
 | `results/dense_titled_full_development/` | BGE-small with the document title on every passage (experiment) |
+| `results/dense_base_titled_full_development/` | BGE-base with the document title on every passage (experiment) |
 
 Each results folder contains `summary.json` (all scores), `predictions.jsonl` (the
 top 20 documents per question), and `upstream_answers.jsonl` (the top 10 in the
