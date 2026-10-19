@@ -163,3 +163,14 @@ two top-20 lists contain 77.7% of the reference documents (Recall@10 measures 69
 so a re-ranker over these candidates has more room than further BGE sizes.
 
 Results: [`evaluation/results/dense_base_titled_full_development/`](../evaluation/results/dense_base_titled_full_development/).
+
+## Experiment in progress: live hybrid search and reranking
+
+`python -m src.evaluation.run_hybrid` runs the project's `HybridRetriever` over the
+BM25+ and BGE-base indexes: each question is searched once per method (top 50 documents
+from all 511,958), and every variant reuses those results. It scores RRF with equal
+weights and with BM25 weight 0.7, then the better of the two reranked by
+`bge-reranker-base` and by `bge-reranker-v2-m3` (fp16 on GPU, 50 candidates). Run it with
+[`notebooks/hybrid_colab.ipynb`](../notebooks/hybrid_colab.ipynb) (T4 with High-RAM,
+about 35–45 minutes): the best development setting, chosen by Recall@10, is then checked
+once on the calibration split against BM25+ alone. The final split is not used.

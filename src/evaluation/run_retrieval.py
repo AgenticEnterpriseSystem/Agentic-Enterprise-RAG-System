@@ -85,6 +85,57 @@ def git_state() -> dict:
     return {"commit": git("rev-parse", "HEAD") or None, "dirty": bool(changes)}
 
 
+def build_summary(rows, latencies, *, method, split, top_k, index, load_seconds, **extra):
+    """Scores plus the provenance recorded with every saved run."""
+    metrics = evaluate_retrieval(rows, KS)
+    ordered = sorted(latencies)
+    corpus = json.loads((ROOT / "evaluation" / "corpus_manifest.json").read_text())
+    return {
+        "method": method,
+        "split": split,
+        "questions": len(rows),
+        "top_k": top_k,
+        "code": git_state(),
+        "runtime": runtime_versions(),
+        "corpus": {
+            k: corpus[k] for k in ("repo", "commit", "documents", "content_sha256")
+        },
+        "index": index,
+        **extra,
+        "timing_seconds": {
+            "index_load": round(load_seconds, 2),
+            "query_median": round(median(ordered), 4),
+            "query_p95": round(ordered[int(0.95 * (len(ordered) - 1))], 4),
+            "total_queries": round(sum(ordered), 2),
+        },
+        "overall": metrics["overall"],
+        "question_types": metrics["slices"],
+        "other_slices": slice_summaries(rows),
+    }
+
+
+def write_run(output: Path, rows: list[dict], summary: dict):
+    """Write predictions, the upstream answer format, and the summary."""
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "predictions.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows)
+    )
+    # Upstream EnterpriseRAG-Bench answer format (retrieval only, top 10 documents).
+    (output / "upstream_answers.jsonl").write_text(
+        "".join(
+            json.dumps(
+                {
+                    "question_id": r["question_id"],
+                    "document_ids": r["retrieved_doc_ids"][:10],
+                }
+            )
+            + "\n"
+            for r in rows
+        )
+    )
+    (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--method", choices=["bm25", "dense"], default="bm25")
@@ -118,48 +169,10 @@ def main():
     retriever = load_retriever(args.method, index, args.device)
     load_seconds = time.perf_counter() - start
     rows, latencies = run(retriever, questions, args.top_k)
-    metrics = evaluate_retrieval(rows, KS)
-    ordered = sorted(latencies)
-    corpus = json.loads((ROOT / "evaluation" / "corpus_manifest.json").read_text())
-    summary = {
-        "method": args.method,
-        "split": args.split,
-        "questions": len(rows),
-        "top_k": args.top_k,
-        "code": git_state(),
-        "runtime": runtime_versions(),
-        "corpus": {
-            k: corpus[k] for k in ("repo", "commit", "documents", "content_sha256")
-        },
-        "index": retriever.manifest,
-        "timing_seconds": {
-            "index_load": round(load_seconds, 2),
-            "query_median": round(median(ordered), 4),
-            "query_p95": round(ordered[int(0.95 * (len(ordered) - 1))], 4),
-            "total_queries": round(sum(ordered), 2),
-        },
-        "overall": metrics["overall"],
-        "question_types": metrics["slices"],
-        "other_slices": slice_summaries(rows),
-    }
-    output.mkdir(parents=True, exist_ok=True)
-    (output / "predictions.jsonl").write_text(
-        "".join(json.dumps(r) + "\n" for r in rows)
-    )
-    # Upstream EnterpriseRAG-Bench answer format (retrieval only, top 10 documents).
-    (output / "upstream_answers.jsonl").write_text(
-        "".join(
-            json.dumps(
-                {
-                    "question_id": r["question_id"],
-                    "document_ids": r["retrieved_doc_ids"][:10],
-                }
-            )
-            + "\n"
-            for r in rows
-        )
-    )
-    (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    summary = build_summary(rows, latencies, method=args.method, split=args.split,
+                            top_k=args.top_k, index=retriever.manifest,
+                            load_seconds=load_seconds)
+    write_run(output, rows, summary)
     print(
         json.dumps(
             {
