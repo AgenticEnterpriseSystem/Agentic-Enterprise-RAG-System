@@ -32,9 +32,8 @@ def load_retriever(method: str, index: Path, device: str = "cpu"):
     if method == "dense":
         from src.retrieval.corpus_dense import BGEModel, CorpusDense
 
-        # Encode queries with the same precision as the stored passages.
-        fp16 = json.loads((index / "manifest.json").read_text())["model"]["fp16"]
-        return CorpusDense.load(index, BGEModel(device, fp16=fp16))
+        # Encode queries with the index's own model, revision and precision.
+        return CorpusDense.load(index, BGEModel.for_index(index, device))
     raise ValueError(f"Unsupported method: {method}")
 
 

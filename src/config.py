@@ -25,6 +25,14 @@ class Settings(BaseModel):
 
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 EMBEDDING_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
+# BGE v1.5 English models share the query prefix and 512-token limit. Revisions not
+# pinned here are resolved once when an index is built and stored in its manifest.
+EMBEDDING_MODELS = {
+    "bge-small": EMBEDDING_MODEL,
+    "bge-base": "BAAI/bge-base-en-v1.5",
+    "bge-large": "BAAI/bge-large-en-v1.5",
+}
+EMBEDDING_REVISIONS = {EMBEDDING_MODEL: EMBEDDING_REVISION}
 
 
 def runtime_versions():

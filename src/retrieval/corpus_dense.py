@@ -1,4 +1,4 @@
-"""Full-corpus BGE-small + FAISS document retrieval (max score over passages).
+"""Full-corpus BGE + FAISS document retrieval (max score over passages).
 
 Documents longer than the model limit are split into overlapping token windows.
 `embed` writes resumable shards (run it on a GPU); `rank` searches all passages
@@ -7,6 +7,7 @@ with exact inner product and scores each document by its best passage.
 
 import argparse
 import json
+import re
 import time
 from pathlib import Path
 
@@ -15,7 +16,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from src.config import CORPUS_DIR, EMBEDDING_MODEL, EMBEDDING_REVISION, ROOT
+from src.config import CORPUS_DIR, EMBEDDING_MODEL, EMBEDDING_MODELS, EMBEDDING_REVISIONS, ROOT
 from src.contracts import Chunk, Evidence, SearchRequest, validate_evidence
 from src.retrieval.corpus_bm25 import document_text, file_sha256
 
@@ -75,15 +76,36 @@ def document_passages(titles, contents, offsets, window, overlap, title_every=Fa
         ]
 
 
-class BGEModel:
-    """Pinned sentence-transformers BGE model; fp16 on GPU unless disabled."""
+def resolve_revision(name):
+    """Pinned revision for a supported model; otherwise the current Hub commit."""
+    if name not in EMBEDDING_MODELS.values():
+        raise ValueError(f"Unsupported embedding model: {name}")
+    if name in EMBEDDING_REVISIONS:
+        return EMBEDDING_REVISIONS[name]
+    from huggingface_hub import HfApi
 
-    def __init__(self, device="cpu", fp16=None, batch_size=128):
+    return HfApi().model_info(name).sha
+
+
+def method_label(name):
+    """Short model label used in index manifests, e.g. "bge-base"."""
+    return name.split("/")[-1].removesuffix("-en-v1.5")
+
+
+class BGEModel:
+    """Sentence-transformers BGE v1.5 model at an exact revision; fp16 on GPU unless disabled."""
+
+    def __init__(self, device="cpu", fp16=None, batch_size=128, name=EMBEDDING_MODEL, revision=None):
         from sentence_transformers import SentenceTransformer
 
+        revision = revision or resolve_revision(name)
+        if name not in EMBEDDING_MODELS.values():
+            raise ValueError(f"Unsupported embedding model: {name}")
+        if not re.fullmatch(r"[0-9a-f]{40}", revision):
+            raise ValueError("Embedding revision must be a 40-character commit hash")
         self.model = SentenceTransformer(
-            EMBEDDING_MODEL,
-            revision=EMBEDDING_REVISION,
+            name,
+            revision=revision,
             device=device,
             cache_folder=str(ROOT / ".cache" / "models"),
             trust_remote_code=False,
@@ -93,13 +115,20 @@ class BGEModel:
             self.model.half()
         self.batch_size = batch_size
         self.identity = {
-            "name": EMBEDDING_MODEL,
-            "revision": EMBEDDING_REVISION,
+            "name": name,
+            "revision": revision,
             "query_prefix": QUERY_PREFIX,
             "normalize": True,
             "max_seq_length": self.model.max_seq_length,
             "fp16": self.fp16,
         }
+
+    @classmethod
+    def for_index(cls, directory: Path, device="cpu", fp16=None, batch_size=128):
+        """Query model matching an index manifest's model, revision and precision."""
+        settings = json.loads((Path(directory) / "manifest.json").read_text())["model"]
+        return cls(device, fp16=settings["fp16"] if fp16 is None else fp16,
+                   batch_size=batch_size, name=settings["name"], revision=settings["revision"])
 
     def offsets(self, texts):
         encoded = self.model.tokenizer(
@@ -136,7 +165,7 @@ def embed_corpus(
     corpus = pq.ParquetFile(corpus_path)
     manifest = {
         "version": INDEX_VERSION,
-        "method": "bge-small + faiss (max over passages)",
+        "method": f"{method_label(model.identity['name'])} + faiss (max over passages)",
         "unit": (
             f"{window}-token windows, {overlap}-token overlap, of content; "
             f"title (max {TITLE_TOKENS} tokens) prefixed to every passage"
@@ -340,6 +369,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--corpus", type=Path, default=CORPUS_DIR / "documents.parquet")
     parser.add_argument("--output", type=Path, default=CORPUS_DIR / "indexes" / "dense")
+    parser.add_argument(
+        "--model", choices=sorted(EMBEDDING_MODELS), default="bge-small",
+        help="BGE v1.5 model (use a new --output for each model)",
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--fp32", action="store_true", help="Disable fp16 on GPU")
@@ -351,7 +384,10 @@ def main():
     )
     args = parser.parse_args()
     model = BGEModel(
-        args.device, fp16=False if args.fp32 else None, batch_size=args.batch_size
+        args.device,
+        fp16=False if args.fp32 else None,
+        batch_size=args.batch_size,
+        name=EMBEDDING_MODELS[args.model],
     )
     started = time.perf_counter()
     manifest = embed_corpus(

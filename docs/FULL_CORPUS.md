@@ -124,3 +124,15 @@ overstate full-corpus gains. The passage format is not BGE-small's main weakness
 the model itself is.
 
 Results: [`evaluation/results/dense_titled_full_development/`](../evaluation/results/dense_titled_full_development/).
+
+## Experiment in progress: BGE-base
+
+BGE-small is the smallest BGE v1.5 model. `python -m src.retrieval.corpus_dense --model
+bge-base --title-every-passage` builds the same index with `BAAI/bge-base-en-v1.5` (768-d
+vectors, about 3× slower to embed). The exact model revision is recorded in the index
+`manifest.json`, and searching loads that same model automatically. Run it with
+`MODEL = "bge-base"` in
+[`notebooks/dense_baseline_colab.ipynb`](../notebooks/dense_baseline_colab.ipynb) (T4 with
+High-RAM, roughly 5–6 hours); results go to
+`evaluation/results/dense_base_titled_full_development/` and are compared with titled
+BGE-small (Recall@10 0.481) and BM25+ (0.692).

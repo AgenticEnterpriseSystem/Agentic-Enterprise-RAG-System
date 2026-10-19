@@ -565,3 +565,35 @@ def test_title_on_every_passage_keeps_exact_spans(corpus, tmp_path):
         row = table.slice(index.position[item.chunk.doc_id], 1).to_pylist()[0]
         text = document_text(row["title"], row["content"])
         assert text[item.chunk.start_char:item.chunk.end_char] == item.chunk.text
+
+
+def test_bge_model_choice_and_query_model_from_manifest(tmp_path, monkeypatch):
+    import sys
+    import types
+    from src.config import EMBEDDING_MODELS, EMBEDDING_REVISION
+    from src.retrieval.corpus_dense import BGEModel, method_label
+
+    loaded = []
+
+    class FakeST:
+        def __init__(self, name, revision, **kwargs):
+            loaded.append((name, revision))
+            self.max_seq_length = 512
+
+        def half(self):
+            pass
+
+    monkeypatch.setitem(sys.modules, "sentence_transformers", types.SimpleNamespace(SentenceTransformer=FakeST))
+    assert method_label(EMBEDDING_MODELS["bge-small"]) == "bge-small"
+    assert method_label(EMBEDDING_MODELS["bge-base"]) == "bge-base"
+    assert BGEModel().identity["revision"] == EMBEDDING_REVISION
+    with pytest.raises(ValueError, match="Unsupported"):
+        BGEModel(name="other/model", revision="0" * 40)
+    with pytest.raises(ValueError, match="commit hash"):
+        BGEModel(name=EMBEDDING_MODELS["bge-base"], revision="main")
+
+    base = BGEModel("cuda", name=EMBEDDING_MODELS["bge-base"], revision="a" * 40)
+    (tmp_path / "manifest.json").write_text(json.dumps({"model": base.identity}))
+    query = BGEModel.for_index(tmp_path)  # CPU device, but precision follows the index.
+    assert query.identity == base.identity
+    assert loaded[-1] == (EMBEDDING_MODELS["bge-base"], "a" * 40)

@@ -104,7 +104,7 @@ def parser():
     p.add_argument('--dense-index', type=Path, default=CORPUS_DIR / 'indexes/dense')
     p.add_argument('--device', default='cpu', help='Device for hybrid query embeddings')
     p.add_argument('--fp16', action=argparse.BooleanOptionalAction, default=None,
-                   help='Match dense index precision; default is fp16 on CUDA, fp32 otherwise')
+                   help='Override query precision; default matches the dense index')
     p.add_argument('--output', type=Path)
     p.add_argument('--live', action='store_true', help='Allow paid model calls')
     p.add_argument('--model')
@@ -137,7 +137,7 @@ def main():
         from src.retrieval.corpus_dense import BGEModel, CorpusDense
         from src.retrieval.hybrid import HybridRetriever
 
-        dense = CorpusDense.load(args.dense_index, model=BGEModel(args.device, fp16=args.fp16),
+        dense = CorpusDense.load(args.dense_index, model=BGEModel.for_index(args.dense_index, args.device, fp16=args.fp16),
                                  corpus_path=args.corpus, corpus=retriever.corpus)
         retriever = HybridRetriever(retriever, dense)
     if not args.live:
