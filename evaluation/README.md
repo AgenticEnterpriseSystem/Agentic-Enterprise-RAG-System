@@ -13,6 +13,8 @@ Start with the [README commands](../README.md#everyday-commands).
 | `results/dense_full_development/` | BGE-small + FAISS baseline results on the development split |
 | `results/dense_titled_full_development/` | BGE-small with the document title on every passage (experiment) |
 | `results/dense_base_titled_full_development/` | BGE-base with the document title on every passage (experiment) |
+| `results/hybrid_bge-base_*_full_development/` | BM25+ and BGE-base hybrid variants: RRF weights 0.5 and 0.7, and weight 0.7 with each reranker |
+| `results/*_full_calibration/` | The one calibration check: BM25+ alone, BGE-base alone, and the chosen hybrid (BM25 weight 0.7) |
 
 Each results folder contains `summary.json` (all scores), `predictions.jsonl` (the
 top 20 documents per question), and `upstream_answers.jsonl` (the top 10 in the

@@ -30,24 +30,28 @@ end). The split is in `evaluation/splits.json`.
 
 ## Results so far
 
-Two baselines, scored on the 300 development questions (282 have labeled answer
-documents):
+Scored on the 300 development questions (282 have labeled answer documents):
 
-| Baseline | What it does | Recall@10 | nDCG@10 |
+| Method | What it does | Recall@10 | nDCG@10 |
 | --- | --- | ---: | ---: |
-| **BM25+** | Keyword search: matches the question's words | **0.692** | **0.604** |
-| **BGE-small + FAISS** | Meaning search: matches similar meaning | 0.468 | 0.367 |
+| **BM25+** (baseline) | Keyword search: matches the question's words | 0.692 | **0.604** |
+| **BGE-small + FAISS** (baseline) | Meaning search: matches similar meaning | 0.468 | 0.367 |
+| BGE-base, title on every passage | Larger meaning-search model | 0.487 | 0.416 |
+| **Hybrid: BM25+ and BGE-base** | Combines both rankings (RRF, more weight on BM25+) | **0.722** | **0.604** |
 
 - **Recall@10**: share of the correct documents found in the top 10 results.
 - **nDCG@10**: also rewards ranking the correct documents near the top (1.0 is perfect).
+- The hybrid was confirmed once on the calibration questions: Recall@10 0.767 vs
+  0.712 for BM25+ alone.
 
 What this means:
 
-- Keyword search wins in every question type, likely because this dataset is
+- Keyword search beats BGE in every question type, likely because this dataset is
   full of project codenames and IDs, which exact word matching handles well.
-- BGE finds some documents that keyword search misses. Merging the two with more
-  weight on keyword search raises Recall@10 slightly (0.692 → 0.705); bigger gains
-  likely need re-ranking or a stronger model.
+- BGE finds some documents that keyword search misses. Combining the two with more
+  weight on keyword search is the best setting so far. Cross-encoder rerankers made
+  results worse as tested, likely because they saw only one short section of long
+  documents (see [Baseline Results](docs/FULL_CORPUS.md#hybrid-search-and-reranking)).
 
 Full results by question type: [docs/FULL_CORPUS.md](docs/FULL_CORPUS.md).
 

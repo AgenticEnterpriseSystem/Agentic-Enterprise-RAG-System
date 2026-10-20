@@ -6,13 +6,15 @@ for **300 development questions**; 18 lack reference-document labels, leaving
 
 | Method | Recall@5 | Recall@10 | Recall@20 | nDCG@10 |
 | --- | ---: | ---: | ---: | ---: |
-| BM25+ | 0.625 | **0.692** | 0.747 | **0.604** |
+| BM25+ | 0.625 | 0.692 | 0.747 | **0.604** |
 | BGE-small + FAISS | 0.382 | 0.468 | 0.525 | 0.367 |
 | BGE-small, title on every passage | 0.398 | 0.481 | 0.555 | 0.385 |
 | BGE-base, title on every passage | 0.448 | 0.487 | 0.562 | 0.416 |
+| **Hybrid: BM25+ and BGE-base (RRF, BM25 weight 0.7)** | **0.641** | **0.722** | **0.760** | **0.604** |
 
 Recall measures the share of reference documents found; nDCG also rewards higher
-ranks. Historical query times were about 20 ms for BM25 on CPU and 130 ms for BGE
+ranks. The hybrid row is the current best setting; it was confirmed on the calibration
+split (see [Hybrid search and reranking](#hybrid-search-and-reranking)). Historical query times were about 20 ms for BM25 on CPU and 130 ms for BGE
 on GPU. Builds took roughly five minutes and two hours respectively. Hardware
 and run settings differ, so these are not controlled latency comparisons.
 
@@ -164,13 +166,65 @@ so a re-ranker over these candidates has more room than further BGE sizes.
 
 Results: [`evaluation/results/dense_base_titled_full_development/`](../evaluation/results/dense_base_titled_full_development/).
 
-## Experiment in progress: live hybrid search and reranking
+## Hybrid search and reranking
+
+**Result: BM25+ combined with BGE-base beats BM25+ alone, confirmed on held-out
+questions; the cross-encoder rerankers made results worse.**
 
 `python -m src.evaluation.run_hybrid` runs the project's `HybridRetriever` over the
-BM25+ and BGE-base indexes: each question is searched once per method (top 50 documents
-from all 511,958), and every variant reuses those results. It scores RRF with equal
-weights and with BM25 weight 0.7, then the better of the two reranked by
-`bge-reranker-base` and by `bge-reranker-v2-m3` (fp16 on GPU, 50 candidates). Run it with
-[`notebooks/hybrid_colab.ipynb`](../notebooks/hybrid_colab.ipynb) (T4 with High-RAM,
-about 35–45 minutes): the best development setting, chosen by Recall@10, is then checked
-once on the calibration split against BM25+ alone. The final split is not used.
+BM25+ and BGE-base (titled) indexes. Each question is searched once per method (top 50
+documents out of all 511,958), and every variant reuses those results. It ran with
+[`notebooks/hybrid_colab.ipynb`](../notebooks/hybrid_colab.ipynb) on a Colab T4 with
+High-RAM, from commit `4856894`, with no errors. Both searches together took about
+0.9 seconds per question.
+
+**Development** (282 scored questions); changes are in Recall@10:
+
+| Run | Recall@5 | Recall@10 | Recall@20 | nDCG@10 | Change in Recall@10 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| BM25+ alone | 0.625 | 0.692 | 0.747 | 0.604 | — |
+| Hybrid, equal weights | 0.627 | 0.700 | 0.744 | 0.579 | +0.008 vs BM25+ (−0.024 to +0.041; 21 better, 19 worse) |
+| **Hybrid, BM25 weight 0.7** | **0.641** | **0.722** | **0.760** | **0.604** | **+0.029 vs BM25+ (+0.005 to +0.055; 19 better, 7 worse)** |
+| Hybrid 0.7 + `bge-reranker-base` | 0.551 | 0.637 | 0.716 | 0.520 | −0.084 vs hybrid (−0.129 to −0.041; 14 better, 46 worse) |
+| Hybrid 0.7 + `bge-reranker-v2-m3` | 0.602 | 0.669 | 0.715 | 0.560 | −0.053 vs hybrid (−0.093 to −0.012; 15 better, 37 worse) |
+
+Ranges are 95% bootstrap confidence intervals over questions. The rerankers rescored the
+50 fused candidates in fp16 with a 512-token limit, at revisions
+`2cfc18c9415c912f9d8155881c133215df768a70` (base, +0.37 s per question) and
+`953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e` (v2-m3, +1.3 s per question). With 50
+candidates per method, the live hybrid scored slightly higher than the earlier estimate
+from saved top-20 lists (0.712).
+
+**Calibration** (one check of the chosen setting; 94 of 100 questions scored):
+
+| Run | Recall@5 | Recall@10 | Recall@20 | nDCG@10 |
+| --- | ---: | ---: | ---: | ---: |
+| BM25+ alone | 0.653 | 0.712 | 0.792 | 0.592 |
+| BGE-base alone | 0.425 | 0.487 | 0.584 | 0.389 |
+| **Hybrid, BM25 weight 0.7** | **0.658** | **0.767** | **0.821** | **0.625** |
+
+- The hybrid raised calibration Recall@10 by 0.056 (95% confidence interval +0.013 to
+  +0.106; 7 questions better, two worse), confirming the development result on questions
+  not used to choose it. Recall@5 barely changed (+0.004), so the gain comes from
+  reference documents entering ranks 6–10.
+- On development, gains came from basic (0.771 → 0.819), conflicting info (0.792 →
+  0.917), completeness (0.497 → 0.567), constrained (0.917 → 0.972) and project-related
+  (0.676 → 0.716) questions; semantic questions did not improve (0.413 → 0.400).
+- The fusion weight was chosen on development; calibration is now used once for this
+  setting and should not be used to tune it further. The final split is untouched.
+
+**Why the rerankers hurt.** They often moved reference documents from the top five to
+below rank 20. Of the 45 reference documents that the base reranker dropped from the
+hybrid's top five out of its top ten, 43 are longer than 3,000 characters (one meeting
+transcript has 28,600). The reranker sees only one section of each document: the best
+3,000-character window, or the 500-token BGE passage when both methods found the
+document, then cut to 512 tokens. BGE passages omit the title, and in about a third of
+these cases the BM25 window did too. BM25 scores whole documents, so a section that
+lacks the answer or the customer or project name can turn a strong match into a weak
+one. Possible fixes to test on development: score several sections per document and
+keep the best, always prefix the title, allow longer inputs (v2-m3 accepts more than
+512 tokens), or blend the reranker score with the fusion score.
+
+Results: `evaluation/results/hybrid_bge-base_*_full_development/`, and on calibration
+`bm25_full_calibration/`, `dense_bge-base_full_calibration/` and
+`hybrid_bge-base_w0.7_full_calibration/`.

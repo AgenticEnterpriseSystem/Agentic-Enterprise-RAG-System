@@ -1,0 +1,808 @@
+{
+  "method": "dense_bge-base",
+  "split": "calibration",
+  "questions": 100,
+  "top_k": 20,
+  "code": {
+    "commit": "4856894a6d3d4488669539823d26e096d61c2992",
+    "dirty": false
+  },
+  "runtime": {
+    "python": "3.13.15",
+    "platform": "Linux-6.6.122+-x86_64-with-glibc2.39",
+    "packages": {
+      "numpy": "2.4.6",
+      "bm25s": "0.3.11",
+      "pyarrow": "25.0.1",
+      "sentence-transformers": "6.0.1",
+      "faiss-cpu": "1.15.1",
+      "pydantic": "2.13.5",
+      "anthropic": "0.125.0",
+      "torch": "2.11.0+cu130",
+      "transformers": "5.20.1"
+    }
+  },
+  "corpus": {
+    "repo": "https://github.com/onyx-dot-app/EnterpriseRAG-Bench.git",
+    "commit": "d36685e273713975ee20299bbf1ab64165575b3c",
+    "documents": 511958,
+    "content_sha256": "dbe0ae637846ba4c64e8b8867d7153839e5a800004304d861e20982ec573c090"
+  },
+  "index": {
+    "complete": true,
+    "corpus_sha256": "73cb9a6cb2665b60fc7e33c2c90d10d1de9c5bc84563fafc449056140ce1976f",
+    "documents": 511958,
+    "method": "bge-base + faiss (max over passages)",
+    "model": {
+      "fp16": true,
+      "max_seq_length": 512,
+      "name": "BAAI/bge-base-en-v1.5",
+      "normalize": true,
+      "query_prefix": "Represent this sentence for searching relevant passages: ",
+      "revision": "a5beb1e3e68b9ab74eb54cfd186867f64f240e1a"
+    },
+    "shard_docs": 20000,
+    "shards": 26,
+    "title_every_passage": true,
+    "unit": "500-token windows, 50-token overlap, of content; title (max 48 tokens) prefixed to every passage",
+    "version": 1
+  },
+  "timing_seconds": {
+    "index_load": 35.26,
+    "query_median": 0.9044,
+    "query_p95": 0.9388,
+    "total_queries": 90.27
+  },
+  "overall": {
+    "questions": 100,
+    "errors": 0,
+    "recall@5": {
+      "mean": 0.4247931442080378,
+      "scored": 94,
+      "excluded": 6
+    },
+    "ndcg@5": {
+      "mean": 0.3680377762824017,
+      "scored": 94,
+      "excluded": 6
+    },
+    "recall@10": {
+      "mean": 0.48699763593380613,
+      "scored": 94,
+      "excluded": 6
+    },
+    "ndcg@10": {
+      "mean": 0.3890298949418935,
+      "scored": 94,
+      "excluded": 6
+    },
+    "recall@20": {
+      "mean": 0.583966565349544,
+      "scored": 94,
+      "excluded": 6
+    },
+    "ndcg@20": {
+      "mean": 0.4157666141093858,
+      "scored": 94,
+      "excluded": 6
+    }
+  },
+  "question_types": {
+    "basic": {
+      "questions": 35,
+      "errors": 0,
+      "recall@5": {
+        "mean": 0.6,
+        "scored": 35,
+        "excluded": 0
+      },
+      "ndcg@5": {
+        "mean": 0.48974271954559145,
+        "scored": 35,
+        "excluded": 0
+      },
+      "recall@10": {
+        "mean": 0.6,
+        "scored": 35,
+        "excluded": 0
+      },
+      "ndcg@10": {
+        "mean": 0.48974271954559145,
+        "scored": 35,
+        "excluded": 0
+      },
+      "recall@20": {
+        "mean": 0.7142857142857143,
+        "scored": 35,
+        "excluded": 0
+      },
+      "ndcg@20": {
+        "mean": 0.5186186963434055,
+        "scored": 35,
+        "excluded": 0
+      }
+    },
+    "completeness": {
+      "questions": 4,
+      "errors": 0,
+      "recall@5": {
+        "mean": 0.11458333333333333,
+        "scored": 4,
+        "excluded": 0
+      },
+      "ndcg@5": {
+        "mean": 0.1917831836856678,
+        "scored": 4,
+        "excluded": 0
+      },
+      "recall@10": {
+        "mean": 0.14583333333333331,
+        "scored": 4,
+        "excluded": 0
+      },
+      "ndcg@10": {
+        "mean": 0.18580309136375306,
+        "scored": 4,
+        "excluded": 0
+      },
+      "recall@20": {
+        "mean": 0.18154761904761904,
+        "scored": 4,
+        "excluded": 0
+      },
+      "ndcg@20": {
+        "mean": 0.20261525232949087,
+        "scored": 4,
+        "excluded": 0
+      }
+    },
+    "conflicting_info": {
+      "questions": 4,
+      "errors": 0,
+      "recall@5": {
+        "mean": 0.25,
+        "scored": 4,
+        "excluded": 0
+      },
+      "ndcg@5": {
+        "mean": 0.3065735963827292,
+        "scored": 4,
+        "excluded": 0
+      },
+      "recall@10": {
+        "mean": 0.375,
+        "scored": 4,
+        "excluded": 0
+      },
+      "ndcg@10": {
+        "mean": 0.3611754555872702,
+        "scored": 4,
+        "excluded": 0
+      },
+      "recall@20": {
+        "mean": 0.5,
+        "scored": 4,
+        "excluded": 0
+      },
+      "ndcg@20": {
+        "mean": 0.40143616185957226,
+        "scored": 4,
+        "excluded": 0
+      }
+    },
+    "constrained": {
+      "questions": 6,
+      "errors": 0,
+      "recall@5": {
+        "mean": 0.8333333333333334,
+        "scored": 6,
+        "excluded": 0
+      },
+      "ndcg@5": {
+        "mean": 0.7994893507477061,
+        "scored": 6,
+        "excluded": 0
+      },
+      "recall@10": {
+        "mean": 0.8333333333333334,
+        "scored": 6,
+        "excluded": 0
+      },
+      "ndcg@10": {
+        "mean": 0.7994893507477061,
+        "scored": 6,
+        "excluded": 0
+      },
+      "recall@20": {
+        "mean": 0.9166666666666666,
+        "scored": 6,
+        "excluded": 0
+      },
+      "ndcg@20": {
+        "mean": 0.8231341677253718,
+        "scored": 6,
+        "excluded": 0
+      }
+    },
+    "high_level": {
+      "questions": 2,
+      "errors": 0,
+      "recall@5": {
+        "mean": null,
+        "scored": 0,
+        "excluded": 2
+      },
+      "ndcg@5": {
+        "mean": null,
+        "scored": 0,
+        "excluded": 2
+      },
+      "recall@10": {
+        "mean": null,
+        "scored": 0,
+        "excluded": 2
+      },
+      "ndcg@10": {
+        "mean": null,
+        "scored": 0,
+        "excluded": 2
+      },
+      "recall@20": {
+        "mean": null,
+        "scored": 0,
+        "excluded": 2
+      },
+      "ndcg@20": {
+        "mean": null,
+        "scored": 0,
+        "excluded": 2
+      }
+    },
+    "info_not_found": {
+      "questions": 4,
+      "errors": 0,
+      "recall@5": {
+        "mean": null,
+        "scored": 0,
+        "excluded": 4
+      },
+      "ndcg@5": {
+        "mean": null,
+        "scored": 0,
+        "excluded": 4
+      },
+      "recall@10": {
+        "mean": null,
+        "scored": 0,
+        "excluded": 4
+      },
+      "ndcg@10": {
+        "mean": null,
+        "scored": 0,
+        "excluded": 4
+      },
+      "recall@20": {
+        "mean": null,
+        "scored": 0,
+        "excluded": 4
+      },
+      "ndcg@20": {
+        "mean": null,
+        "scored": 0,
+        "excluded": 4
+      }
+    },
+    "intra_document_reasoning": {
+      "questions": 8,
+      "errors": 0,
+      "recall@5": {
+        "mean": 0.625,
+        "scored": 8,
+        "excluded": 0
+      },
+      "ndcg@5": {
+        "mean": 0.4146911706634918,
+        "scored": 8,
+        "excluded": 0
+      },
+      "recall@10": {
+        "mean": 0.75,
+        "scored": 8,
+        "excluded": 0
+      },
+      "ndcg@10": {
+        "mean": 0.4563578373301585,
+        "scored": 8,
+        "excluded": 0
+      },
+      "recall@20": {
+        "mean": 0.875,
+        "scored": 8,
+        "excluded": 0
+      },
+      "ndcg@20": {
+        "mean": 0.48835259043138546,
+        "scored": 8,
+        "excluded": 0
+      }
+    },
+    "miscellaneous": {
+      "questions": 4,
+      "errors": 0,
+      "recall@5": {
+        "mean": 0.75,
+        "scored": 4,
+        "excluded": 0
+      },
+      "ndcg@5": {
+        "mean": 0.625,
+        "scored": 4,
+        "excluded": 0
+      },
+      "recall@10": {
+        "mean": 0.75,
+        "scored": 4,
+        "excluded": 0
+      },
+      "ndcg@10": {
+        "mean": 0.625,
+        "scored": 4,
+        "excluded": 0
+      },
+      "recall@20": {
+        "mean": 0.75,
+        "scored": 4,
+        "excluded": 0
+      },
+      "ndcg@20": {
+        "mean": 0.625,
+        "scored": 4,
+        "excluded": 0
+      }
+    },
+    "project_related": {
+      "questions": 8,
+      "errors": 0,
+      "recall@5": {
+        "mean": 0.3090277777777778,
+        "scored": 8,
+        "excluded": 0
+      },
+      "ndcg@5": {
+        "mean": 0.35583289954778763,
+        "scored": 8,
+        "excluded": 0
+      },
+      "recall@10": {
+        "mean": 0.4618055555555555,
+        "scored": 8,
+        "excluded": 0
+      },
+      "ndcg@10": {
+        "mean": 0.4137463007572868,
+        "scored": 8,
+        "excluded": 0
+      },
+      "recall@20": {
+        "mean": 0.5833333333333334,
+        "scored": 8,
+        "excluded": 0
+      },
+      "ndcg@20": {
+        "mean": 0.4595492254069572,
+        "scored": 8,
+        "excluded": 0
+      }
+    },
+    "semantic": {
+      "questions": 25,
+      "errors": 0,
+      "recall@5": {
+        "mean": 0.08,
+        "scored": 25,
+        "excluded": 0
+      },
+      "ndcg@5": {
+        "mean": 0.08,
+        "scored": 25,
+        "excluded": 0
+      },
+      "recall@10": {
+        "mean": 0.2,
+        "scored": 25,
+        "excluded": 0
+      },
+      "ndcg@10": {
+        "mean": 0.11928526173809581,
+        "scored": 25,
+        "excluded": 0
+      },
+      "recall@20": {
+        "mean": 0.28,
+        "scored": 25,
+        "excluded": 0
+      },
+      "ndcg@20": {
+        "mean": 0.13968728657791388,
+        "scored": 25,
+        "excluded": 0
+      }
+    }
+  },
+  "other_slices": {
+    "single_reference": {
+      "questions": 74,
+      "errors": 0,
+      "recall@5": {
+        "mean": 0.44594594594594594,
+        "scored": 74,
+        "excluded": 0
+      },
+      "ndcg@5": {
+        "mean": 0.3643043858027518,
+        "scored": 74,
+        "excluded": 0
+      },
+      "recall@10": {
+        "mean": 0.5,
+        "scored": 74,
+        "excluded": 0
+      },
+      "ndcg@10": {
+        "mean": 0.38208093819174815,
+        "scored": 74,
+        "excluded": 0
+      },
+      "recall@20": {
+        "mean": 0.5945945945945946,
+        "scored": 74,
+        "excluded": 0
+      },
+      "ndcg@20": {
+        "mean": 0.4060899629718665,
+        "scored": 74,
+        "excluded": 0
+      }
+    },
+    "multiple_references": {
+      "questions": 20,
+      "errors": 0,
+      "recall@5": {
+        "mean": 0.34652777777777777,
+        "scored": 20,
+        "excluded": 0
+      },
+      "ndcg@5": {
+        "mean": 0.3818513210571063,
+        "scored": 20,
+        "excluded": 0
+      },
+      "recall@10": {
+        "mean": 0.4388888888888889,
+        "scored": 20,
+        "excluded": 0
+      },
+      "ndcg@10": {
+        "mean": 0.4147410349174312,
+        "scored": 20,
+        "excluded": 0
+      },
+      "recall@20": {
+        "mean": 0.5446428571428571,
+        "scored": 20,
+        "excluded": 0
+      },
+      "ndcg@20": {
+        "mean": 0.45157022331820706,
+        "scored": 20,
+        "excluded": 0
+      }
+    },
+    "source:confluence": {
+      "questions": 27,
+      "errors": 0,
+      "recall@5": {
+        "mean": 0.4418724279835391,
+        "scored": 27,
+        "excluded": 0
+      },
+      "ndcg@5": {
+        "mean": 0.43397428266644217,
+        "scored": 27,
+        "excluded": 0
+      },
+      "recall@10": {
+        "mean": 0.49176954732510286,
+        "scored": 27,
+        "excluded": 0
+      },
+      "ndcg@10": {
+        "mean": 0.45024786934749156,
+        "scored": 27,
+        "excluded": 0
+      },
+      "recall@20": {
+        "mean": 0.5462962962962963,
+        "scored": 27,
+        "excluded": 0
+      },
+      "ndcg@20": {
+        "mean": 0.469225468598404,
+        "scored": 27,
+        "excluded": 0
+      }
+    },
+    "source:fireflies": {
+      "questions": 2,
+      "errors": 0,
+      "recall@5": {
+        "mean": 0.5,
+        "scored": 2,
+        "excluded": 0
+      },
+      "ndcg@5": {
+        "mean": 0.25,
+        "scored": 2,
+        "excluded": 0
+      },
+      "recall@10": {
+        "mean": 0.5,
+        "scored": 2,
+        "excluded": 0
+      },
+      "ndcg@10": {
+        "mean": 0.25,
+        "scored": 2,
+        "excluded": 0
+      },
+      "recall@20": {
+        "mean": 1.0,
+        "scored": 2,
+        "excluded": 0
+      },
+      "ndcg@20": {
+        "mean": 0.36990623328406574,
+        "scored": 2,
+        "excluded": 0
+      }
+    },
+    "source:github": {
+      "questions": 14,
+      "errors": 0,
+      "recall@5": {
+        "mean": 0.37896825396825395,
+        "scored": 14,
+        "excluded": 0
+      },
+      "ndcg@5": {
+        "mean": 0.33971829027171346,
+        "scored": 14,
+        "excluded": 0
+      },
+      "recall@10": {
+        "mean": 0.4603174603174603,
+        "scored": 14,
+        "excluded": 0
+      },
+      "ndcg@10": {
+        "mean": 0.36879018266820873,
+        "scored": 14,
+        "excluded": 0
+      },
+      "recall@20": {
+        "mean": 0.5297619047619048,
+        "scored": 14,
+        "excluded": 0
+      },
+      "ndcg@20": {
+        "mean": 0.39496328246802037,
+        "scored": 14,
+        "excluded": 0
+      }
+    },
+    "source:gmail": {
+      "questions": 10,
+      "errors": 0,
+      "recall@5": {
+        "mean": 0.2,
+        "scored": 10,
+        "excluded": 0
+      },
+      "ndcg@5": {
+        "mean": 0.1430676558073393,
+        "scored": 10,
+        "excluded": 0
+      },
+      "recall@10": {
+        "mean": 0.2,
+        "scored": 10,
+        "excluded": 0
+      },
+      "ndcg@10": {
+        "mean": 0.1430676558073393,
+        "scored": 10,
+        "excluded": 0
+      },
+      "recall@20": {
+        "mean": 0.21428571428571427,
+        "scored": 10,
+        "excluded": 0
+      },
+      "ndcg@20": {
+        "mean": 0.14979252019363443,
+        "scored": 10,
+        "excluded": 0
+      }
+    },
+    "source:google_drive": {
+      "questions": 9,
+      "errors": 0,
+      "recall@5": {
+        "mean": 0.2777777777777778,
+        "scored": 9,
+        "excluded": 0
+      },
+      "ndcg@5": {
+        "mean": 0.24934188292632398,
+        "scored": 9,
+        "excluded": 0
+      },
+      "recall@10": {
+        "mean": 0.3333333333333333,
+        "scored": 9,
+        "excluded": 0
+      },
+      "ndcg@10": {
+        "mean": 0.27360937590612,
+        "scored": 9,
+        "excluded": 0
+      },
+      "recall@20": {
+        "mean": 0.4603174603174603,
+        "scored": 9,
+        "excluded": 0
+      },
+      "ndcg@20": {
+        "mean": 0.30952122798087184,
+        "scored": 9,
+        "excluded": 0
+      }
+    },
+    "source:hubspot": {
+      "questions": 10,
+      "errors": 0,
+      "recall@5": {
+        "mean": 0.1,
+        "scored": 10,
+        "excluded": 0
+      },
+      "ndcg@5": {
+        "mean": 0.1,
+        "scored": 10,
+        "excluded": 0
+      },
+      "recall@10": {
+        "mean": 0.4,
+        "scored": 10,
+        "excluded": 0
+      },
+      "ndcg@10": {
+        "mean": 0.19821315434523953,
+        "scored": 10,
+        "excluded": 0
+      },
+      "recall@20": {
+        "mean": 0.6,
+        "scored": 10,
+        "excluded": 0
+      },
+      "ndcg@20": {
+        "mean": 0.24970202399979413,
+        "scored": 10,
+        "excluded": 0
+      }
+    },
+    "source:jira": {
+      "questions": 20,
+      "errors": 0,
+      "recall@5": {
+        "mean": 0.5069444444444444,
+        "scored": 20,
+        "excluded": 0
+      },
+      "ndcg@5": {
+        "mean": 0.5173758694951336,
+        "scored": 20,
+        "excluded": 0
+      },
+      "recall@10": {
+        "mean": 0.5388888888888889,
+        "scored": 20,
+        "excluded": 0
+      },
+      "ndcg@10": {
+        "mean": 0.5268058223317721,
+        "scored": 20,
+        "excluded": 0
+      },
+      "recall@20": {
+        "mean": 0.6946428571428571,
+        "scored": 20,
+        "excluded": 0
+      },
+      "ndcg@20": {
+        "mean": 0.5739919554345604,
+        "scored": 20,
+        "excluded": 0
+      }
+    },
+    "source:linear": {
+      "questions": 13,
+      "errors": 0,
+      "recall@5": {
+        "mean": 0.5427350427350427,
+        "scored": 13,
+        "excluded": 0
+      },
+      "ndcg@5": {
+        "mean": 0.446084078991399,
+        "scored": 13,
+        "excluded": 0
+      },
+      "recall@10": {
+        "mean": 0.6623931623931624,
+        "scored": 13,
+        "excluded": 0
+      },
+      "ndcg@10": {
+        "mean": 0.48284595888066917,
+        "scored": 13,
+        "excluded": 0
+      },
+      "recall@20": {
+        "mean": 0.6794871794871795,
+        "scored": 13,
+        "excluded": 0
+      },
+      "ndcg@20": {
+        "mean": 0.4914527619823159,
+        "scored": 13,
+        "excluded": 0
+      }
+    },
+    "source:slack": {
+      "questions": 13,
+      "errors": 0,
+      "recall@5": {
+        "mean": 0.5427350427350427,
+        "scored": 13,
+        "excluded": 0
+      },
+      "ndcg@5": {
+        "mean": 0.486548785917003,
+        "scored": 13,
+        "excluded": 0
+      },
+      "recall@10": {
+        "mean": 0.5854700854700855,
+        "scored": 13,
+        "excluded": 0
+      },
+      "ndcg@10": {
+        "mean": 0.49766964016524756,
+        "scored": 13,
+        "excluded": 0
+      },
+      "recall@20": {
+        "mean": 0.7289377289377289,
+        "scored": 13,
+        "excluded": 0
+      },
+      "ndcg@20": {
+        "mean": 0.5435264043255077,
+        "scored": 13,
+        "excluded": 0
+      }
+    }
+  }
+}
