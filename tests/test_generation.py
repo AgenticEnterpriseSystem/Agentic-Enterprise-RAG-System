@@ -327,3 +327,22 @@ def test_context_passages_respect_total_budget_and_preserve_short_ids():
     selected = select_context(req.model_copy(update={"evidence": (long, req.evidence[0])}), 100)
     assert sum(len(item.chunk.text) for item in selected) <= 100
     assert selected[0].citation_id != "long"
+
+
+@pytest.mark.parametrize("wrap", [lambda s: s, lambda s: "```json\n" + s + "\n```", lambda s: "```\n" + s + "\n```"])
+def test_json_response_wrapper_preserves_schema_checks(wrap):
+    from src.generation.generator import json_response_text
+    from src.contracts import CriticDecision
+    raw = json.dumps({"status": "answered", "text": "Supported.", "citation_ids": ["source-1"]})
+    assert Answer.model_validate_json(json_response_text(wrap(raw))).status == "answered"
+    with pytest.raises(ValidationError):
+        Answer.model_validate_json(json_response_text(wrap('{"status":"made-up"}')))
+    critic = json.dumps({"sufficient": False, "confidence": 0, "reason": "missing"})
+    assert not CriticDecision.model_validate_json(json_response_text(wrap(critic))).sufficient
+
+
+@pytest.mark.parametrize("text", ['Before\n```json\n{}\n```', '```json\n{}\n```\nAfter', '```json\n{}\n```\n```json\n{}\n```'])
+def test_json_wrapper_rejects_extra_content(text):
+    from src.generation.generator import json_response_text
+    with pytest.raises(ValidationError):
+        Answer.model_validate_json(json_response_text(text))

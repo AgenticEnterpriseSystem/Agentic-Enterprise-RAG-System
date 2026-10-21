@@ -3,10 +3,11 @@
 A course project that answers questions about a company's internal documents
 (Slack, email, tickets, wikis, and more) and cites the documents it used.
 
-**Status:** the two retrieval baselines are evaluated on the full dataset.
-Hybrid retrieval, reranking, and the search agent have offline implementations;
-live quality and performance validation remain pending. C3 answer evaluation is
-currently on hold.
+**Status:** full-corpus BM25 and BGE retrieval baselines are recorded. The agent
+has live BM25 development comparisons, partial-answer handling, and balanced
+passage selection; overall answer-quality improvement is not established.
+Human review, formal critic calibration, and the hybrid answer comparison remain
+pending. See [agent development results](docs/AGENT_DEVELOPMENT.md).
 
 ## How it will work
 
@@ -110,6 +111,23 @@ for the distinction between these checks and answer-quality evaluation.
 
 ## Pilot options
 
+To enter your own questions and inspect real BM25 results without an LLM:
+
+```sh
+python -m src.agents.pilot --interactive
+```
+
+Enter `/quit` to exit. This is retrieval-only mode: it shows source excerpts,
+not a generated answer or critic decision. Each question saves a case with its
+trace under `.cache/agent-pilot/<timestamp>/`, plus a session summary and manifest.
+
+Add `--interactive` to the live command below to run the real critic and generator
+on custom questions. The terminal shows searches, new evidence IDs, missing facts,
+suggested searches, citations, usage, and the stop reason. Confidence is
+uncalibrated; inspect the cited text rather than treating approval as correctness.
+The dollar budget is shared across the session; time/token/round limits apply per
+question. `--count` only controls the non-interactive development pilot.
+
 Reuse matching `.cache/corpus/documents.parquet`, `questions.jsonl`, and the entire
 `indexes/bm25/` directory. Saved result JSON files cannot replace these artifacts.
 Hybrid search also needs `indexes/dense/` and a query model matching its manifest.
@@ -126,6 +144,22 @@ python -m src.agents.pilot --live --count 1 \
   --input-price INPUT_DOLLARS_PER_MILLION \
   --output-price OUTPUT_DOLLARS_PER_MILLION
 ```
+
+For a small fixed-search versus agent comparison, add `--workflow compare`
+and use `--count 3` initially. Both arms use the same development questions,
+retriever, context limit, generator prompt, and model. The baseline searches once
+and generates without a critic; the agent may make follow-up searches. The
+total dollar budget is shared across both arms, so leave room for the agent.
+An error or budget stop ends the comparison early and preserves completed cases.
+`--workflow baseline` runs only the fixed-search arm; the default is `agent`.
+These options apply to batch runs, not interactive mode.
+
+Comparison outputs contain `baseline/` and `agent/` case/review files, plus
+`comparison.json` with paired answers, follow-up evidence IDs, stop reasons,
+latency, and usage. Review the full saved passages to judge whether new evidence
+is useful and citations support claims. New evidence IDs do not prove better
+answers. Baseline runs first; cache effects can influence timing. Offline runs
+without `--live` only check readiness and do not generate comparison answers.
 
 Paid calls are off by default. One provider shares the run's budget; SDK retries
 are disabled. Use one worker; prices and token counts are estimates. Pilot outputs

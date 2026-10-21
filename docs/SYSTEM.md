@@ -9,10 +9,12 @@ Question → retrieve evidence → critic checks sufficiency → search again if
 | --- | --- | --- |
 | BM25 and BGE retrieval | Full-corpus development baselines | Final-split experiments |
 | Hybrid search, bounded passages, optional reranker | Offline tests and integration checks | Live hybrid/reranker quality |
-| Agent, critic, routing, grounded generation | Scripted model tests and real BM25 searches | Live answer quality, critic calibration |
+| Agent, critic, routing, grounded generation | Offline tests and small live BM25 comparisons | Broader answer quality, critic calibration |
 | Scope checks and structured-tool interfaces | Synthetic permission tests | Real tools, identity/access adapters, API/UI |
 
-**C3 LLM answer evaluation is paused.** Passing tests does not prove better answers.
+Alex has an initial answer/judge experiment on his separate development branch.
+This branch has development comparisons with AI inspection, not completed human
+validation or final answer-quality evaluation. See [agent results](AGENT_DEVELOPMENT.md).
 
 ## Components
 
@@ -28,7 +30,16 @@ Question → retrieve evidence → critic checks sufficiency → search again if
 
 Agent modules live in `src/agents/`; they are supporting parts of one workflow.
 The loop stops on sufficient evidence, no new evidence, a limit, or an error.
-It reports a limitation when evidence remains insufficient.
+At normal round-limit or no-new-evidence stops, it attempts a cited partial
+answer within the remaining budget and retains insufficient-evidence status.
+Errors, empty evidence and exhausted budgets do not trigger fallback generation.
+Multi-round contexts share space across original and relevant follow-up evidence;
+long passages retain a lead plus a query window with exact offsets. These lexical
+heuristics can still omit facts. The final critic context is bounded to leave
+room for generation; exact provider token counting enforces the token cap.
+The [interactive terminal](../README.md#pilot-options) accepts custom questions.
+It defaults to retrieval-only inspection; `--live` enables actual model calls.
+Saved cases include per-search new evidence IDs and critic/stop explanations.
 
 ## Retrieval and evidence
 

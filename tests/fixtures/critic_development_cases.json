@@ -1,0 +1,61 @@
+{
+  "provenance": "Synthetic development fixtures authored by Codex from observed failure patterns; AI-proposed labels, not human judgments or calibration/final examples.",
+  "cases": [
+    {
+      "id": "partial",
+      "question": "What are retention, standard turnaround, and the payer for ProofPoint escrow?",
+      "evidence": "ProofPoint escrow retention is 90 days. Standard access turnaround is 4 business hours; escalated is 1 business hour. Billing payer is still awaiting confirmation.",
+      "expected_sufficient": false,
+      "label_reason": "Billing payer remains missing; standard and escalated SLAs are different tiers, not a contradiction."
+    },
+    {
+      "id": "complete",
+      "question": "What are retention, standard turnaround, and the payer for ProofPoint escrow?",
+      "evidence": "ProofPoint escrow retention is 90 days. Standard access turnaround is 4 business hours; escalated is 1 business hour. AuditWorks storage fees are billed separately to the customer.",
+      "expected_sufficient": true,
+      "label_reason": "All three requested facts explicitly supplied."
+    },
+    {
+      "id": "wrong_event",
+      "question": "What caused Acme EU vectorization requests to route to Asia during the March 15 incident?",
+      "evidence": "November 20 regional rehearsal for BetaCorp: policy-cache TTL mismatch routed requests to Asia.",
+      "expected_sufficient": false,
+      "label_reason": "Wrong customer/date/event; shared routing vocabulary is insufficient."
+    },
+    {
+      "id": "right_event",
+      "question": "What caused Acme EU vectorization requests to route to Asia during the March 15 incident?",
+      "evidence": "March 15 Acme EU vectorization incident RCA: control-plane heartbeat lag made residency stamps stale, so fallback selected the nearest healthy edge, including Asia.",
+      "expected_sufficient": true,
+      "label_reason": "Requested event and cause match."
+    },
+    {
+      "id": "proposal_final",
+      "question": "What default grace window did the team choose?",
+      "evidence": "Review: suggest 30 seconds. Final decision: reject 30 seconds; choose 10 seconds as the default grace window.",
+      "expected_sufficient": true,
+      "label_reason": "A rejected proposal does not conflict with an explicit final decision."
+    },
+    {
+      "id": "different_scope",
+      "question": "What are the multipart per-file and total request defaults?",
+      "evidence": "Multipart final defaults: max_file_size 10 MiB and max_total_request_size 50 MiB. A separate chunked-transfer endpoint caps aggregate uploads at 25 MiB.",
+      "expected_sufficient": true,
+      "label_reason": "Different endpoint scope does not contradict the requested multipart defaults."
+    },
+    {
+      "id": "real_conflict",
+      "question": "What is the current multipart per-file default?",
+      "evidence": "Two current configuration records for the same endpoint and deployment disagree: record A says 10 MiB per file; record B says 20 MiB per file. Neither has a precedence rule.",
+      "expected_sufficient": false,
+      "label_reason": "Same scope, unresolved conflict."
+    },
+    {
+      "id": "unknown_date",
+      "question": "What is the current retention policy as of October 2026?",
+      "evidence": "Undated draft: retention may be 30 days. No effective date or finalized policy is included.",
+      "expected_sufficient": false,
+      "label_reason": "Explicit current-date requirement is unresolved."
+    }
+  ]
+}

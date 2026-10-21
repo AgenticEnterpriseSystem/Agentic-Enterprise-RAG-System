@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from pydantic import Field
 
+from src.agents.context import select_agent_context
 from src.agents.budget import CallBudget, RunBudgetExceeded, call_budget
 from src.agents.routing import TextRouter
 from src.agents.search_critic import AgentError
@@ -32,11 +33,12 @@ class SearchAgent:
         self.router, self.tools = router or TextRouter(), dict(tools or {})
         self.config, self.clock = config or AgentConfig(), clock
 
-    def run(self, request: SearchRequest) -> QueryResponse:
+    def run(self, request: SearchRequest, *, single_pass=False) -> QueryResponse:
         started = self.clock()
         steps, usages, evidence = [], [], {}
         feedback = None
         context_order = []
+        initial_ids = set()
         config = self.config
         round_number = 1
 
@@ -103,6 +105,34 @@ class SearchAgent:
                     known_chunks.add(item.chunk.chunk_id)
             return hits
 
+        def partial_answer(reason, limitation):
+            # Called only for normal search stops, never errors or exhausted budgets.
+            nonlocal active_tool, began
+            if exhausted():
+                return finish("budget", "Search budget reached.")
+            context = GenerationRequest(question=request.query, user=request.user,
+                                        evidence=tuple(evidence.values()), search_limitation=limitation)
+            usage = combined_usage(usages)
+            remaining = config.max_tokens - usage.input_tokens - usage.output_tokens
+            # Reserve output/prompt room and reduce context under a tight allowance.
+            # This is a sizing heuristic; provider token counting remains authoritative.
+            context_limit = min(config.max_context_chars, max(1, (remaining - 1500) * 2))
+            context = context.model_copy(update={"evidence": tuple(select_agent_context(context, context_limit, initial_ids))})
+            if not context.evidence:
+                return finish(reason, limitation)
+            active_tool, began = "generate", self.clock()
+            answer, usage = model_call(self.generator.generate, context)
+            record(active_tool, began, hits=context.evidence, usage=usage)
+            if not set(answer.citation_ids) <= {e.citation_id for e in context.evidence}:
+                raise AgentError("Generator returned an unknown citation.")
+            if exhausted():
+                return finish("budget", "Answer generation exceeded the run budget.")
+            if answer.status == "error":
+                return finish("error", "", answer, context.evidence)
+            answer = answer.model_copy(update={"status": "insufficient_evidence",
+                "text": answer.text + "\n\nSearch limitation: " + limitation})
+            return finish(reason, "", answer, context.evidence)
+
         run_id = str(uuid4())
         if len(request.query) > config.max_question_chars:
             return finish("error", "Question exceeds the configured length limit.")
@@ -154,19 +184,33 @@ class SearchAgent:
                 if exhausted():
                     return finish("budget", "Search budget reached.")
                 if len(evidence) == before:
-                    return finish("no_new_evidence", "Search found no new evidence to answer the question.")
+                    return partial_answer("no_new_evidence", "Search found no new evidence; some requested facts may remain unresolved.")
                 # Prefer the newest round without reversing each search's ranking.
                 new_evidence = list(evidence.values())[before:]
+                if round_number == 1:
+                    initial_ids.update(e.citation_id for e in new_evidence)
                 context_order = new_evidence + context_order
                 context = GenerationRequest(question=request.query, user=request.user,
                                             evidence=tuple(context_order))
-                context = context.model_copy(update={"evidence": tuple(select_context(context, config.max_context_chars))})
-                active_tool, began = "critic", self.clock()
-                feedback, usage = model_call(self.critic.assess, context)
-                record(active_tool, began, hits=context.evidence, decision=feedback, usage=usage)
+                selected = (select_agent_context(context, config.max_context_chars, initial_ids)
+                            if round_number > 1 else select_context(context, config.max_context_chars))
+                context = context.model_copy(update={"evidence": tuple(selected)})
+                if not single_pass:
+                    active_tool, began = "critic", self.clock()
+                    critic_context = context
+                    if round_number == config.max_rounds:
+                        usage_so_far = combined_usage(usages)
+                        remaining = config.max_tokens - usage_so_far.input_tokens - usage_so_far.output_tokens
+                        # Share the remaining allowance with the final answer rather
+                        # than spending nearly all of it assessing more evidence.
+                        critic_limit = min(config.max_context_chars, max(1, (remaining // 2 - 1500) * 2))
+                        critic_pool = GenerationRequest(question=request.query, user=request.user, evidence=tuple(evidence.values()))
+                        critic_context = critic_pool.model_copy(update={"evidence": tuple(select_agent_context(critic_pool, critic_limit, initial_ids))})
+                    feedback, usage = model_call(self.critic.assess, critic_context)
+                    record(active_tool, began, hits=critic_context.evidence, decision=feedback, usage=usage)
                 if exhausted():
                     return finish("budget", "Search budget reached.")
-                if feedback.sufficient and not feedback.missing_facts and feedback.confidence >= config.confidence_threshold:
+                if single_pass or (feedback.sufficient and not feedback.missing_facts and feedback.confidence >= config.confidence_threshold):
                     active_tool, began = "generate", self.clock()
                     answer, usage = model_call(self.generator.generate, context)
                     record(active_tool, began, hits=context.evidence, usage=usage)
@@ -174,9 +218,11 @@ class SearchAgent:
                         raise AgentError("Generator returned an unknown citation.")
                     if exhausted():
                         return finish("budget", "Answer generation exceeded the run budget.")
-                    reason = {"error": "error", "answered": "sufficient",
+                    reason = {"error": "error", "answered": "single_pass" if single_pass else "sufficient",
                               "insufficient_evidence": "no_new_evidence"}[answer.status]
                     return finish(reason, "", answer, context.evidence)
+                if round_number == config.max_rounds:
+                    return partial_answer("round_limit", "Search round limit reached before evidence was judged sufficient.")
             except RunBudgetExceeded as exc:
                 record(active_tool + ":budget", began, usage=exc.usage)
                 return finish("budget", "Model call exceeds remaining run budget.")

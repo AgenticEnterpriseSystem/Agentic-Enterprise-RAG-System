@@ -156,6 +156,7 @@ class QueryResponse(Contract):
 
 
 class GenerationRequest(Contract):
+    search_limitation: str | None = None
     question: Identifier
     user: UserContext
     evidence: tuple[Evidence, ...] = ()
