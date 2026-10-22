@@ -43,7 +43,7 @@ jobs:
                   with urllib.request.urlopen(base + '/api/ready', timeout=2) as response:
                       assert json.load(response)['mode'] == 'fixture'
                   break
-              except (urllib.error.URLError, TimeoutError):
+              except (urllib.error.URLError, TimeoutError, ConnectionError):
                   time.sleep(1)
           else:
               raise RuntimeError('Docker app never became ready')
@@ -58,6 +58,11 @@ jobs:
                   assert body['answer']['status'] == 'answered'
                   assert body['answer']['citation_ids'][0] == body['sources'][0]['citation_id']
           PY
+      - name: Show Docker logs on failure
+        if: failure()
+        run: |
+          docker compose ps -a
+          docker compose logs --no-color --tail=200 app
       - name: Stop Docker application
         if: always()
         run: docker compose down
