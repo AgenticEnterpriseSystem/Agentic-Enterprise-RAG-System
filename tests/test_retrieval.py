@@ -623,3 +623,29 @@ def test_embedding_models_use_pinned_revisions_prefixes_and_manifest(tmp_path, m
     monkeypatch.setitem(sys.modules, "sentence_transformers", types.SimpleNamespace(SentenceTransformer=Broken))
     with pytest.raises(ValueError, match="non-finite"):
         EmbeddingModel(model="gte-modernbert-base").encode(["x"])
+
+
+def test_embedding_retries_smaller_batches_after_gpu_out_of_memory(monkeypatch):
+    import sys
+    import types
+    import torch
+    from src.retrieval.corpus_dense import EmbeddingModel
+
+    class TightGPU:
+        def __init__(self, name, revision, **kwargs):
+            self.max_seq_length = 512
+            self.batches = []
+
+        def half(self):
+            pass
+
+        def encode(self, texts, batch_size, **kwargs):
+            self.batches.append(batch_size)
+            if batch_size > 8:
+                raise torch.OutOfMemoryError("CUDA out of memory")
+            return np.ones((len(texts), 4), dtype=np.float32) / 2
+
+    monkeypatch.setitem(sys.modules, "sentence_transformers", types.SimpleNamespace(SentenceTransformer=TightGPU))
+    model = EmbeddingModel(model="qwen3-embedding-0.6b", batch_size=32)
+    assert model.encode(["a", "b"]).shape == (2, 4)
+    assert model.model.batches == [32, 16, 8] and model.batch_size == 8

@@ -161,14 +161,27 @@ class EmbeddingModel:
         return encoded["offset_mapping"]
 
     def encode(self, texts, query=False):
+        import torch
+
         prefix = self.query_prefix if query else self.document_prefix
-        out = self.model.encode(
-            [prefix + t for t in texts] if prefix else list(texts),
-            batch_size=self.batch_size,
-            normalize_embeddings=True,
-            convert_to_numpy=True,
-            show_progress_bar=False,
-        ).astype(np.float32)
+        inputs = [prefix + t for t in texts] if prefix else list(texts)
+        while True:
+            try:
+                out = self.model.encode(
+                    inputs,
+                    batch_size=self.batch_size,
+                    normalize_embeddings=True,
+                    convert_to_numpy=True,
+                    show_progress_bar=False,
+                ).astype(np.float32)
+                break
+            except torch.OutOfMemoryError:
+                # Retry with smaller batches; results do not depend on batch size.
+                if self.batch_size == 1:
+                    raise
+                torch.cuda.empty_cache()
+                self.batch_size = max(1, self.batch_size // 2)
+                print(f"GPU out of memory; retrying with batch size {self.batch_size}", flush=True)
         if not np.isfinite(out).all():
             raise ValueError("Model produced non-finite embeddings; try bf16 or fp32 precision")
         return out
