@@ -15,6 +15,7 @@ Start with the [README commands](../README.md#everyday-commands).
 | `results/dense_base_titled_full_development/` | BGE-base with the document title on every passage (experiment) |
 | `results/hybrid_bge-base_*_full_development/` | BM25+ and BGE-base hybrid variants: RRF weights 0.5 and 0.7, and weight 0.7 with each reranker |
 | `results/*_full_calibration/` | The one calibration check: BM25+ alone, BGE-base alone, and the chosen hybrid (BM25 weight 0.7) |
+| `results/screening/` | Embedding model screening on a 20,364-document sample (development questions): BM25+, BGE-base, GTE, Arctic and Qwen3, alone and as hybrids |
 
 Each results folder contains `summary.json` (all scores), `predictions.jsonl` (the
 top 20 documents per question), and `upstream_answers.jsonl` (the top 10 in the

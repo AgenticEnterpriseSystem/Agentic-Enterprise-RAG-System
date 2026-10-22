@@ -229,24 +229,61 @@ Results: `evaluation/results/hybrid_bge-base_*_full_development/`, and on calibr
 `bm25_full_calibration/`, `dense_bge-base_full_calibration/` and
 `hybrid_bge-base_w0.7_full_calibration/`.
 
-## Experiment in progress: embedding model screening on a sample
+## Embedding model screening on a sample
 
-Embedding the full corpus takes hours per model, so candidates are first compared on a
-fixed sample of 20,364 documents built by `python -m src.data.sample`: all 431 reference
-documents of the development questions, the 9,933 other documents that BM25+ or
-BGE-base ranked in their top 20 for those questions on the full corpus, and 10,000 seeded
-random documents. No calibration or final question is used.
+**Result: Arctic-embed-l-v2.0 and Qwen3-Embedding-0.6B are much stronger than BGE-base on
+their own and find three times as many of BM25+'s misses; their hybrids with BM25+ improve
+more modestly.** Arctic is the first candidate for a full-corpus run.
 
-`python -m src.evaluation.screen_models` then scores BM25+, BGE-base and each candidate on
-the development questions: Recall@10 and nDCG@10 alone, how many of the questions BM25+
-misses each model finds, and the hybrid with BM25+ (RRF, BM25 weight 0.7). Candidates, all
-Apache-2.0 and pinned to exact revisions in `src/config.py`: `gte-modernbert-base` (149M
-parameters), `arctic-embed-l-v2.0` (568M) and `qwen3-embedding-0.6b` (596M; queries carry a
-task instruction). Run it with
+Embedding the full corpus takes hours per model, so candidates were compared on a fixed
+sample of 20,364 documents built by `python -m src.data.sample`: all 431 reference
+documents of the development questions, the 9,933 other documents that BM25+ or BGE-base
+ranked in their top 20 for those questions on the full corpus, and 10,000 seeded random
+documents (document list SHA-256 `6e6eeccc…`). No calibration or final question was used.
+`python -m src.evaluation.screen_models` scored each model on the 282 scored development
+questions, alone and merged with BM25+ (RRF, BM25 weight 0.7, top 50 per method). It ran with
 [`notebooks/model_screening_colab.ipynb`](../notebooks/model_screening_colab.ipynb) on a
-T4 (about 2 hours); results go to `evaluation/results/screening/`.
+Colab T4 (fp16, 500-token passages with the title on every passage, as for BGE-base), from
+commit `5bf0525`, with no errors. An earlier partial run (commit `aa7a4ac`, without Qwen3)
+gave identical scores for the models in both.
 
-BM25+ scores 0.680 Recall@10 on the sample, close to its full-corpus 0.692, because its own
-top competitors are kept. New models' own competitors elsewhere in the corpus are not, so
-the sample is somewhat easier for them than for BGE-base: only a candidate that beats
-BGE-base clearly, above all on BM25+ misses found and on the hybrid, gets a full-corpus run.
+| Model (parameters) | Alone R@5 | Alone R@10 | Alone R@20 | BM25+ misses found | Hybrid R@10 | Hybrid nDCG@10 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| BM25+ alone | 0.635 | 0.680 | 0.774 | — | — | 0.595 |
+| BGE-base (110M) | 0.448 | 0.487 | 0.562 | 8 of 74 | 0.715 | 0.605 |
+| `gte-modernbert-base` (149M) | 0.535 | 0.633 | 0.705 | 18 of 74 | 0.724 | **0.635** |
+| `arctic-embed-l-v2.0` (568M) | **0.571** | **0.670** | **0.752** | 24 of 74 | 0.739 | 0.632 |
+| `qwen3-embedding-0.6b` (596M) | 0.533 | 0.643 | 0.711 | **25 of 74** | **0.743** | 0.627 |
+
+"BM25+ misses found": of the 74 questions where BM25+ has no reference document in its top
+10, how many the model alone finds. Ranges below are 95% bootstrap confidence intervals over
+questions, paired on the same questions.
+
+- **Alone, every candidate beats BGE-base clearly** on Recall@10: Arctic +0.183 (+0.134 to
+  +0.233; 65 questions better, 13 worse), Qwen3 +0.156 (+0.100 to +0.213; 63 better, 21
+  worse), GTE +0.146 (+0.098 to +0.194; 59 better, 15 worse). Arctic alone nearly matches
+  BM25+ (0.670 vs 0.680). BGE-base scores 0.487 on the sample, the same as on the full
+  corpus.
+- **Semantic (reworded) questions** improved most: Recall@10 0.093 for BGE-base, 0.307 for
+  GTE and Arctic, 0.347 for Qwen3 (BM25+: 0.387). Completeness questions stayed weak for all
+  dense models (0.33–0.40), and Qwen3 dropped on project-related questions (0.470 vs 0.603
+  for BGE-base).
+- **Hybrids:** against BM25+ alone, Qwen3 adds +0.063 (+0.026 to +0.102) and Arctic +0.059
+  (+0.024 to +0.096); BGE-base adds +0.036 (−0.003 to +0.074). Against the BGE-base hybrid
+  the gains are smaller and not yet clear: Qwen3 +0.028 (−0.008 to +0.064), Arctic +0.023
+  (−0.010 to +0.058), GTE +0.009. BM25+ already finds most of what the stronger models add.
+- Arctic and Qwen3 find different BM25+ misses (35 between them), so a three-way hybrid may
+  add more.
+
+**Caveat:** the sample keeps BM25+'s and BGE-base's own top competitors from the full corpus
+but not the new models', so the new models' standalone gains are probably overstated. Only a
+full-corpus run settles them.
+
+**Next:** embed the full corpus with `arctic-embed-l-v2.0` (strongest alone, fewest
+questions worse than BGE-base, no drop on project questions; about 6–7 hours on an L4 in
+bf16), then rerun the hybrid on development and check it once on calibration against the
+current BGE-base hybrid (0.722 development, 0.767 calibration). Qwen3 is the second
+candidate.
+
+Results: `evaluation/results/screening/` (one folder per run, each with the sample manifest
+in `summary.json`).
