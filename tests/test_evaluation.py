@@ -191,3 +191,33 @@ def test_hybrid_variants_share_searches_and_match_live_hybrid(tmp_path):
     assert reranked[0]["scores"] == sorted(reranked[0]["scores"], reverse=True)
     assert reranked[0]["scores"] != rows[0]["scores"]
     assert manifest["reranker"]["name"] == "offline-test"
+
+
+# Screening sample
+
+def test_sample_keeps_references_lookalikes_and_seeded_random_documents():
+    from src.data.sample import sample_ids
+    from src.evaluation.screen_models import misses_found
+
+    corpus = [f"d{i}" for i in range(20)]
+    questions = [{"question_id": "q1", "expected_doc_ids": ["d0"]},
+                 {"question_id": "q2", "expected_doc_ids": ["d1", "d2"]}]
+    rankings = [[{"question_id": "q1", "retrieved_doc_ids": ["d3", "d0", "d4"]},
+                 {"question_id": "other", "retrieved_doc_ids": ["d19"]}],  # Not in the split.
+                [{"question_id": "q2", "retrieved_doc_ids": ["d5", "d6", "d7"]}]]
+    chosen, counts = sample_ids(corpus, questions, rankings, top_k=2, random_docs=3, seed=1)
+    # References plus each question's top 2 (d4 and d7 rank third); "other" is not in the split.
+    assert {"d0", "d1", "d2", "d3", "d5", "d6"} <= chosen
+    assert counts == {"reference": 3, "lookalikes": 3, "random": 3} and len(chosen) == 9
+    again, _ = sample_ids(corpus, questions, rankings, top_k=2, random_docs=3, seed=1)
+    assert again == chosen  # Seeded, so the sample is reproducible.
+    with pytest.raises(ValueError, match="missing"):
+        sample_ids(corpus, [{"question_id": "q", "expected_doc_ids": ["nope"]}], [], random_docs=1)
+
+    bm25 = [{"relevant_doc_ids": ["a"], "retrieved_doc_ids": ["x"]},
+            {"relevant_doc_ids": ["b"], "retrieved_doc_ids": ["b"]},
+            {"relevant_doc_ids": [], "retrieved_doc_ids": []}]
+    dense = [{"relevant_doc_ids": ["a"], "retrieved_doc_ids": ["a"]},
+             {"relevant_doc_ids": ["b"], "retrieved_doc_ids": ["y"]},
+             {"relevant_doc_ids": [], "retrieved_doc_ids": []}]
+    assert misses_found(dense, bm25) == (1, 1)

@@ -25,15 +25,30 @@ class Settings(BaseModel):
 
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 EMBEDDING_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
-# BGE v1.5 English models share the query prefix and 512-token limit. Revisions not
-# pinned here are resolved once when an index is built and stored in its manifest.
+BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
+# Dense models by label, each at an exact Hub commit with the prefixes from its model
+# card. Qwen3 takes a task instruction; ours describes this benchmark's searches.
 EMBEDDING_MODELS = {
-    "bge-small": EMBEDDING_MODEL,
-    "bge-base": "BAAI/bge-base-en-v1.5",
-    "bge-large": "BAAI/bge-large-en-v1.5",
+    "bge-small": {"name": EMBEDDING_MODEL, "revision": EMBEDDING_REVISION,
+                  "query_prefix": BGE_QUERY_PREFIX},
+    "bge-base": {"name": "BAAI/bge-base-en-v1.5",
+                 "revision": "a5beb1e3e68b9ab74eb54cfd186867f64f240e1a",
+                 "query_prefix": BGE_QUERY_PREFIX},
+    "bge-large": {"name": "BAAI/bge-large-en-v1.5",
+                  "revision": "d4aa6901d3a41ba39fb536a557fa166f842b0e09",
+                  "query_prefix": BGE_QUERY_PREFIX},
+    "gte-modernbert-base": {"name": "Alibaba-NLP/gte-modernbert-base",
+                            "revision": "e7f32e3c00f91d699e8c43b53106206bcc72bb22",
+                            "query_prefix": ""},
+    "arctic-embed-l-v2.0": {"name": "Snowflake/snowflake-arctic-embed-l-v2.0",
+                            "revision": "ac6544c8a46e00af67e330e85a9028c66b8cfd9a",
+                            "query_prefix": "query: "},
+    "qwen3-embedding-0.6b": {"name": "Qwen/Qwen3-Embedding-0.6B",
+                             "revision": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
+                             "query_prefix": "Instruct: Given a question about a company's "
+                                             "internal documents, retrieve the documents "
+                                             "that answer it\nQuery:"},
 }
-EMBEDDING_REVISIONS = {EMBEDDING_MODEL: EMBEDDING_REVISION}
-
 
 def runtime_versions():
     """Record installed inference/data libraries without importing model stacks."""

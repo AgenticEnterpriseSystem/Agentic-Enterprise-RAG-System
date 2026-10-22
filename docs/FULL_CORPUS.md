@@ -228,3 +228,25 @@ keep the best, always prefix the title, allow longer inputs (v2-m3 accepts more 
 Results: `evaluation/results/hybrid_bge-base_*_full_development/`, and on calibration
 `bm25_full_calibration/`, `dense_bge-base_full_calibration/` and
 `hybrid_bge-base_w0.7_full_calibration/`.
+
+## Experiment in progress: embedding model screening on a sample
+
+Embedding the full corpus takes hours per model, so candidates are first compared on a
+fixed sample of 20,364 documents built by `python -m src.data.sample`: all 431 reference
+documents of the development questions, the 9,933 other documents that BM25+ or
+BGE-base ranked in their top 20 for those questions on the full corpus, and 10,000 seeded
+random documents. No calibration or final question is used.
+
+`python -m src.evaluation.screen_models` then scores BM25+, BGE-base and each candidate on
+the development questions: Recall@10 and nDCG@10 alone, how many of the questions BM25+
+misses each model finds, and the hybrid with BM25+ (RRF, BM25 weight 0.7). Candidates, all
+Apache-2.0 and pinned to exact revisions in `src/config.py`: `gte-modernbert-base` (149M
+parameters), `arctic-embed-l-v2.0` (568M) and `qwen3-embedding-0.6b` (596M; queries carry a
+task instruction). Run it with
+[`notebooks/model_screening_colab.ipynb`](../notebooks/model_screening_colab.ipynb) on a
+T4 (about 2 hours); results go to `evaluation/results/screening/`.
+
+BM25+ scores 0.680 Recall@10 on the sample, close to its full-corpus 0.692, because its own
+top competitors are kept. New models' own competitors elsewhere in the corpus are not, so
+the sample is somewhat easier for them than for BGE-base: only a candidate that beats
+BGE-base clearly, above all on BM25+ misses found and on the hybrid, gets a full-corpus run.

@@ -567,33 +567,59 @@ def test_title_on_every_passage_keeps_exact_spans(corpus, tmp_path):
         assert text[item.chunk.start_char:item.chunk.end_char] == item.chunk.text
 
 
-def test_bge_model_choice_and_query_model_from_manifest(tmp_path, monkeypatch):
+def test_embedding_models_use_pinned_revisions_prefixes_and_manifest(tmp_path, monkeypatch):
     import sys
     import types
     from src.config import EMBEDDING_MODELS, EMBEDDING_REVISION
-    from src.retrieval.corpus_dense import BGEModel, method_label
+    from src.retrieval.corpus_dense import BGEModel, EmbeddingModel, model_label
 
-    loaded = []
+    loaded, encoded = [], []
 
     class FakeST:
         def __init__(self, name, revision, **kwargs):
-            loaded.append((name, revision))
-            self.max_seq_length = 512
+            loaded.append((name, revision, kwargs.get("model_kwargs")))
+            self.max_seq_length = 8192
 
         def half(self):
             pass
 
-    monkeypatch.setitem(sys.modules, "sentence_transformers", types.SimpleNamespace(SentenceTransformer=FakeST))
-    assert method_label(EMBEDDING_MODELS["bge-small"]) == "bge-small"
-    assert method_label(EMBEDDING_MODELS["bge-base"]) == "bge-base"
-    assert BGEModel().identity["revision"] == EMBEDDING_REVISION
-    with pytest.raises(ValueError, match="Unsupported"):
-        BGEModel(name="other/model", revision="0" * 40)
-    with pytest.raises(ValueError, match="commit hash"):
-        BGEModel(name=EMBEDDING_MODELS["bge-base"], revision="main")
+        def encode(self, texts, **kwargs):
+            encoded.append(list(texts))
+            return np.ones((len(texts), 4), dtype=np.float32) / 2
 
-    base = BGEModel("cuda", name=EMBEDDING_MODELS["bge-base"], revision="a" * 40)
-    (tmp_path / "manifest.json").write_text(json.dumps({"model": base.identity}))
-    query = BGEModel.for_index(tmp_path)  # CPU device, but precision follows the index.
-    assert query.identity == base.identity
-    assert loaded[-1] == (EMBEDDING_MODELS["bge-base"], "a" * 40)
+    monkeypatch.setitem(sys.modules, "sentence_transformers", types.SimpleNamespace(SentenceTransformer=FakeST))
+    assert BGEModel is EmbeddingModel
+    for label, spec in EMBEDDING_MODELS.items():
+        assert model_label(spec["name"]) == label and re.fullmatch(r"[0-9a-f]{40}", spec["revision"])
+    small = EmbeddingModel()
+    assert small.identity["revision"] == EMBEDDING_REVISION
+    # Older index manifests have exactly these keys, so existing indexes still load.
+    assert set(small.identity) == {"name", "revision", "query_prefix", "normalize", "max_seq_length", "fp16"}
+    with pytest.raises(ValueError, match="Unsupported"):
+        EmbeddingModel(model="other")
+    with pytest.raises(ValueError, match="not both"):
+        EmbeddingModel("cuda", fp16=True, bf16=True)
+
+    qwen = EmbeddingModel("cuda", model="qwen3-embedding-0.6b", bf16=True)
+    assert qwen.identity["max_seq_length"] == 512 and qwen.identity["bf16"] and not qwen.fp16
+    assert loaded[-1][2] is not None  # bf16 requested from the loader.
+    qwen.encode(["Which runbook?"], query=True)
+    qwen.encode(["passage text"])
+    assert encoded[-2][0].startswith("Instruct: ") and encoded[-2][0].endswith("Query:Which runbook?")
+    assert encoded[-1] == ["passage text"]
+
+    (tmp_path / "manifest.json").write_text(json.dumps({"model": qwen.identity}))
+    again = EmbeddingModel.for_index(tmp_path)  # CPU device, but settings follow the index.
+    assert again.identity == qwen.identity
+    stale = {**qwen.identity, "revision": "b" * 40}
+    (tmp_path / "manifest.json").write_text(json.dumps({"model": stale}))
+    with pytest.raises(ValueError, match="different model revision"):
+        EmbeddingModel.for_index(tmp_path)
+
+    class Broken(FakeST):
+        def encode(self, texts, **kwargs):
+            return np.full((len(texts), 4), np.nan, dtype=np.float32)
+
+    monkeypatch.setitem(sys.modules, "sentence_transformers", types.SimpleNamespace(SentenceTransformer=Broken))
+    with pytest.raises(ValueError, match="non-finite"):
+        EmbeddingModel(model="gte-modernbert-base").encode(["x"])
