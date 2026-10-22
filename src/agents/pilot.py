@@ -26,6 +26,55 @@ def write_json(path, value):
     path.write_text(json.dumps(value, indent=2) + '\n')
 
 
+def development_sample(questions, count, question_ids=None):
+    """Explicit IDs must already belong to the development split."""
+    if question_ids is None:
+        return select_questions(questions, count)
+    available = {q['question_id']: q for q in questions}
+    if not 1 <= len(question_ids) <= 10 or len(set(question_ids)) != len(question_ids):
+        raise ValueError('Choose 1–10 distinct development question IDs')
+    if any(qid not in available for qid in question_ids):
+        raise ValueError('Every requested question ID must belong to the development split')
+    return [available[qid] for qid in question_ids]
+
+
+def timing_breakdown(trace):
+    """Keep actual recorded durations; do not infer quality from stop status."""
+    groups = {'search': 0.0, 'critic': 0.0, 'generate': 0.0, 'other': 0.0}
+    for step in trace.steps:
+        tool = step.tool.split(':', 1)[0]
+        key = 'search' if tool == 'text_search' else tool if tool in groups else 'other'
+        groups[key] += step.elapsed_ms
+    return groups
+
+
+def prepare_review(questions, retriever, output):
+    """Freeze first-search evidence and references without calling a model."""
+    if not questions:
+        raise ValueError('Review packet requires at least one question')
+    output.mkdir(parents=True, exist_ok=False)
+    user = UserContext(user_id='benchmark-pilot', allowed_doc_ids=frozenset(retriever.doc_ids))
+    search = RecordingRetriever(retriever)
+    review = []
+    for number, question in enumerate(questions, 1):
+        began = time.monotonic()
+        search.search(SearchRequest(query=question['question'], user=user, top_k=5))
+        filename = f'case_{number:02}.json'
+        write_json(output / filename, {'question_id': question['question_id'],
+            'question': question['question'], 'search': search.searches[-1],
+            'retrieval_latency_ms': (time.monotonic() - began) * 1000,
+            'response': None, 'model_calls': []})
+        review.append({'case': filename, 'reference': question,
+            'evidence_sufficient': None, 'answer_correctness_0_to_2': None,
+            'answer_completeness_0_to_2': None, 'citation_support_0_to_2': None,
+            'notes': ''})
+    write_json(output / 'review.json', review)
+    summary = {'completed': len(review), 'paid_calls': False,
+               'mode': 'retrieval-review-packet', 'answers_generated': 0}
+    write_json(output / 'summary.json', summary)
+    return summary
+
+
 class RecordingProvider:
     def __init__(self, provider):
         self.provider = provider
@@ -170,7 +219,8 @@ def run_interactive(retriever, provider, config, output, *, live=False, read=inp
     return summary
 
 
-def run_pilot(questions, retriever, provider, config, output, *, workflow='agent'):
+def run_pilot(questions, retriever, provider, config, output, *, workflow='agent',
+              critic_prompt=CRITIC_PROMPT):
     """Write each case immediately; reference labels never enter the agent request."""
     if not questions:
         raise ValueError("Pilot requires at least one question")
@@ -180,7 +230,7 @@ def run_pilot(questions, retriever, provider, config, output, *, workflow='agent
     user = UserContext(user_id='benchmark-pilot', allowed_doc_ids=frozenset(retriever.doc_ids))
     recorded_provider, recorded_search = RecordingProvider(provider), RecordingRetriever(retriever)
     generation = GenerationConfig(max_context_chars=config.max_context_chars, retries=0)
-    agent = SearchAgent(recorded_search, EvidenceCritic(recorded_provider, generation),
+    agent = SearchAgent(recorded_search, EvidenceCritic(recorded_provider, generation, system_prompt=critic_prompt),
                         GroundedGenerator(recorded_provider, generation), config=config)
     responses, review = [], []
     summary = {"completed": 0, "requested": len(questions), "stops": {},
@@ -193,6 +243,7 @@ def run_pilot(questions, retriever, provider, config, output, *, workflow='agent
         responses.append(response)
         case = {'question_id': q['question_id'], 'question': q['question'], 'workflow': workflow,
                 'question_type': q['question_type'], 'response': response.model_dump(mode='json'),
+                'timing_ms': timing_breakdown(response.trace),
                 'debug_steps': debug_steps(response),
                 'searches': recorded_search.searches, 'model_calls': recorded_provider.calls}
         # Numeric filenames avoid interpreting externally supplied question IDs as paths.
@@ -215,7 +266,7 @@ def run_pilot(questions, retriever, provider, config, output, *, workflow='agent
     return summary
 
 
-def run_comparison(questions, retriever, provider, config, output):
+def run_comparison(questions, retriever, provider, config, output, *, critic_prompt=CRITIC_PROMPT):
     """Same development sample and provider; one total spending cap across both arms."""
     if not questions:
         raise ValueError('Comparison requires at least one question')
@@ -223,7 +274,7 @@ def run_comparison(questions, retriever, provider, config, output):
     summaries = {}
     for workflow in ('baseline', 'agent'):
         summaries[workflow] = run_pilot(questions, retriever, provider, config,
-                                        output / workflow, workflow=workflow)
+                                        output / workflow, workflow=workflow, critic_prompt=critic_prompt)
         # A partial/error arm is not a valid paired comparison. Preserve its logs.
         if any(summaries[workflow]['stops'].get(reason, 0) for reason in ('error', 'budget')):
             break
@@ -242,6 +293,7 @@ def run_comparison(questions, retriever, provider, config, output):
             pair[arm] = {'answer': response['answer'], 'stop_reason': response['trace']['stop_reason'],
                          'searches': len(searches), 'new_followup_evidence_ids': sorted(later_ids),
                          'latency_ms': response['trace']['total_latency_ms'],
+                         'timing_ms': case['timing_ms'],
                          'usage': response['trace']['usage']}
         pairs.append(pair)
     report = {'summaries': summaries, 'paired_cases': len(pairs), 'pairs': pairs,
@@ -254,6 +306,9 @@ def run_comparison(questions, retriever, provider, config, output):
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--count', type=int, default=5, choices=range(1, 11), metavar='1..10')
+    p.add_argument('--question-ids', nargs='+', help='Exact development IDs, in order; overrides --count')
+    p.add_argument('--prepare', action='store_true', help='Save first-search evidence and review references without model calls')
+    p.add_argument('--critic-prompt', type=Path, help='Use a saved critic prompt for a controlled development batch run')
     p.add_argument('--workflow', choices=('baseline', 'agent', 'compare'), default='agent',
                    help='Baseline skips critic/follow-ups; compare saves both arms on identical questions')
     p.add_argument('--questions', type=Path, default=CORPUS_DIR / 'questions.jsonl')
@@ -272,6 +327,8 @@ def parser():
     p.add_argument('--interactive', action='store_true', help='Enter custom questions; retrieval only unless --live')
     p.add_argument('--model')
     p.add_argument('--budget-usd', type=float, default=0)
+    p.add_argument('--question-budget-usd', type=float, default=0.10,
+                   help='Per-question cap, shared across its critic and generation calls')
     p.add_argument('--input-price', type=float, default=0, help='USD per million input tokens')
     p.add_argument('--output-price', type=float, default=0, help='USD per million output tokens')
     return p
@@ -280,6 +337,13 @@ def parser():
 def main():
     p = parser()
     args = p.parse_args()
+    if args.prepare and (args.live or args.interactive):
+        p.error('--prepare cannot be combined with --live or --interactive')
+    if args.interactive and (args.question_ids or args.critic_prompt):
+        p.error('--question-ids and --critic-prompt apply only to development batch runs')
+    critic_prompt = args.critic_prompt.read_text() if args.critic_prompt else CRITIC_PROMPT
+    if not critic_prompt.strip():
+        p.error('Critic prompt must not be empty')
     if not 0 <= args.bm25_weight <= 1:
         p.error('--bm25-weight must be between 0 and 1')
     if args.interactive and args.workflow != 'agent':
@@ -297,21 +361,26 @@ def main():
         p.error('--live requires --model and ANTHROPIC_API_KEY in the environment')
     if args.live and min(args.budget_usd, args.input_price, args.output_price) <= 0:
         p.error('--live requires a positive total budget and both token prices')
+    if not 0 < args.question_budget_usd < float('inf'):
+        p.error('--question-budget-usd must be positive and finite')
     from src.retrieval.corpus_bm25 import CorpusBM25, file_sha256
 
-    questions = ([] if args.interactive else
-                 select_questions(load_questions(args.questions, args.splits, 'development'), args.count))
+    try:
+        questions = ([] if args.interactive else development_sample(
+            load_questions(args.questions, args.splits, 'development'), args.count, args.question_ids))
+    except ValueError as exc:
+        p.error(str(exc))
     # Loading also verifies the actual corpus hash against the index manifest.
     retriever = CorpusBM25.load(args.index, corpus_path=args.corpus)
     if args.retrieval == 'hybrid':
         from src.retrieval.corpus_dense import BGEModel, CorpusDense
         from src.retrieval.hybrid import HybridConfig, HybridRetriever
 
-        dense = CorpusDense.load(args.dense_index, model=BGEModel(args.device, fp16=args.fp16),
+        dense = CorpusDense.load(args.dense_index, model=BGEModel.for_index(args.dense_index, args.device, fp16=args.fp16),
                                  corpus_path=args.corpus, corpus=retriever.corpus)
         retriever = HybridRetriever(retriever, dense, config=HybridConfig(
             bm25_weight=args.bm25_weight, dense_weight=1 - args.bm25_weight))
-    if not args.live and not args.interactive:
+    if not args.live and not args.interactive and not args.prepare:
         print(json.dumps({'ready': True, 'paid_calls': False, 'retrieval': args.retrieval,
                           'documents': len(retriever.doc_ids),
                           'questions': [{'id': q['question_id'], 'type': q['question_type']} for q in questions]}, indent=2))
@@ -322,10 +391,10 @@ def main():
     provider_config = AnthropicConfig(model=args.model, allow_paid=True, budget_usd=args.budget_usd,
         input_usd_per_million=args.input_price, output_usd_per_million=args.output_price,
         max_output_tokens=1024, timeout_seconds=30) if args.live else None
-    config = AgentConfig(max_rounds=2, max_cost_usd=args.budget_usd, max_seconds=120, max_tokens=16000)
+    config = AgentConfig(max_rounds=2, max_cost_usd=args.question_budget_usd, max_seconds=120, max_tokens=16000)
     manifest = {'code': git_state(), 'runtime': runtime_versions(),
                 'provider': provider_config.model_dump() if provider_config else None, 'temperature': 0,
-                'mode': 'interactive' if args.interactive else 'development-pilot', 'paid_calls': args.live,
+                'mode': 'retrieval-review-packet' if args.prepare else 'interactive' if args.interactive else 'development-pilot', 'paid_calls': args.live,
                 'workflow': args.workflow,
                 'agent': config.model_dump(), 'top_k': 5, 'router': 'TextRouter',
                 'scope': 'benchmark-only access to all documents in this index; no production ACL claims',
@@ -333,16 +402,18 @@ def main():
                 'questions_sha256': file_sha256(args.questions) if not args.interactive else None,
                 'splits_sha256': file_sha256(args.splits) if not args.interactive else None,
                 'index': retriever.manifest,
-                'prompts': {'critic': CRITIC_PROMPT, 'generator': GENERATOR_PROMPT},
+                'prompts': {'critic': critic_prompt, 'generator': GENERATOR_PROMPT},
+                'critic_prompt_sha256': sha256(critic_prompt.encode()).hexdigest(),
                 'source_hashes': {str(path.relative_to(ROOT)): sha256(path.read_bytes()).hexdigest()
                                   for path in sorted((ROOT / 'src').rglob('*.py'))}}
     provider = AnthropicProvider(provider_config) if provider_config else None
     try:
-        summary = (run_interactive(retriever, provider, config, output, live=args.live)
+        summary = (prepare_review(questions, retriever, output) if args.prepare else
+                   run_interactive(retriever, provider, config, output, live=args.live)
                    if args.interactive else
-                   run_comparison(questions, retriever, provider, config, output)
+                   run_comparison(questions, retriever, provider, config, output, critic_prompt=critic_prompt)
                    if args.workflow == 'compare' else
-                   run_pilot(questions, retriever, provider, config, output, workflow=args.workflow))
+                   run_pilot(questions, retriever, provider, config, output, workflow=args.workflow, critic_prompt=critic_prompt))
         print(json.dumps(summary, indent=2))
     finally:
         if output.exists():

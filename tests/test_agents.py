@@ -3,7 +3,8 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from src.agents.pilot import main, run_pilot, run_comparison, select_questions
+from src.agents.pilot import (main, run_pilot, run_comparison, select_questions,
+                              development_sample, prepare_review, timing_breakdown)
 from src.agents.routing import ModelRouter, Route, ToolCall, ToolSpec
 from src.agents.search_agent import AgentConfig, SearchAgent
 from src.agents.search_critic import AgentError, EvidenceCritic, SYSTEM_PROMPT
@@ -393,6 +394,48 @@ def test_selection_is_stable_and_covers_categories():
         select_questions(questions(), 9)
 
 
+def test_explicit_development_sample_rejects_unknown_and_duplicate_ids():
+    assert [q['question_id'] for q in development_sample(questions(), 1, ['q2', 'q0'])] == ['q2', 'q0']
+    for ids in (['final-only-id'], ['q0', 'q0'], []):
+        with pytest.raises(ValueError):
+            development_sample(questions(), 1, ids)
+
+
+def test_prepared_packet_keeps_references_out_of_retrieval_and_preserves_outputs(tmp_path):
+    search = Search([(evidence(),)])
+    search.doc_ids = ['a']
+    output = tmp_path / 'packet'
+    report = prepare_review(questions()[:1], search, output)
+    case = json.loads((output/'case_01.json').read_text())
+    assert report['answers_generated'] == 0 and not report['paid_calls']
+    assert case['response'] is None and case['model_calls'] == []
+    assert case['search']['evidence'][0]['chunk']['text'] == 'Upload limit is 10 MB.'
+    assert 'GOLD MUST NOT' not in json.dumps(case)
+    assert json.loads((output/'review.json').read_text())[0]['reference']['answer'] == 'GOLD MUST NOT REACH MODEL'
+    with pytest.raises(FileExistsError):
+        prepare_review(questions()[:1], search, output)
+
+
+def test_saved_prompt_is_used_and_timing_breakdown_keeps_failures(tmp_path):
+    from src.contracts import Trace, TraceStep
+    provider = FakeProvider([
+        Completion(decision(True).model_dump_json(), ZERO),
+        Completion(Answer(status='answered', text='10 MB', citation_ids=('a',)).model_dump_json(), ZERO),
+    ])
+    search = Search([(evidence(),)])
+    search.doc_ids = ['a']
+    run_pilot(questions()[:1], search, provider, AgentConfig(), tmp_path/'run',
+              critic_prompt='Saved pre-change critic instructions')
+    assert provider.calls[0][0] == 'Saved pre-change critic instructions'
+    assert provider.calls[1][0] != provider.calls[0][0]
+    assert all('GOLD MUST NOT' not in prompt for _, prompt in provider.calls)
+    trace = Trace(run_id='timing', stop_reason='error', steps=(
+        TraceStep(round_number=1, query='limit?', tool='text_search', elapsed_ms=4),
+        TraceStep(round_number=1, query='limit?', tool='critic:error', elapsed_ms=12),
+        TraceStep(round_number=1, query='limit?', tool='generate', elapsed_ms=7)))
+    assert timing_breakdown(trace) == dict(search=4, critic=12, generate=7, other=0)
+
+
 def test_single_pass_skips_critic_and_preserves_permission_checks():
     search, critic, generator = Search([(evidence(),)]), Critic([]), Generator()
     response = SearchAgent(search, critic, generator).run(
@@ -486,6 +529,15 @@ def test_preflight_uses_real_small_index_without_model_calls(tmp_path, monkeypat
     monkeypatch.delenv('ANTHROPIC_API_KEY', raising=False)
     main()
     assert '"paid_calls": false' in capsys.readouterr().out
+    output = tmp_path/'prepared'
+    monkeypatch.setattr('sys.argv', ['pilot', '--prepare', '--question-ids', 'q0',
+        '--corpus', str(corpus), '--index', str(index), '--questions', str(qpath),
+        '--splits', str(splits), '--output', str(output)])
+    main()
+    manifest = json.loads((output/'manifest.json').read_text())
+    assert manifest['question_ids'] == ['q0'] and not manifest['paid_calls']
+    assert manifest['critic_prompt_sha256']
+    assert (output/'review.json').exists()
 
 
 def test_pilot_rejects_empty_sample_before_creating_outputs(tmp_path):

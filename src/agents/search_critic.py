@@ -51,9 +51,11 @@ def structured_completion(provider, system, payload, schema):
 
 
 class EvidenceCritic:
-    def __init__(self, provider: Provider, config: GenerationConfig | None = None):
+    def __init__(self, provider: Provider, config: GenerationConfig | None = None,
+                 *, system_prompt: str = SYSTEM_PROMPT):
         self.provider = provider
         self.config = config or GenerationConfig()
+        self.system_prompt = system_prompt
 
     def assess(self, request: GenerationRequest) -> tuple[CriticDecision, Usage]:
         validate_evidence(request.user, request.evidence)
@@ -67,7 +69,7 @@ class EvidenceCritic:
                 suggested_queries=(request.question,),
             ), Usage(estimated_cost_usd=0)
         decision, usage = structured_completion(
-            self.provider, SYSTEM_PROMPT,
+            self.provider, self.system_prompt,
             {"question": request.question, "evidence": [
                 {"citation_id": e.citation_id, "source_type": e.chunk.source_type,
                  "timestamp": e.chunk.timestamp.isoformat() if e.chunk.timestamp else None,

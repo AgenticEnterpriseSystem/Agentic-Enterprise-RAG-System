@@ -1,0 +1,16 @@
+# Only application build inputs enter the Docker build context.
+# In particular, exclude credentials, indexes, results, .git, and user files.
+**
+!Dockerfile
+!requirements.txt
+!src/
+!src/**
+!frontend/
+!frontend/package.json
+!frontend/package-lock.json
+!frontend/index.html
+!frontend/vite.config.js
+!frontend/src/
+!frontend/src/**
+**/__pycache__/
+**/*.pyc

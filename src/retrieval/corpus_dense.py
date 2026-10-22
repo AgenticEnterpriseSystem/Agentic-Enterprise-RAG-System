@@ -7,6 +7,7 @@ with exact inner product and scores each document by its best passage.
 
 import argparse
 import json
+import re
 import time
 from pathlib import Path
 
@@ -78,12 +79,18 @@ def document_passages(titles, contents, offsets, window, overlap, title_every=Fa
 class BGEModel:
     """Pinned sentence-transformers BGE model; fp16 on GPU unless disabled."""
 
-    def __init__(self, device="cpu", fp16=None, batch_size=128):
+    def __init__(self, device="cpu", fp16=None, batch_size=128, name=EMBEDDING_MODEL, revision=None):
         from sentence_transformers import SentenceTransformer
 
+        # Model-aware query loading follows Hira's BGEModel.for_index interface.
+        if name not in {"BAAI/bge-small-en-v1.5", "BAAI/bge-base-en-v1.5", "BAAI/bge-large-en-v1.5"}:
+            raise ValueError("Unsupported BGE model; integrate its retriever adapter explicitly")
+        revision = revision or (EMBEDDING_REVISION if name == EMBEDDING_MODEL else None)
+        if not revision or not re.fullmatch(r"[0-9a-f]{40}", revision):
+            raise ValueError("An exact model revision is required")
         self.model = SentenceTransformer(
-            EMBEDDING_MODEL,
-            revision=EMBEDDING_REVISION,
+            name,
+            revision=revision,
             device=device,
             cache_folder=str(ROOT / ".cache" / "models"),
             trust_remote_code=False,
@@ -93,13 +100,28 @@ class BGEModel:
             self.model.half()
         self.batch_size = batch_size
         self.identity = {
-            "name": EMBEDDING_MODEL,
-            "revision": EMBEDDING_REVISION,
+            "name": name,
+            "revision": revision,
             "query_prefix": QUERY_PREFIX,
             "normalize": True,
             "max_seq_length": self.model.max_seq_length,
             "fp16": self.fp16,
         }
+
+    @classmethod
+    def for_index(cls, directory: Path, device="cpu", fp16=None, batch_size=128):
+        """Load the exact name/revision/precision recorded by Hira's index builder."""
+        settings = json.loads((Path(directory) / "manifest.json").read_text())["model"]
+        if not isinstance(settings.get("revision"), str) or not re.fullmatch(r"[0-9a-f]{40}", settings["revision"]):
+            raise ValueError("Index manifest must pin the exact model revision")
+        if not isinstance(settings.get("fp16"), bool):
+            raise ValueError("Index manifest must record query precision")
+        if fp16 is not None and fp16 != settings["fp16"]:
+            raise ValueError("Query precision differs from the embeddings")
+        if settings.get("query_prefix") != QUERY_PREFIX or settings.get("normalize") is not True:
+            raise ValueError("Query encoding differs from the embeddings")
+        return cls(device, fp16=settings["fp16"] if fp16 is None else fp16,
+                   batch_size=batch_size, name=settings["name"], revision=settings["revision"])
 
     def offsets(self, texts):
         encoded = self.model.tokenizer(

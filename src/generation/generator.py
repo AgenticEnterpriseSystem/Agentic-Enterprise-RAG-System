@@ -207,7 +207,8 @@ class AnthropicProvider:
             calls += 1
             count = self.client.messages.count_tokens(
                 model=config.model, system=system, messages=messages,
-                **({"timeout": min(config.timeout_seconds, allowance.seconds_left())} if allowance else {})
+                timeout=(min(config.timeout_seconds, allowance.seconds_left())
+                         if allowance else anthropic.NOT_GIVEN),
             )
             output_limit = config.max_output_tokens
             timeout = config.timeout_seconds
@@ -226,6 +227,9 @@ class AnthropicProvider:
                 allowance.consume(seconds=time.monotonic() - began)
                 raise RunBudgetExceeded(usage=Usage(api_calls=calls, estimated_cost_usd=0))
             if self.reserved_usd + reservation > config.budget_usd:
+                if allowance:
+                    raise RunBudgetExceeded("Provider spending cap reached.",
+                        usage=Usage(api_calls=calls, estimated_cost_usd=0))
                 raise ProviderError(usage=Usage(api_calls=calls, estimated_cost_usd=0))
             # Reserve worst-case cost before every attempt, even if the response is lost.
             self.reserved_usd += reservation
@@ -237,7 +241,7 @@ class AnthropicProvider:
                 system=system,
                 messages=messages,
                 temperature=0,
-                **({"timeout": timeout} if allowance else {})
+                timeout=timeout if allowance else anthropic.NOT_GIVEN,
             )
         except (anthropic.APIError, anthropic.APITimeoutError) as error:
             status = getattr(error, "status_code", None)

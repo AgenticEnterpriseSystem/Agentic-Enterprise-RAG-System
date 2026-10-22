@@ -11,3 +11,7 @@ __pycache__/
 rag-dense/
 rag-dense 2/
 .ipynb_checkpoints/
+
+# Web application build and dependencies
+frontend/node_modules/
+frontend/dist/

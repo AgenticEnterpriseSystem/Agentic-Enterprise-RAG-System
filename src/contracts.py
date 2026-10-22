@@ -56,8 +56,17 @@ class UserContext(Contract):
 class QueryRequest(Contract):
     """Public API input: clients cannot supply identity or permission claims."""
 
-    question: Identifier
+    question: Annotated[str, Field(min_length=1, max_length=8000, pattern=r"\S")]
     mode: Literal["baseline", "agentic"] = "baseline"
+    source_types: tuple[Annotated[str, Field(min_length=1, max_length=64)], ...] = Field(default=(), max_length=9)
+    after: AwareDatetime | None = None
+    before: AwareDatetime | None = None
+
+    @model_validator(mode="after")
+    def valid_dates(self):
+        if self.after and self.before and self.after > self.before:
+            raise ValueError("after must not exceed before")
+        return self
 
 
 class SearchRequest(Contract):

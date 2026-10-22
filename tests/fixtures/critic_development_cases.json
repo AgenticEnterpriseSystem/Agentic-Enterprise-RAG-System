@@ -56,6 +56,48 @@
       "evidence": "Undated draft: retention may be 30 days. No effective date or finalized policy is included.",
       "expected_sufficient": false,
       "label_reason": "Explicit current-date requirement is unresolved."
+    },
+    {
+      "id": "default_optional_extension",
+      "question": "What is the standard retention period and who pays for Beacon escrow?",
+      "evidence": "Beacon escrow policy: standard retention is 60 days; the customer pays storage fees. Customers may opt into a 180-day extension for an additional fee.",
+      "expected_sufficient": true,
+      "label_reason": "An explicit default and an optional extension are compatible. Both requested facts match the same service."
+    },
+    {
+      "id": "unrelated_manifest_option",
+      "question": "What is the standard retention period and payer for Beacon escrow?",
+      "evidence": "Beacon escrow policy: the standard is 60 days, billed to the customer. A separate Delta deletion service offers a 6-month manifest-only audit archive.",
+      "expected_sufficient": true,
+      "label_reason": "A separate service and artifact type do not contradict Beacon terms."
+    },
+    {
+      "id": "cross_service_fact_splicing",
+      "question": "What are the default retention and payer for Beacon escrow?",
+      "evidence": "Beacon escrow default retention is 60 days. For Delta escrow, the customer pays storage fees. No Beacon billing arrangement is supplied.",
+      "expected_sufficient": false,
+      "label_reason": "Cannot combine Beacon retention with Delta billing. Payer remains missing."
+    },
+    {
+      "id": "universal_policy_requested",
+      "question": "What retention and payer policy applies to every escrow customer company-wide?",
+      "evidence": "Beacon customer-specific agreement: 60-day retention, customer pays storage fees. Other customer agreements are not described.",
+      "expected_sufficient": false,
+      "label_reason": "An explicit company-wide request cannot be answered from one customer agreement."
+    },
+    {
+      "id": "unfinalized_default",
+      "question": "What retention default is currently in effect for Beacon escrow?",
+      "evidence": "Draft proposal: consider a 60-day standard, customer pays. Approval and effective date are still pending.",
+      "expected_sufficient": false,
+      "label_reason": "A proposal does not establish an effective policy."
+    },
+    {
+      "id": "ambiguous_services",
+      "question": "How long are artifacts retained and who pays?",
+      "evidence": "Beacon escrow stores test bundles for 60 days, paid by customers. Delta diagnostics stores logs for 14 days, paid by the vendor. No intended service is specified.",
+      "expected_sufficient": false,
+      "label_reason": "Different scopes are not contradictions, but the requested scope remains ambiguous; do not invent a universal answer."
     }
   ]
 }

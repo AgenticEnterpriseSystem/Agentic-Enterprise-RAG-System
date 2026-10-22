@@ -1,78 +1,84 @@
-# How the system works
+# System
 
-Question → retrieve evidence → critic checks sufficiency → search again if needed
-→ generate an answer with citations.
+## Request flow
 
-## Current status
+```text
+React question form → FastAPI → configured retriever
+  Fixed RAG: search → generate cited answer
+  Agent:     search → check evidence → follow-up searches if needed → answer
+```
 
-| Implemented | Verified | Pending |
-| --- | --- | --- |
-| BM25 and BGE retrieval | Full-corpus development baselines | Final-split experiments |
-| Hybrid search, bounded passages, optional reranker | Offline tests and integration checks | Live hybrid/reranker quality |
-| Agent, critic, routing, grounded generation | Offline tests and small live BM25 comparisons | Broader answer quality, critic calibration |
-| Scope checks and structured-tool interfaces | Synthetic permission tests | Real tools, identity/access adapters, API/UI |
-
-Alex has an initial answer/judge experiment on his separate development branch.
-This branch has development comparisons with AI inspection, not completed human
-validation or final answer-quality evaluation. See [agent results](AGENT_DEVELOPMENT.md).
+The app serves the built frontend and `/api/*` from one origin. Both workflows
+use the same generator and `search(request) → evidence` retrieval interface.
+The backend loads one retriever at startup and shares it across requests.
+[Setup](WEB_APP.md) explains runtime modes and artifact configuration.
 
 ## Components
 
-| Module | Purpose |
+| Location | Responsibility |
 | --- | --- |
-| `src/retrieval/` | Keyword/dense retrieval, fusion, passage selection, reranking |
-| `search_agent.py` | Coordinates search, critique, and generation |
-| `search_critic.py` | Identifies missing facts and suggests follow-up searches |
-| `routing.py` | Chooses text search, registered tools, or both |
-| `budget.py` | Supplies remaining time, tokens, and cost allowances |
-| `src/generation/generator.py` | Generates grounded answers and validates citations |
-| `pilot.py` | Runs a small development-only debugging pilot |
+| `src/contracts.py` | Validated requests, evidence, answers and traces |
+| `src/api/main.py`, `runtime.py` | HTTP lifecycle, demo scope, retriever/provider construction |
+| `src/agents/` | Search loop, evidence critic, routing and per-run budgets |
+| `src/generation/generator.py` | Provider calls, evidence-only generation and citation validation |
+| `src/retrieval/` | BM25, dense search, fusion, passage selection and optional reranker |
+| `frontend/src/` | Question form, answer, exact source excerpts and search steps |
+| `src/evaluation/`, `src/agents/pilot.py` | Retrieval scoring and development comparisons |
 
-Agent modules live in `src/agents/`; they are supporting parts of one workflow.
-The loop stops on sufficient evidence, no new evidence, a limit, or an error.
-At normal round-limit or no-new-evidence stops, it attempts a cited partial
-answer within the remaining budget and retains insufficient-evidence status.
-Errors, empty evidence and exhausted budgets do not trigger fallback generation.
-Multi-round contexts share space across original and relevant follow-up evidence;
-long passages retain a lead plus a query window with exact offsets. These lexical
-heuristics can still omit facts. The final critic context is bounded to leave
-room for generation; exact provider token counting enforces the token cap.
-The [interactive terminal](../README.md#pilot-options) accepts custom questions.
-It defaults to retrieval-only inspection; `--live` enables actual model calls.
-Saved cases include per-search new evidence IDs and critic/stop explanations.
+BM25 scores documents; BGE uses their best matching passage. Hybrid combines
+rankings with weighted reciprocal rank fusion, deduplicating documents. The web
+runtime shares the corpus table between retrievers; its settings and compatibility
+requirements are in the [hybrid handoff](WEB_APP.md#hybrid-handoff).
 
-## Retrieval and evidence
+Passage selection uses bounded exact text slices with original character offsets.
+It balances initial and follow-up evidence, but can still omit useful facts.
+The optional cross-encoder has a 512-token default input limit; the web app does
+not currently enable it.
 
-BM25 scores whole documents; BGE ranks documents by their best passage. Hybrid
-search combines rankings with reciprocal rank fusion (RRF), one vote per document
-per ranking. Defaults: 50 candidates per retriever, 50-document rerank pool,
-RRF constant 60, equal weights. These settings have not been shown optimal.
+The agent stops on sufficient evidence, no new evidence, limits, or failure.
+Normal round/no-new-evidence stops can produce a cited partial answer; errors and
+exhausted budgets do not trigger fallback generation. The critic guides search;
+its confidence is **not calibrated answer accuracy**. Clarification dialogue and
+answer streaming are not implemented.
 
-Shared documents retain dense evidence when available. BM25-only documents use
-query-relevant exact slices of at most 3,000 characters. Offsets remain tied to
-original text. The heuristic may omit facts, and character limits are not token
-limits. Optional cross-encoder reranking uses a pinned model revision and a
-recorded 512-token default input limit; longer pairs can still be truncated.
+## API
 
-Dense loading adds one shard at a time to exact FAISS search; the hybrid pilot
-shares the corpus table. Corpus hashes, document ordering, and dense query model
-settings must match the artifacts, including revision and fp16 precision.
+| Endpoint | Result |
+| --- | --- |
+| `GET /api/health` | Liveness, including during index loading |
+| `GET /api/ready` | 200 when ready; 503 while loading or on setup failure |
+| `POST /api/query` | `QueryRequest` → `QueryResponse`: answer, sources, trace |
+| `GET /` | Built React app |
+| `GET /docs` | Generated API schema and interactive documentation |
 
-## Limits to keep in mind
+Query mode is `baseline` or `agentic`; questions contain 1–8000 nonblank characters.
+Source/date filters may narrow server scope. HTTP statuses distinguish validation
+(422), denied scope/origin (403), busy/budget (429), unavailable setup (503), timeout
+(504) and provider/agent errors (502). Agent errors retain permitted traces/evidence;
+boundary errors use `detail`. Responses do not expose provider exception text.
 
-- Missing identity or permissions denies access. Filters apply before reranking.
-  Unknown dates cannot satisfy date constraints; the corpus adapters have no
-  structured timestamps. Real authentication and structured adapters are pending.
-- Evidence is untrusted text. The generator abstains without usable evidence and
-  rejects malformed responses or unknown citations. Valid IDs do not prove claim
-  support; critic confidence is uncalibrated. Gold answers stay out of model inputs.
-- Cooperating providers preflight estimated tokens/cost and bound timeouts.
-  Estimates are not exact billing guarantees. Synchronous retrieval and providers
-  that ignore budget context have soft limits checked between operations.
-- The pilot uses unrestricted benchmark access, five development questions and
-  at most two rounds by default. It uses fusion without the optional reranker.
-  This is debugging, not a completed quality evaluation.
+Defaults: top-k 5, two rounds, 120 seconds, 16,000 total model tokens, 24,000 context
+characters, and 1,024 maximum output tokens per model call. Search and loop limits
+use `RAG_*` settings in `src/api/runtime.py`; the provider output limit is fixed
+in code. These limits are not quality claims. Provider calls include token-count
+requests as well as generation.
 
-See [README](../README.md#pilot-options) for pilot setup, artifact requirements and
-commands; [Baseline Results](FULL_CORPUS.md) for measured retrieval scores; and
-[Evaluation](EVALUATION.md) for scoring rules and planned answer review.
+## Access, spending and concurrency
+
+- `RAG_DEMO_ACCESS=true` enables the server-owned **benchmark-demo** identity.
+  It can read indexed synthetic documents; it is not sign-in or a production ACL.
+- `RAG_ALLOWED_DOC_IDS_FILE` can restrict IDs; an empty list denies all.
+  `RAG_ALLOWED_SOURCES` restricts platforms. Client identity/permission claims are
+  rejected. Retrieval, generation and final responses enforce this scope.
+- Dates require time zones. Corpus adapters lack reliable structured timestamps,
+  so date filters exclude undated evidence. Structured-tool interfaces exist;
+  real adapters and identity integration remain pending.
+- Citation clicks show the response's exact authorized excerpts. Valid citation
+  IDs alone do not establish that a claim is supported. Evidence is untrusted;
+  reference answers are never supplied to the running agent.
+- One worker bounds expensive work; health checks remain responsive. Timed-out
+  synchronous work retains its slot until completion. SDK retries are disabled.
+  Token counting and cost reservations guard calls; limits around non-cooperating
+  synchronous tools are soft. Spending caps are process-local and reset on restart.
+
+See [Evaluation](EVALUATION.md) for measured outcomes and known answer failures.
