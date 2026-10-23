@@ -1,6 +1,7 @@
 """Shared defaults. Model and budget choices must be recorded with each run."""
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -9,6 +10,27 @@ ROOT = Path(__file__).resolve().parents[1]
 CORPUS_REPO_URL = "https://github.com/onyx-dot-app/EnterpriseRAG-Bench.git"
 CORPUS_COMMIT = "d36685e273713975ee20299bbf1ab64165575b3c"
 CORPUS_DIR = ROOT / ".cache" / "corpus"
+
+
+class RetrievalSettings(BaseModel):
+    """Shared retrieval settings; web environment and CLI options use these defaults."""
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+    retrieval: Literal['bm25', 'hybrid'] = 'bm25'
+    corpus: Path = CORPUS_DIR / 'documents.parquet'
+    bm25_index: Path = CORPUS_DIR / 'indexes/bm25'
+    dense_index: Path = CORPUS_DIR / 'indexes/dense'
+    device: str = 'cpu'
+    fp16: bool | None = None
+    bm25_weight: float = Field(default=.7, ge=0, le=1)
+    candidate_k: int = Field(default=50, ge=1, le=100)
+    rerank_k: int = Field(default=50, ge=1, le=200)
+    rrf_k: float = Field(default=60.0, ge=0)
+
+    def hybrid_config(self):
+        from src.retrieval.hybrid import HybridConfig
+        return HybridConfig(candidate_k=self.candidate_k, rerank_k=self.rerank_k,
+                            rrf_k=self.rrf_k, bm25_weight=self.bm25_weight,
+                            dense_weight=1 - self.bm25_weight)
 
 
 class Settings(BaseModel):

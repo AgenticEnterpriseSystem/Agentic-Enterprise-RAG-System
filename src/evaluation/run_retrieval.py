@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from statistics import median
 
-from src.config import CORPUS_DIR, ROOT, runtime_versions
+from src.config import CORPUS_DIR, ROOT, RetrievalSettings, runtime_versions
 from src.evaluation.retrieval_metrics import evaluate_retrieval
 
 KS = (5, 10, 20)
@@ -24,16 +24,15 @@ def load_questions(path: Path, splits_path: Path, split: str) -> list[dict]:
     return sorted(selected, key=lambda q: q["question_id"])
 
 
-def load_retriever(method: str, index: Path, device: str = "cpu"):
+def load_retriever(method: str, index: Path, device: str = RetrievalSettings().device, fp16=None):
     if method == "bm25":
         from src.retrieval.corpus_bm25 import CorpusBM25
 
         return CorpusBM25.load(index)
     if method == "dense":
-        from src.retrieval.corpus_dense import BGEModel, CorpusDense
+        from src.retrieval.factory import load_dense
 
-        # Encode queries with the index's own model, revision and precision.
-        return CorpusDense.load(index, BGEModel.for_index(index, device))
+        return load_dense(RetrievalSettings(dense_index=index, device=device, fp16=fp16))
     raise ValueError(f"Unsupported method: {method}")
 
 
@@ -142,7 +141,8 @@ def main():
     parser.add_argument(
         "--index", type=Path, help="Default: .cache/corpus/indexes/<method>"
     )
-    parser.add_argument("--device", default="cpu", help="Query encoder device (dense)")
+    parser.add_argument("--device", default=RetrievalSettings().device, help="Query encoder device (dense)")
+    parser.add_argument("--fp16", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument(
         "--questions", type=Path, default=CORPUS_DIR / "questions.jsonl"
     )
@@ -165,8 +165,9 @@ def main():
     )
     questions = load_questions(args.questions, args.splits, args.split)
     start = time.perf_counter()
-    index = args.index or CORPUS_DIR / "indexes" / args.method
-    retriever = load_retriever(args.method, index, args.device)
+    defaults = RetrievalSettings()
+    index = args.index or (defaults.bm25_index if args.method == "bm25" else defaults.dense_index)
+    retriever = load_retriever(args.method, index, args.device, args.fp16)
     load_seconds = time.perf_counter() - start
     rows, latencies = run(retriever, questions, args.top_k)
     summary = build_summary(rows, latencies, method=args.method, split=args.split,

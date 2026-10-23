@@ -2,7 +2,7 @@
 
 Each question is searched once by each retriever (top --candidate-k documents);
 every variant then runs HybridRetriever over those same saved results, so the
-variants differ only in fusion weights and reranking. Run it on a GPU runtime.
+variants differ only in fusion weights and reranking. Use --device cuda for GPU inference.
 """
 
 import argparse
@@ -10,10 +10,11 @@ import json
 import time
 from pathlib import Path
 
-from src.config import CORPUS_DIR, ROOT
+from src.config import CORPUS_DIR, ROOT, RetrievalSettings
 from src.contracts import SearchRequest, UserContext
 from src.evaluation.run_retrieval import KS, build_summary, load_questions, write_run
-from src.retrieval.hybrid import HybridConfig, HybridRetriever
+from src.retrieval.hybrid import HybridRetriever
+from src.retrieval.factory import add_retrieval_arguments, load_pair, settings_from_args
 
 RERANKERS = {
     "bge-reranker-base": "BAAI/bge-reranker-base",
@@ -77,10 +78,12 @@ def run_single(cache, seconds, errors, questions, top_k):
 
 
 def run_variant(retrievers, caches, seconds, errors, questions, user, *, bm25_weight,
-                reranker=None, top_k=max(KS), candidate_k=50):
+                reranker=None, top_k=max(KS), candidate_k=None, rerank_k=None, rrf_k=None):
     """Rows, latencies and manifest for one fusion/rerank setting."""
-    config = HybridConfig(candidate_k=candidate_k, rerank_k=candidate_k,
-                          bm25_weight=bm25_weight, dense_weight=1 - bm25_weight)
+    overrides = {name: value for name, value in (
+        ('candidate_k', candidate_k), ('rerank_k', rerank_k), ('rrf_k', rrf_k))
+        if value is not None}
+    config = RetrievalSettings(bm25_weight=bm25_weight, **overrides).hybrid_config()
     hybrid = HybridRetriever(*(CachedSearch(r, c) for r, c in zip(retrievers, caches)),
                              config=config, reranker=reranker)
     rows, latencies = [], []
@@ -97,7 +100,7 @@ def run_variant(retrievers, caches, seconds, errors, questions, user, *, bm25_we
     return rows, latencies, hybrid.manifest
 
 
-def reranker_identity(spec):
+def reranker_identity(spec: str) -> tuple[str, str, str]:
     """"label" or "label@revision" -> (label, model name, exact revision)."""
     label, _, revision = spec.partition("@")
     if label not in RERANKERS:
@@ -106,13 +109,18 @@ def reranker_identity(spec):
         from huggingface_hub import HfApi
 
         revision = HfApi().model_info(RERANKERS[label]).sha
+    if not revision:
+        raise ValueError(f"No revision available for reranker {label!r}")
     return label, RERANKERS[label], revision
 
 
-def recall10(rows):
+def recall10(rows) -> float:
     from src.evaluation.retrieval_metrics import evaluate_retrieval
 
-    return evaluate_retrieval(rows, KS)["overall"]["recall@10"]["mean"]
+    score = evaluate_retrieval(rows, KS)["overall"]["recall@10"]["mean"]
+    if score is None:
+        raise ValueError("Recall@10 requires at least one labeled question")
+    return score
 
 
 def compare(rows, baseline):
@@ -121,10 +129,12 @@ def compare(rows, baseline):
 
     better = worse = 0
     for a, b in zip(rows, baseline):
-        if a["relevant_doc_ids"]:
-            change = (recall_at_k(a["retrieved_doc_ids"], a["relevant_doc_ids"], 10)
-                      - recall_at_k(b["retrieved_doc_ids"], b["relevant_doc_ids"], 10))
-            better, worse = better + (change > 0), worse + (change < 0)
+        score = recall_at_k(a["retrieved_doc_ids"], a["relevant_doc_ids"], 10)
+        baseline_score = recall_at_k(b["retrieved_doc_ids"], b["relevant_doc_ids"], 10)
+        if score is None or baseline_score is None:
+            continue
+        change = score - baseline_score
+        better, worse = better + (change > 0), worse + (change < 0)
     return better, worse
 
 
@@ -137,23 +147,19 @@ def parse_weights(text):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bm25-index", type=Path, default=CORPUS_DIR / "indexes" / "bm25")
-    parser.add_argument("--dense-index", type=Path, default=CORPUS_DIR / "indexes" / "dense")
-    parser.add_argument("--corpus", type=Path, default=CORPUS_DIR / "documents.parquet")
+    add_retrieval_arguments(parser, weight=False)
     parser.add_argument("--questions", type=Path, default=CORPUS_DIR / "questions.jsonl")
     parser.add_argument("--splits", type=Path, default=ROOT / "evaluation" / "splits.json")
     parser.add_argument("--split", choices=["development", "calibration", "final"],
                         default="development")
-    parser.add_argument("--device", default="cuda", help="Query encoder and reranker device")
-    parser.add_argument("--bm25-weights", type=parse_weights, default=[0.5, 0.7],
+    parser.add_argument("--bm25-weights", type=parse_weights, default=[RetrievalSettings().bm25_weight],
                         help="BM25 RRF weights to score without reranking (BGE gets 1 - w)")
-    parser.add_argument("--rerankers", default="bge-reranker-base,bge-reranker-v2-m3",
+    parser.add_argument("--rerankers", default="",
                         help="Comma-separated rerankers (label or label@revision); empty for none")
     parser.add_argument("--rerank-bm25-weight", default="best",
                         help='Fusion weight before reranking: a number, or "best" (highest '
                              "Recall@10 among --bm25-weights on this split; use on development only)")
     parser.add_argument("--reranker-batch-size", type=int, default=32)
-    parser.add_argument("--candidate-k", type=int, default=50)
     parser.add_argument("--top-k", type=int, default=max(KS))
     parser.add_argument("--output-dir", type=Path, default=ROOT / "evaluation" / "results")
     parser.add_argument("--write-baselines", action="store_true",
@@ -165,21 +171,19 @@ def main():
         args.rerank_bm25_weight = parse_weights(args.rerank_bm25_weight)[0]
     rerankers = [reranker_identity(s.strip()) for s in args.rerankers.split(",") if s.strip()]
 
-    from src.retrieval.corpus_bm25 import CorpusBM25
-    from src.retrieval.corpus_dense import BGEModel, CorpusDense, method_label
+    from src.retrieval.corpus_dense import method_label
     from src.retrieval.reranker import CrossEncoderReranker
 
     questions = load_questions(args.questions, args.splits, args.split)
     started = time.perf_counter()
-    bm25 = CorpusBM25.load(args.bm25_index, corpus_path=args.corpus)
-    dense = CorpusDense.load(args.dense_index, BGEModel.for_index(args.dense_index, args.device),
-                             corpus_path=args.corpus, corpus=bm25.corpus)
+    settings = settings_from_args(args, retrieval='hybrid')
+    bm25, dense = load_pair(settings)
     load_seconds = time.perf_counter() - started
     dense_label = method_label(dense.manifest["model"]["name"])
     user = UserContext(user_id="benchmark", allowed_doc_ids=frozenset(bm25.doc_ids))
     print(f"Indexes loaded in {load_seconds:.0f}s; searching {len(questions)} questions...", flush=True)
     retrievers = (bm25, dense)
-    caches, seconds, errors = search_once(retrievers, questions, user, args.candidate_k)
+    caches, seconds, errors = search_once(retrievers, questions, user, max(args.top_k, settings.candidate_k))
     print(f"Searched in {sum(seconds.values()):.0f}s ({len(errors)} errors)", flush=True)
 
     def save(name, rows, latencies, index, **extra):
@@ -198,12 +202,13 @@ def main():
         save(f"dense_{dense_label}_full_{args.split}", dense_rows, dense_latency, dense.manifest)
         results[f"{dense_label} alone"] = dense_rows
 
-    fusion = {}
+    fusion: dict[float, float] = {}
     for weight in args.bm25_weights:
         name = f"hybrid_{dense_label}_w{weight:g}_full_{args.split}"
         rows, latencies, manifest = run_variant(retrievers, caches, seconds, errors, questions,
                                                 user, bm25_weight=weight, top_k=args.top_k,
-                                                candidate_k=args.candidate_k)
+                                                candidate_k=settings.candidate_k,
+                                                rerank_k=settings.rerank_k, rrf_k=settings.rrf_k)
         save(name, rows, latencies, manifest)
         results[name], fusion[weight] = rows, recall10(rows)
 
@@ -211,7 +216,7 @@ def main():
     if weight == "best" and rerankers:
         if args.split != "development":
             parser.error('--rerank-bm25-weight "best" tunes on the split; pass a number here')
-        weight, choice = max(fusion, key=fusion.get), "best development Recall@10"
+        weight, choice = max(fusion, key=lambda w: fusion[w]), "best development Recall@10"
     for label, name, revision in rerankers:
         reranker = CrossEncoderReranker(name, revision, device=args.device,
                                         batch_size=args.reranker_batch_size,
@@ -220,7 +225,8 @@ def main():
         began = time.perf_counter()
         rows, latencies, manifest = run_variant(retrievers, caches, seconds, errors, questions,
                                                 user, bm25_weight=weight, reranker=reranker,
-                                                top_k=args.top_k, candidate_k=args.candidate_k)
+                                                top_k=args.top_k, candidate_k=settings.candidate_k,
+                                                rerank_k=settings.rerank_k, rrf_k=settings.rrf_k)
         save(run_name, rows, latencies, manifest,
              fusion_weight_choice={"bm25_weight": weight, "chosen_by": choice})
         results[run_name] = rows

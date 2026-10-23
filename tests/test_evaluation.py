@@ -125,6 +125,40 @@ def test_committed_split_manifest_is_consistent():
 
 # Hybrid variants over shared searches
 
+def test_hybrid_comparison_skips_unlabeled_scores():
+    from src.evaluation.run_hybrid import compare, recall10
+
+    rows = [
+        {"relevant_doc_ids": ["a"], "retrieved_doc_ids": ["a"]},
+        {"relevant_doc_ids": ["b"], "retrieved_doc_ids": []},
+        {"relevant_doc_ids": [], "retrieved_doc_ids": []},
+        {"relevant_doc_ids": ["d"], "retrieved_doc_ids": ["d"]},
+    ]
+    baseline = [
+        {"relevant_doc_ids": ["a"], "retrieved_doc_ids": []},
+        {"relevant_doc_ids": ["b"], "retrieved_doc_ids": ["b"]},
+        {"relevant_doc_ids": ["c"], "retrieved_doc_ids": ["c"]},
+        {"relevant_doc_ids": [], "retrieved_doc_ids": []},
+    ]
+    assert compare(rows, baseline) == (1, 1)
+    with pytest.raises(ValueError, match="labeled question"):
+        recall10([])
+
+
+def test_reranker_identity_requires_a_resolved_revision(monkeypatch):
+    from types import SimpleNamespace
+    from huggingface_hub import HfApi
+    from src.evaluation.run_hybrid import reranker_identity
+
+    monkeypatch.setattr(HfApi, 'model_info', lambda *a, **kw: SimpleNamespace(sha=None))
+    with pytest.raises(ValueError, match="No revision"):
+        reranker_identity('bge-reranker-base')
+    revision = 'a' * 40
+    monkeypatch.setattr(HfApi, 'model_info', lambda *a, **kw: SimpleNamespace(sha=revision))
+    assert reranker_identity('bge-reranker-base')[2] == revision
+    assert reranker_identity('bge-reranker-base@' + revision)[2] == revision
+
+
 def test_hybrid_variants_share_searches_and_match_live_hybrid(tmp_path):
     import pyarrow as pa
     import pyarrow.parquet as pq

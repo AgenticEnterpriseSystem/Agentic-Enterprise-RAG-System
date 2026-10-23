@@ -75,8 +75,8 @@ Categories with 12–24 questions are small, so treat their scores as rough.
 [BGE-base results](../evaluation/results/dense_base_titled_full_development/) each contain:
 `summary.json` (scores and slices), `predictions.jsonl` (top 20 IDs/scores), and
 `upstream_answers.jsonl` (top ten in benchmark format). These files do not contain
-the corpus or indexes. Setup and reproduction commands are in
-[README](../README.md#quick-start); dataset provenance is in the
+the corpus or indexes. Reproduction commands are in
+[Evaluation](EVALUATION.md#run-checks-and-experiments); dataset provenance is in the
 [Data Card](DATA_CARD.md).
 
 ## Reproducibility details

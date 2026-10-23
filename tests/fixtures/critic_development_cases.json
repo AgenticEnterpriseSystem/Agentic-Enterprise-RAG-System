@@ -1,0 +1,103 @@
+{
+  "provenance": "Synthetic development fixtures authored by Codex from observed failure patterns; AI-proposed labels, not human judgments or calibration/final examples.",
+  "cases": [
+    {
+      "id": "partial",
+      "question": "What are retention, standard turnaround, and the payer for ProofPoint escrow?",
+      "evidence": "ProofPoint escrow retention is 90 days. Standard access turnaround is 4 business hours; escalated is 1 business hour. Billing payer is still awaiting confirmation.",
+      "expected_sufficient": false,
+      "label_reason": "Billing payer remains missing; standard and escalated SLAs are different tiers, not a contradiction."
+    },
+    {
+      "id": "complete",
+      "question": "What are retention, standard turnaround, and the payer for ProofPoint escrow?",
+      "evidence": "ProofPoint escrow retention is 90 days. Standard access turnaround is 4 business hours; escalated is 1 business hour. AuditWorks storage fees are billed separately to the customer.",
+      "expected_sufficient": true,
+      "label_reason": "All three requested facts explicitly supplied."
+    },
+    {
+      "id": "wrong_event",
+      "question": "What caused Acme EU vectorization requests to route to Asia during the March 15 incident?",
+      "evidence": "November 20 regional rehearsal for BetaCorp: policy-cache TTL mismatch routed requests to Asia.",
+      "expected_sufficient": false,
+      "label_reason": "Wrong customer/date/event; shared routing vocabulary is insufficient."
+    },
+    {
+      "id": "right_event",
+      "question": "What caused Acme EU vectorization requests to route to Asia during the March 15 incident?",
+      "evidence": "March 15 Acme EU vectorization incident RCA: control-plane heartbeat lag made residency stamps stale, so fallback selected the nearest healthy edge, including Asia.",
+      "expected_sufficient": true,
+      "label_reason": "Requested event and cause match."
+    },
+    {
+      "id": "proposal_final",
+      "question": "What default grace window did the team choose?",
+      "evidence": "Review: suggest 30 seconds. Final decision: reject 30 seconds; choose 10 seconds as the default grace window.",
+      "expected_sufficient": true,
+      "label_reason": "A rejected proposal does not conflict with an explicit final decision."
+    },
+    {
+      "id": "different_scope",
+      "question": "What are the multipart per-file and total request defaults?",
+      "evidence": "Multipart final defaults: max_file_size 10 MiB and max_total_request_size 50 MiB. A separate chunked-transfer endpoint caps aggregate uploads at 25 MiB.",
+      "expected_sufficient": true,
+      "label_reason": "Different endpoint scope does not contradict the requested multipart defaults."
+    },
+    {
+      "id": "real_conflict",
+      "question": "What is the current multipart per-file default?",
+      "evidence": "Two current configuration records for the same endpoint and deployment disagree: record A says 10 MiB per file; record B says 20 MiB per file. Neither has a precedence rule.",
+      "expected_sufficient": false,
+      "label_reason": "Same scope, unresolved conflict."
+    },
+    {
+      "id": "unknown_date",
+      "question": "What is the current retention policy as of October 2026?",
+      "evidence": "Undated draft: retention may be 30 days. No effective date or finalized policy is included.",
+      "expected_sufficient": false,
+      "label_reason": "Explicit current-date requirement is unresolved."
+    },
+    {
+      "id": "default_optional_extension",
+      "question": "What is the standard retention period and who pays for Beacon escrow?",
+      "evidence": "Beacon escrow policy: standard retention is 60 days; the customer pays storage fees. Customers may opt into a 180-day extension for an additional fee.",
+      "expected_sufficient": true,
+      "label_reason": "An explicit default and an optional extension are compatible. Both requested facts match the same service."
+    },
+    {
+      "id": "unrelated_manifest_option",
+      "question": "What is the standard retention period and payer for Beacon escrow?",
+      "evidence": "Beacon escrow policy: the standard is 60 days, billed to the customer. A separate Delta deletion service offers a 6-month manifest-only audit archive.",
+      "expected_sufficient": true,
+      "label_reason": "A separate service and artifact type do not contradict Beacon terms."
+    },
+    {
+      "id": "cross_service_fact_splicing",
+      "question": "What are the default retention and payer for Beacon escrow?",
+      "evidence": "Beacon escrow default retention is 60 days. For Delta escrow, the customer pays storage fees. No Beacon billing arrangement is supplied.",
+      "expected_sufficient": false,
+      "label_reason": "Cannot combine Beacon retention with Delta billing. Payer remains missing."
+    },
+    {
+      "id": "universal_policy_requested",
+      "question": "What retention and payer policy applies to every escrow customer company-wide?",
+      "evidence": "Beacon customer-specific agreement: 60-day retention, customer pays storage fees. Other customer agreements are not described.",
+      "expected_sufficient": false,
+      "label_reason": "An explicit company-wide request cannot be answered from one customer agreement."
+    },
+    {
+      "id": "unfinalized_default",
+      "question": "What retention default is currently in effect for Beacon escrow?",
+      "evidence": "Draft proposal: consider a 60-day standard, customer pays. Approval and effective date are still pending.",
+      "expected_sufficient": false,
+      "label_reason": "A proposal does not establish an effective policy."
+    },
+    {
+      "id": "ambiguous_services",
+      "question": "How long are artifacts retained and who pays?",
+      "evidence": "Beacon escrow stores test bundles for 60 days, paid by customers. Delta diagnostics stores logs for 14 days, paid by the vendor. No intended service is specified.",
+      "expected_sufficient": false,
+      "label_reason": "Different scopes are not contradictions, but the requested scope remains ambiguous; do not invent a universal answer."
+    }
+  ]
+}

@@ -144,11 +144,24 @@ class EmbeddingModel:
         """Query model matching an index manifest's model, revision and precision."""
         settings = json.loads((Path(directory) / "manifest.json").read_text())["model"]
         label = model_label(settings["name"])
-        if settings["revision"] != EMBEDDING_MODELS[label]["revision"]:
+        spec = EMBEDDING_MODELS[label]
+        if settings.get("revision") != spec["revision"]:
             raise ValueError("Index was built with a different model revision")
-        bf16 = settings.get("bf16", False)
-        return cls(device, fp16=(settings["fp16"] if fp16 is None else fp16) and not bf16,
-                   batch_size=batch_size, model=label, bf16=bf16)
+        if not isinstance(settings.get("fp16"), bool) or not isinstance(settings.get("bf16", False), bool):
+            raise ValueError("Index manifest must record query precision")
+        if fp16 is not None and fp16 != settings["fp16"]:
+            raise ValueError("Query precision differs from the embeddings")
+        if (settings.get("query_prefix") != spec["query_prefix"]
+                or settings.get("normalize") is not True
+                or settings.get("document_prefix", "") != spec.get("document_prefix", "")):
+            raise ValueError("Query encoding differs from the embeddings")
+        if settings["fp16"] and settings.get("bf16", False):
+            raise ValueError("Choose fp16 or bf16, not both")
+        model = cls(device, fp16=settings["fp16"], batch_size=batch_size,
+                    model=label, bf16=settings.get("bf16", False))
+        if model.identity != settings:
+            raise ValueError("Query model settings differ from the embeddings")
+        return model
 
     def offsets(self, texts):
         encoded = self.model.tokenizer(

@@ -43,12 +43,27 @@ class ToolSpec:
 
 
 class TextRouter:
+    """Separate platform filters from descriptive source requests."""
+
+    def __init__(self, source_types=("slack", "gmail", "linear", "google_drive",
+                                    "hubspot", "fireflies", "github", "jira", "confluence")):
+        self.source_types = frozenset(source_types)
+
     def route(self, request, feedback, tools):
         queries = tuple(q for q in feedback.suggested_queries if q.strip()) if feedback else ()
-        sources = feedback.suggested_sources if feedback else ()
-        # Critic suggestions cannot widen the server-resolved source scope.
+        suggestions = feedback.suggested_sources if feedback else ()
+        known = self.source_types | set(request.source_types) | {s.source_type for s in tools.values()}
+        platforms = tuple(dict.fromkeys(s.strip() for s in suggestions if s.strip() in known))
+        descriptions = tuple(s.strip() for s in suggestions if s.strip() and s.strip() not in known)
+        # Descriptions are relevance hints, never literal platform filters.
+        # Prefer targeted critic queries; use descriptions if query slots remain.
+        queries = tuple(dict.fromkeys(queries + tuple(
+            f"{request.query} {description}" for description in descriptions)))
+        sources = platforms
         if request.source_types:
-            sources = tuple(s for s in sources if s in request.source_types)
+            sources = tuple(s for s in platforms if s in request.source_types)
+        # Invalid or out-of-scope suggestions retain the original scope explicitly.
+        sources = sources or request.source_types
         return Route(reason="Search for the missing facts." if feedback else "Initial text search.",
                      text_queries=queries[:4] or (request.query,), source_types=sources), Usage(estimated_cost_usd=0)
 

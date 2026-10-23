@@ -1,0 +1,48 @@
+services:
+  app:
+    build:
+      context: .
+      args:
+        INSTALL_HYBRID: ${INSTALL_HYBRID:-false}
+    # Publish only on this computer. Authentication is still a benchmark demo.
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8000}:8000"
+    init: true
+    # Full-corpus process exit has lagged application shutdown by ~33 seconds.
+    # Allow cleanup before Docker escalates to SIGKILL (default: 10 seconds).
+    stop_grace_period: 60s
+    restart: "no"
+    environment:
+      RAG_MODE: ${RAG_MODE:-fixture}
+      RAG_DEMO_ACCESS: ${RAG_DEMO_ACCESS:-true}
+      RAG_RETRIEVAL: ${RAG_RETRIEVAL:-bm25}
+      RAG_CORPUS: ${RAG_CORPUS:-/data/documents.parquet}
+      RAG_BM25_INDEX: ${RAG_BM25_INDEX:-/data/indexes/bm25}
+      RAG_DENSE_INDEX: ${RAG_DENSE_INDEX:-/data/indexes/dense}
+      RAG_DEVICE: cpu
+      RAG_FP16: ${RAG_FP16:-}
+      RAG_BM25_WEIGHT: ${RAG_BM25_WEIGHT:-0.7}
+      RAG_CANDIDATE_K: ${RAG_CANDIDATE_K:-50}
+      RAG_RERANK_K: ${RAG_RERANK_K:-50}
+      RAG_RRF_K: ${RAG_RRF_K:-60}
+      RAG_ALLOWED_DOC_IDS_FILE: ${RAG_ALLOWED_DOC_IDS_FILE:-}
+      RAG_ALLOWED_SOURCES: ${RAG_ALLOWED_SOURCES:-}
+      RAG_ALLOWED_ORIGINS: "http://127.0.0.1:${WEB_PORT:-8000},http://localhost:${WEB_PORT:-8000},${RAG_ALLOWED_ORIGINS:-}"
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      RAG_ALLOW_PAID: ${RAG_ALLOW_PAID:-false}
+      RAG_MODEL: ${RAG_MODEL:-}
+      RAG_BUDGET_USD: ${RAG_BUDGET_USD:-0}
+      RAG_INPUT_PRICE: ${RAG_INPUT_PRICE:-0}
+      RAG_OUTPUT_PRICE: ${RAG_OUTPUT_PRICE:-0}
+      RAG_QUESTION_BUDGET_USD: ${RAG_QUESTION_BUDGET_USD:-0.1}
+      RAG_MAX_SECONDS: ${RAG_MAX_SECONDS:-120}
+      RAG_MAX_TOKENS: ${RAG_MAX_TOKENS:-16000}
+      RAG_MAX_CONTEXT_CHARS: ${RAG_MAX_CONTEXT_CHARS:-24000}
+      RAG_MAX_ROUNDS: ${RAG_MAX_ROUNDS:-2}
+      RAG_TOP_K: ${RAG_TOP_K:-5}
+    volumes:
+      - "${ARTIFACTS_DIR:-./.cache/corpus}:/data:ro"
+      - model-cache:/app/.cache/models
+
+volumes:
+  model-cache:
