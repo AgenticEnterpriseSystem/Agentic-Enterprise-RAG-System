@@ -565,3 +565,87 @@ def test_title_on_every_passage_keeps_exact_spans(corpus, tmp_path):
         row = table.slice(index.position[item.chunk.doc_id], 1).to_pylist()[0]
         text = document_text(row["title"], row["content"])
         assert text[item.chunk.start_char:item.chunk.end_char] == item.chunk.text
+
+
+def test_embedding_models_use_pinned_revisions_prefixes_and_manifest(tmp_path, monkeypatch):
+    import sys
+    import types
+    from src.config import EMBEDDING_MODELS, EMBEDDING_REVISION
+    from src.retrieval.corpus_dense import BGEModel, EmbeddingModel, model_label
+
+    loaded, encoded = [], []
+
+    class FakeST:
+        def __init__(self, name, revision, **kwargs):
+            loaded.append((name, revision, kwargs.get("model_kwargs")))
+            self.max_seq_length = 8192
+
+        def half(self):
+            pass
+
+        def encode(self, texts, **kwargs):
+            encoded.append(list(texts))
+            return np.ones((len(texts), 4), dtype=np.float32) / 2
+
+    monkeypatch.setitem(sys.modules, "sentence_transformers", types.SimpleNamespace(SentenceTransformer=FakeST))
+    assert BGEModel is EmbeddingModel
+    for label, spec in EMBEDDING_MODELS.items():
+        assert model_label(spec["name"]) == label and re.fullmatch(r"[0-9a-f]{40}", spec["revision"])
+    small = EmbeddingModel()
+    assert small.identity["revision"] == EMBEDDING_REVISION
+    # Older index manifests have exactly these keys, so existing indexes still load.
+    assert set(small.identity) == {"name", "revision", "query_prefix", "normalize", "max_seq_length", "fp16"}
+    with pytest.raises(ValueError, match="Unsupported"):
+        EmbeddingModel(model="other")
+    with pytest.raises(ValueError, match="not both"):
+        EmbeddingModel("cuda", fp16=True, bf16=True)
+
+    qwen = EmbeddingModel("cuda", model="qwen3-embedding-0.6b", bf16=True)
+    assert qwen.identity["max_seq_length"] == 512 and qwen.identity["bf16"] and not qwen.fp16
+    assert loaded[-1][2] is not None  # bf16 requested from the loader.
+    qwen.encode(["Which runbook?"], query=True)
+    qwen.encode(["passage text"])
+    assert encoded[-2][0].startswith("Instruct: ") and encoded[-2][0].endswith("Query:Which runbook?")
+    assert encoded[-1] == ["passage text"]
+
+    (tmp_path / "manifest.json").write_text(json.dumps({"model": qwen.identity}))
+    again = EmbeddingModel.for_index(tmp_path)  # CPU device, but settings follow the index.
+    assert again.identity == qwen.identity
+    stale = {**qwen.identity, "revision": "b" * 40}
+    (tmp_path / "manifest.json").write_text(json.dumps({"model": stale}))
+    with pytest.raises(ValueError, match="different model revision"):
+        EmbeddingModel.for_index(tmp_path)
+
+    class Broken(FakeST):
+        def encode(self, texts, **kwargs):
+            return np.full((len(texts), 4), np.nan, dtype=np.float32)
+
+    monkeypatch.setitem(sys.modules, "sentence_transformers", types.SimpleNamespace(SentenceTransformer=Broken))
+    with pytest.raises(ValueError, match="non-finite"):
+        EmbeddingModel(model="gte-modernbert-base").encode(["x"])
+
+
+def test_embedding_retries_smaller_batches_after_gpu_out_of_memory(monkeypatch):
+    import sys
+    import types
+    import torch
+    from src.retrieval.corpus_dense import EmbeddingModel
+
+    class TightGPU:
+        def __init__(self, name, revision, **kwargs):
+            self.max_seq_length = 512
+            self.batches = []
+
+        def half(self):
+            pass
+
+        def encode(self, texts, batch_size, **kwargs):
+            self.batches.append(batch_size)
+            if batch_size > 8:
+                raise torch.OutOfMemoryError("CUDA out of memory")
+            return np.ones((len(texts), 4), dtype=np.float32) / 2
+
+    monkeypatch.setitem(sys.modules, "sentence_transformers", types.SimpleNamespace(SentenceTransformer=TightGPU))
+    model = EmbeddingModel(model="qwen3-embedding-0.6b", batch_size=32)
+    assert model.encode(["a", "b"]).shape == (2, 4)
+    assert model.model.batches == [32, 16, 8] and model.batch_size == 8

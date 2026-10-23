@@ -15,3 +15,5 @@ and reproduction commands.
 Large corpus/index files and full answer/evidence traces stay in ignored `.cache/`.
 Old local reduced-corpus experiments are not the full-corpus results above. Review
 selection files and empty review templates do not establish completed human review.
+
+Hybrid and model-screening results from Hira are documented in [Full corpus results](../docs/FULL_CORPUS.md).

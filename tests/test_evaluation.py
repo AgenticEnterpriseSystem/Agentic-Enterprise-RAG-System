@@ -121,3 +121,137 @@ def test_committed_split_manifest_is_consistent():
     ]
     assert len(manifest["golden_development_ids"]) == 60
     assert set(manifest["golden_development_ids"]) <= set(parts["development"])
+
+
+# Hybrid variants over shared searches
+
+def test_hybrid_comparison_skips_unlabeled_scores():
+    from src.evaluation.run_hybrid import compare, recall10
+
+    rows = [
+        {"relevant_doc_ids": ["a"], "retrieved_doc_ids": ["a"]},
+        {"relevant_doc_ids": ["b"], "retrieved_doc_ids": []},
+        {"relevant_doc_ids": [], "retrieved_doc_ids": []},
+        {"relevant_doc_ids": ["d"], "retrieved_doc_ids": ["d"]},
+    ]
+    baseline = [
+        {"relevant_doc_ids": ["a"], "retrieved_doc_ids": []},
+        {"relevant_doc_ids": ["b"], "retrieved_doc_ids": ["b"]},
+        {"relevant_doc_ids": ["c"], "retrieved_doc_ids": ["c"]},
+        {"relevant_doc_ids": [], "retrieved_doc_ids": []},
+    ]
+    assert compare(rows, baseline) == (1, 1)
+    with pytest.raises(ValueError, match="labeled question"):
+        recall10([])
+
+
+def test_reranker_identity_requires_a_resolved_revision(monkeypatch):
+    from types import SimpleNamespace
+    from huggingface_hub import HfApi
+    from src.evaluation.run_hybrid import reranker_identity
+
+    monkeypatch.setattr(HfApi, 'model_info', lambda *a, **kw: SimpleNamespace(sha=None))
+    with pytest.raises(ValueError, match="No revision"):
+        reranker_identity('bge-reranker-base')
+    revision = 'a' * 40
+    monkeypatch.setattr(HfApi, 'model_info', lambda *a, **kw: SimpleNamespace(sha=revision))
+    assert reranker_identity('bge-reranker-base')[2] == revision
+    assert reranker_identity('bge-reranker-base@' + revision)[2] == revision
+
+
+def test_hybrid_variants_share_searches_and_match_live_hybrid(tmp_path):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from src.contracts import SearchRequest, UserContext
+    from src.evaluation.run_hybrid import run_single, run_variant, search_once
+    from src.retrieval.corpus_bm25 import CorpusBM25
+    from src.retrieval.corpus_dense import CorpusDense, embed_corpus
+    from src.retrieval.hybrid import HybridConfig, HybridRetriever
+    from src.retrieval.reranker import CrossEncoderReranker
+    from tests.test_retrieval import FakeModel
+
+    path = tmp_path / "docs.parquet"
+    pq.write_table(pa.table({
+        "doc_id": [f"d{i}" for i in range(5)],
+        "source_type": ["slack", "gmail", "linear", "slack", "jira"],
+        "title": ["Deploy", "", "Sales", "Grid", "Canary"],
+        "content": ["canary rollback steps for the deployment", "lunch menu canary rollback",
+                    "quarterly forecast review", "elevation tokens for grid density",
+                    "canary release checklist and rollback owner"],
+        "path": ["p"] * 5,
+    }), path)
+    CorpusBM25.build(path).save(tmp_path / "bm25")
+    bm25 = CorpusBM25.load(tmp_path / "bm25", corpus_path=path)
+    embed_corpus(path, tmp_path / "dense", FakeModel(), shard_docs=2, window=4, overlap=1)
+    dense = CorpusDense.load(tmp_path / "dense", FakeModel(), corpus_path=path, corpus=bm25.corpus)
+
+    class Counting:
+        def __init__(self, retriever):
+            self.retriever, self.calls = retriever, 0
+            self.doc_ids, self.manifest = retriever.doc_ids, {}
+
+        def search(self, request):
+            self.calls += 1
+            return self.retriever.search(request)
+
+    questions = [{"question_id": f"q{i}", "question_type": "basic", "source_types": ["slack"],
+                  "question": text, "expected_doc_ids": ["d0"]}
+                 for i, text in enumerate(["canary rollback", "grid density", "canary rollback"])]
+    user = UserContext(user_id="benchmark", allowed_doc_ids=frozenset(bm25.doc_ids))
+    counted = (Counting(bm25), Counting(dense))
+    caches, seconds, errors = search_once(counted, questions, user, depth=5)
+    assert [r.calls for r in counted] == [2, 2] and not errors  # Repeated question searched once.
+
+    live = HybridRetriever(bm25, dense, config=HybridConfig(candidate_k=5, rerank_k=5))
+    rows, latencies, manifest = run_variant(counted, caches, seconds, errors, questions, user,
+                                            bm25_weight=0.5, top_k=5, candidate_k=5)
+    assert manifest["method"] == "hybrid-rrf" and len(latencies) == 3
+    for q, row in zip(questions, rows):
+        expected = live.search(SearchRequest(query=q["question"], user=user, top_k=5))
+        assert row["retrieved_doc_ids"] == [e.chunk.doc_id for e in expected]
+    assert [r.calls for r in counted] == [2, 2]  # Variants replay the saved results.
+
+    keyword_only, _, _ = run_variant(counted, caches, seconds, errors, questions, user,
+                                     bm25_weight=1.0, top_k=5, candidate_k=5)
+    bm25_rows, _ = run_single(caches[0], seconds, errors, questions, 5)
+    assert [r["retrieved_doc_ids"] for r in keyword_only] == [r["retrieved_doc_ids"] for r in bm25_rows]
+
+    # The reranker reorders the fused candidates; here it prefers the longest passage.
+    reranker = CrossEncoderReranker("offline-test", "a" * 40,
+                                    scorer=lambda pairs: [len(text) for _, text in pairs])
+    reranked, _, manifest = run_variant(counted, caches, seconds, errors, questions[:1], user,
+                                        bm25_weight=0.5, reranker=reranker, top_k=5, candidate_k=5)
+    assert set(reranked[0]["retrieved_doc_ids"]) == set(rows[0]["retrieved_doc_ids"])
+    assert reranked[0]["scores"] == sorted(reranked[0]["scores"], reverse=True)
+    assert reranked[0]["scores"] != rows[0]["scores"]
+    assert manifest["reranker"]["name"] == "offline-test"
+
+
+# Screening sample
+
+def test_sample_keeps_references_lookalikes_and_seeded_random_documents():
+    from src.data.sample import sample_ids
+    from src.evaluation.screen_models import misses_found
+
+    corpus = [f"d{i}" for i in range(20)]
+    questions = [{"question_id": "q1", "expected_doc_ids": ["d0"]},
+                 {"question_id": "q2", "expected_doc_ids": ["d1", "d2"]}]
+    rankings = [[{"question_id": "q1", "retrieved_doc_ids": ["d3", "d0", "d4"]},
+                 {"question_id": "other", "retrieved_doc_ids": ["d19"]}],  # Not in the split.
+                [{"question_id": "q2", "retrieved_doc_ids": ["d5", "d6", "d7"]}]]
+    chosen, counts = sample_ids(corpus, questions, rankings, top_k=2, random_docs=3, seed=1)
+    # References plus each question's top 2 (d4 and d7 rank third); "other" is not in the split.
+    assert {"d0", "d1", "d2", "d3", "d5", "d6"} <= chosen
+    assert counts == {"reference": 3, "lookalikes": 3, "random": 3} and len(chosen) == 9
+    again, _ = sample_ids(corpus, questions, rankings, top_k=2, random_docs=3, seed=1)
+    assert again == chosen  # Seeded, so the sample is reproducible.
+    with pytest.raises(ValueError, match="missing"):
+        sample_ids(corpus, [{"question_id": "q", "expected_doc_ids": ["nope"]}], [], random_docs=1)
+
+    bm25 = [{"relevant_doc_ids": ["a"], "retrieved_doc_ids": ["x"]},
+            {"relevant_doc_ids": ["b"], "retrieved_doc_ids": ["b"]},
+            {"relevant_doc_ids": [], "retrieved_doc_ids": []}]
+    dense = [{"relevant_doc_ids": ["a"], "retrieved_doc_ids": ["a"]},
+             {"relevant_doc_ids": ["b"], "retrieved_doc_ids": ["y"]},
+             {"relevant_doc_ids": [], "retrieved_doc_ids": []}]
+    assert misses_found(dense, bm25) == (1, 1)

@@ -6,28 +6,23 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import ConfigDict, Field, field_validator
 
 from src.agents.search_agent import AgentConfig, SearchAgent
 from src.agents.search_critic import EvidenceCritic, SYSTEM_PROMPT as CRITIC_PROMPT
-from src.config import CORPUS_DIR, ROOT
+from src.config import ROOT, RetrievalSettings
+from src.retrieval.factory import (RetrievalConfigurationError as RuntimeConfigurationError,
+                                   load_retriever as load_configured_retriever)
 from src.contracts import (Answer, Chunk, Evidence, QueryRequest, QueryResponse,
                            SearchRequest, Trace, TraceStep, Usage, UserContext, validate_evidence)
 from src.generation.generator import (AnthropicConfig, AnthropicProvider, Completion,
                                       GenerationConfig, GroundedGenerator, ProviderError)
 
 
-class WebSettings(BaseModel):
+class WebSettings(RetrievalSettings):
     model_config = ConfigDict(frozen=True, extra='forbid', allow_inf_nan=False)
     mode: Literal['retrieval', 'fixture', 'live'] = 'retrieval'
     demo_access: bool = False
-    retrieval: Literal['bm25', 'hybrid'] = 'bm25'
-    corpus: Path = CORPUS_DIR / 'documents.parquet'
-    bm25_index: Path = CORPUS_DIR / 'indexes/bm25'
-    dense_index: Path = CORPUS_DIR / 'indexes/dense'
-    device: str = 'cpu'
-    fp16: bool | None = None
-    bm25_weight: float = Field(default=.7, ge=0, le=1)
     allowed_doc_ids_file: Path | None = None
     allowed_sources: tuple[str, ...] = ()
     frontend_dist: Path = ROOT / 'frontend/dist'
@@ -60,10 +55,6 @@ class RuntimeErrorResponse(Exception):
     def __init__(self, status, code, message):
         self.status, self.code, self.message = status, code, message
         super().__init__(message)
-
-
-class RuntimeConfigurationError(ValueError):
-    """Operator-safe setup explanation, with no credentials or provider text."""
 
 
 class FixtureRetriever:
@@ -114,35 +105,7 @@ def load_retriever(settings):
     """Use the existing retrievers; artifact checks happen before loading a model."""
     if settings.mode == 'fixture':
         return FixtureRetriever()
-    from src.retrieval.corpus_bm25 import CorpusBM25
-    bm25 = CorpusBM25.load(settings.bm25_index, corpus_path=settings.corpus)
-    if settings.retrieval == 'bm25':
-        return bm25
-    from src.retrieval.corpus_dense import BGEModel, CorpusDense, INDEX_VERSION
-    from src.retrieval.hybrid import HybridConfig, HybridRetriever
-    manifest = json.loads((settings.dense_index / 'manifest.json').read_text())
-    if manifest.get('version') != INDEX_VERSION or not manifest.get('complete'):
-        raise RuntimeConfigurationError('Dense manifest is incomplete or unsupported. Supply a complete version-1 dense index.')
-    if manifest.get('corpus_sha256') != bm25.manifest.get('corpus_sha256'):
-        raise RuntimeConfigurationError('BM25 and dense indexes must match the same corpus file (corpus_sha256).')
-    if not (settings.dense_index / 'doc_ids.json').is_file():
-        raise FileNotFoundError('Dense document IDs are missing')
-    if not isinstance(manifest.get('shards'), int) or manifest['shards'] < 1:
-        raise RuntimeConfigurationError('Dense manifest must record a positive shard count.')
-    if settings.fp16 is not None and settings.fp16 != manifest['model']['fp16']:
-        raise RuntimeConfigurationError('Query precision must match the dense index manifest. Unset RAG_FP16 to use the recorded precision.')
-    for i in range(manifest['shards']):
-        for suffix in ('.npy', '.parquet'):
-            if not (settings.dense_index / f'shard_{i:05d}{suffix}').is_file():
-                raise RuntimeConfigurationError('Dense index is missing a shard. Supply every shard_XXXXX.npy and .parquet file.')
-    try:
-        model = BGEModel.for_index(settings.dense_index, settings.device, fp16=settings.fp16)
-        dense = CorpusDense.load(settings.dense_index, model=model,
-                                 corpus_path=settings.corpus, corpus=bm25.corpus)
-    except ValueError:
-        raise RuntimeConfigurationError('Dense model or index is incompatible. Check the pinned BGE name/revision, query encoding, precision, corpus order and shard dimensions.') from None
-    return HybridRetriever(bm25, dense, config=HybridConfig(
-        bm25_weight=settings.bm25_weight, dense_weight=1-settings.bm25_weight))
+    return load_configured_retriever(settings)
 
 
 class Runtime:
@@ -181,6 +144,8 @@ class Runtime:
                 'source_types': self.source_types, 'generation_enabled': self.agent is not None,
                 'scope': 'Explicit benchmark demo identity; not real authentication.',
                 'model': self.settings.model if self.settings.mode == 'live' else None,
+                'retrieval_config': self.retriever.manifest.get('config'),
+                'embedding_model': self.retriever.manifest.get('dense', {}).get('model'),
                 'budget_remaining_usd': max(0, self.settings.budget_usd-self.provider.reserved_usd)
                     if self.settings.mode == 'live' else None}
 

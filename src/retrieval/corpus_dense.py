@@ -1,4 +1,4 @@
-"""Full-corpus BGE-small + FAISS document retrieval (max score over passages).
+"""Full-corpus dense (BGE, GTE, Arctic, Qwen3) + FAISS document retrieval (max over passages).
 
 Documents longer than the model limit are split into overlapping token windows.
 `embed` writes resumable shards (run it on a GPU); `rank` searches all passages
@@ -16,13 +16,12 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from src.config import CORPUS_DIR, EMBEDDING_MODEL, EMBEDDING_REVISION, ROOT
+from src.config import CORPUS_DIR, EMBEDDING_MODELS, ROOT
 from src.contracts import Chunk, Evidence, SearchRequest, validate_evidence
 from src.retrieval.corpus_bm25 import document_text, file_sha256
 
 INDEX_VERSION = 1
-QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
-WINDOW_TOKENS = 500  # BGE accepts 512 tokens including [CLS]/[SEP]; leave margin.
+WINDOW_TOKENS = 500  # Models accept 512 tokens including special tokens; leave margin.
 OVERLAP_TOKENS = 50
 TITLE_TOKENS = 48  # Cap for the title label repeated on every passage.
 PASSAGE_SCHEMA = pa.schema(
@@ -76,52 +75,93 @@ def document_passages(titles, contents, offsets, window, overlap, title_every=Fa
         ]
 
 
-class BGEModel:
-    """Pinned sentence-transformers BGE model; fp16 on GPU unless disabled."""
+def model_label(name):
+    """Registry label for a model name, e.g. "bge-base"."""
+    for label, spec in EMBEDDING_MODELS.items():
+        if spec["name"] == name:
+            return label
+    raise ValueError(f"Unsupported embedding model: {name}")
 
-    def __init__(self, device="cpu", fp16=None, batch_size=128, name=EMBEDDING_MODEL, revision=None):
+
+def method_label(name):
+    """Short label for manifests and result folders; unregistered names keep their last part."""
+    try:
+        return model_label(name)
+    except ValueError:
+        return name.split("/")[-1]
+
+
+class EmbeddingModel:
+    """A registered sentence-transformers model at its pinned revision.
+
+    Queries (and, if the model needs it, passages) get the model's own prefix.
+    Precision is fp16 on GPU unless disabled; bf16 suits newer GPUs such as L4.
+    """
+
+    def __init__(self, device="cpu", fp16=None, batch_size=128, model="bge-small", bf16=False):
+        import torch
         from sentence_transformers import SentenceTransformer
 
-        # Model-aware query loading follows Hira's BGEModel.for_index interface.
-        if name not in {"BAAI/bge-small-en-v1.5", "BAAI/bge-base-en-v1.5", "BAAI/bge-large-en-v1.5"}:
-            raise ValueError("Unsupported BGE model; integrate its retriever adapter explicitly")
-        revision = revision or (EMBEDDING_REVISION if name == EMBEDDING_MODEL else None)
-        if not revision or not re.fullmatch(r"[0-9a-f]{40}", revision):
-            raise ValueError("An exact model revision is required")
+        if model not in EMBEDDING_MODELS:
+            raise ValueError(f"Unsupported embedding model: {model}")
+        spec = EMBEDDING_MODELS[model]
+        if not re.fullmatch(r"[0-9a-f]{40}", spec["revision"]):
+            raise ValueError("Embedding revision must be a 40-character commit hash")
+        self.fp16 = (device.startswith("cuda") and not bf16) if fp16 is None else fp16
+        if self.fp16 and bf16:
+            raise ValueError("Choose fp16 or bf16, not both")
         self.model = SentenceTransformer(
-            name,
-            revision=revision,
+            spec["name"],
+            revision=spec["revision"],
             device=device,
             cache_folder=str(ROOT / ".cache" / "models"),
             trust_remote_code=False,
+            model_kwargs={"dtype": torch.bfloat16} if bf16 else None,
         )
-        self.fp16 = device.startswith("cuda") if fp16 is None else fp16
         if self.fp16:
             self.model.half()
+        # Passages are at most WINDOW_TOKENS tokens, so every model gets the same limit.
+        self.model.max_seq_length = min(self.model.max_seq_length, 512)
+        self.query_prefix = spec["query_prefix"]
+        self.document_prefix = spec.get("document_prefix", "")
         self.batch_size = batch_size
         self.identity = {
-            "name": name,
-            "revision": revision,
-            "query_prefix": QUERY_PREFIX,
+            "name": spec["name"],
+            "revision": spec["revision"],
+            "query_prefix": self.query_prefix,
             "normalize": True,
             "max_seq_length": self.model.max_seq_length,
             "fp16": self.fp16,
         }
+        # Older manifests have only the keys above; add new ones only when used.
+        if self.document_prefix:
+            self.identity["document_prefix"] = self.document_prefix
+        if bf16:
+            self.identity["bf16"] = True
 
     @classmethod
     def for_index(cls, directory: Path, device="cpu", fp16=None, batch_size=128):
-        """Load the exact name/revision/precision recorded by Hira's index builder."""
+        """Query model matching an index manifest's model, revision and precision."""
         settings = json.loads((Path(directory) / "manifest.json").read_text())["model"]
-        if not isinstance(settings.get("revision"), str) or not re.fullmatch(r"[0-9a-f]{40}", settings["revision"]):
-            raise ValueError("Index manifest must pin the exact model revision")
-        if not isinstance(settings.get("fp16"), bool):
+        label = model_label(settings["name"])
+        spec = EMBEDDING_MODELS[label]
+        if settings.get("revision") != spec["revision"]:
+            raise ValueError("Index was built with a different model revision")
+        if not isinstance(settings.get("fp16"), bool) or not isinstance(settings.get("bf16", False), bool):
             raise ValueError("Index manifest must record query precision")
         if fp16 is not None and fp16 != settings["fp16"]:
             raise ValueError("Query precision differs from the embeddings")
-        if settings.get("query_prefix") != QUERY_PREFIX or settings.get("normalize") is not True:
+        if (settings.get("query_prefix") != spec["query_prefix"]
+                or settings.get("normalize") is not True
+                or settings.get("document_prefix", "") != spec.get("document_prefix", "")):
             raise ValueError("Query encoding differs from the embeddings")
-        return cls(device, fp16=settings["fp16"] if fp16 is None else fp16,
-                   batch_size=batch_size, name=settings["name"], revision=settings["revision"])
+        if settings["fp16"] and settings.get("bf16", False):
+            raise ValueError("Choose fp16 or bf16, not both")
+        model = cls(device, fp16=settings["fp16"], batch_size=batch_size,
+                    model=label, bf16=settings.get("bf16", False))
+        if model.identity != settings:
+            raise ValueError("Query model settings differ from the embeddings")
+        return model
 
     def offsets(self, texts):
         encoded = self.model.tokenizer(
@@ -134,14 +174,33 @@ class BGEModel:
         return encoded["offset_mapping"]
 
     def encode(self, texts, query=False):
-        inputs = [QUERY_PREFIX + t for t in texts] if query else texts
-        return self.model.encode(
-            inputs,
-            batch_size=self.batch_size,
-            normalize_embeddings=True,
-            convert_to_numpy=True,
-            show_progress_bar=False,
-        ).astype(np.float32)
+        import torch
+
+        prefix = self.query_prefix if query else self.document_prefix
+        inputs = [prefix + t for t in texts] if prefix else list(texts)
+        while True:
+            try:
+                out = self.model.encode(
+                    inputs,
+                    batch_size=self.batch_size,
+                    normalize_embeddings=True,
+                    convert_to_numpy=True,
+                    show_progress_bar=False,
+                ).astype(np.float32)
+                break
+            except torch.OutOfMemoryError:
+                # Retry with smaller batches; results do not depend on batch size.
+                if self.batch_size == 1:
+                    raise
+                torch.cuda.empty_cache()
+                self.batch_size = max(1, self.batch_size // 2)
+                print(f"GPU out of memory; retrying with batch size {self.batch_size}", flush=True)
+        if not np.isfinite(out).all():
+            raise ValueError("Model produced non-finite embeddings; try bf16 or fp32 precision")
+        return out
+
+
+BGEModel = EmbeddingModel  # Earlier name, kept for existing callers.
 
 
 def embed_corpus(
@@ -158,7 +217,7 @@ def embed_corpus(
     corpus = pq.ParquetFile(corpus_path)
     manifest = {
         "version": INDEX_VERSION,
-        "method": "bge-small + faiss (max over passages)",
+        "method": f"{method_label(model.identity['name'])} + faiss (max over passages)",
         "unit": (
             f"{window}-token windows, {overlap}-token overlap, of content; "
             f"title (max {TITLE_TOKENS} tokens) prefixed to every passage"
@@ -362,9 +421,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--corpus", type=Path, default=CORPUS_DIR / "documents.parquet")
     parser.add_argument("--output", type=Path, default=CORPUS_DIR / "indexes" / "dense")
+    parser.add_argument(
+        "--model", choices=sorted(EMBEDDING_MODELS), default="bge-small",
+        help="Embedding model (use a new --output for each model)",
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--batch-size", type=int, default=256)
-    parser.add_argument("--fp32", action="store_true", help="Disable fp16 on GPU")
+    parser.add_argument("--precision", choices=["auto", "fp16", "bf16", "fp32"], default="auto",
+                        help="auto: fp16 on GPU, fp32 on CPU; bf16 needs an Ampere+ GPU (e.g. L4)")
+    parser.add_argument("--fp32", action="store_true", help="Same as --precision fp32")
     parser.add_argument("--shard-docs", type=int, default=20000)
     parser.add_argument(
         "--title-every-passage",
@@ -372,8 +437,13 @@ def main():
         help="Prefix each document's title to every passage (use a new --output)",
     )
     args = parser.parse_args()
-    model = BGEModel(
-        args.device, fp16=False if args.fp32 else None, batch_size=args.batch_size
+    precision = "fp32" if args.fp32 else args.precision
+    model = EmbeddingModel(
+        args.device,
+        fp16={"auto": None, "fp16": True}.get(precision, False),
+        batch_size=args.batch_size,
+        model=args.model,
+        bf16=precision == "bf16",
     )
     started = time.perf_counter()
     manifest = embed_corpus(

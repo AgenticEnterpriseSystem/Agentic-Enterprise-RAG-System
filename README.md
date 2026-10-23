@@ -1,66 +1,48 @@
 # Agentic RAG for Enterprise Knowledge Search
 
-A FastAPI + React web app that searches enterprise documents and answers questions
-with cited evidence. It uses Onyx's synthetic **EnterpriseRAG-Bench** dataset.
+A FastAPI + React app for answering questions over EnterpriseRAG-Bench documents
+with cited sources. It combines BM25 and BGE-base retrieval using RRF. An LLM
+critic checks the retrieved passages and requests follow-up searches when needed.
 
-- **Fixed RAG:** search once, then generate an answer.
-- **Adaptive agent:** search, check whether the evidence is sufficient, and search
-  again when needed before answering.
+## Run the app
 
-## Run the demo
-
-Install and start **Docker Desktop**, or Docker Engine with Compose v2 on Linux.
-Clone or download this repository and open a terminal in its root folder. No
-separate Python, Node, or `requirements.txt` installation is needed with Docker.
+Follow [Setup](docs/WEB_APP.md) to install dependencies, build the frontend,
+obtain the corpus/index bundle, and configure your local `.env`.
+Then, from the repository root:
 
 ```sh
-docker compose up --build
+source .venv/bin/activate
+python scripts/run_web.py
 ```
 
-Open **http://127.0.0.1:8000**. The first build downloads dependencies.
+Open <http://127.0.0.1:8000> and wait for **Ready**. Stop with Ctrl+C.
+Docker is an optional alternative covered in the setup guide.
 
-Fresh defaults use **synthetic fixture responses**: this previews the interface,
-not real retrieval or answer quality. Existing `.env` or shell settings can
-change the mode. Ask **“How long are artifacts retained?”**, switch workflows,
-click a citation, and expand **Search steps**. Enter submits; text wraps automatically.
+| Mode | Behavior |
+| --- | --- |
+| `fixture` | Scripted demo; no artifacts or API key |
+| `retrieval` | Real search; no generated answers |
+| `live` | Search, evidence critique and cited answers; API key and budget required |
 
-When finished:
+Select **Adaptive agent** for follow-up searches or **Fixed RAG** for one search.
+Neither generates answers in retrieval-only mode.
 
-```sh
-docker compose down
-```
+## Status
 
-**For real search and generated answers**, follow the [setup guide](docs/WEB_APP.md).
-Copy the shared `.env.example` template to your own local `.env`; never commit
-`.env`. You need matching corpus/index files and, for live generation, your own
-API key and spending cap. A shared artifact download link has **not yet been published**;
-the guide includes local build instructions.
+Working alpha: full-corpus native hybrid search and a live agent request have
+been verified. Broader answer-quality testing and full-corpus Docker validation
+remain unfinished. Known issues are described in [Setup](docs/WEB_APP.md) and
+[System](docs/SYSTEM.md).
 
-## Current status
-
-The web app connects both workflows, displays exact citation excerpts and search
-traces, and handles partial answers and errors. Full-corpus BM25 and BGE-small
-retrieval baselines and small live BM25 development comparisons are recorded.
-**Overall answer-quality improvement has not been established.**
-
-Matching BGE-base hybrid verification, real authentication/access integration,
-independent answer review, critic calibration, and final experiments remain pending.
+Artifacts are supplied separately by the team; a download URL is not yet published.
+Never commit `.env` or API keys.
 
 ## Documentation
 
-| Need | Read |
-| --- | --- |
-| Run locally, configure real data or hybrid, troubleshoot | [Setup](docs/WEB_APP.md) |
-| Understand the workflow, API, and limitations | [System](docs/SYSTEM.md) |
-| Inspect results or reproduce an evaluation | [Evaluation](docs/EVALUATION.md) |
-| Check dataset origin, license, and risks | [Data card](docs/DATA_CARD.md) |
+- [Setup](docs/WEB_APP.md)
+- [System](docs/SYSTEM.md)
+- [Evaluation](docs/EVALUATION.md)
+- [Retrieval results](docs/FULL_CORPUS.md)
+- [Dataset](docs/DATA_CARD.md)
 
-Application code is in `src/` and `frontend/`; tests are in `tests/`;
-[saved evaluation artifacts](evaluation/README.md) are in `evaluation/`.
-Large local data and experiment traces belong in ignored `.cache/`.
-
-## Project
-
-Team: Hira Mian, Jane Choi, and Alexander Xykis.
-See [Contributing](CONTRIBUTING.md), [Code of Conduct](CODE_OF_CONDUCT.md),
-and the [MIT license](LICENSE).
+Team: Hira Mian, Jane Choi, Alexander Xykis. [MIT License](LICENSE).

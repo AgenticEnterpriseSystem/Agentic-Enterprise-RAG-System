@@ -313,15 +313,9 @@ def parser():
                    help='Baseline skips critic/follow-ups; compare saves both arms on identical questions')
     p.add_argument('--questions', type=Path, default=CORPUS_DIR / 'questions.jsonl')
     p.add_argument('--splits', type=Path, default=ROOT / 'evaluation/splits.json')
-    p.add_argument('--corpus', type=Path, default=CORPUS_DIR / 'documents.parquet')
-    p.add_argument('--index', type=Path, default=CORPUS_DIR / 'indexes/bm25')
+    from src.retrieval.factory import add_retrieval_arguments
+    add_retrieval_arguments(p, index_flag='--index')
     p.add_argument('--retrieval', choices=('bm25', 'hybrid'), default='bm25')
-    p.add_argument('--bm25-weight', type=float, default=0.7,
-                   help='Hybrid BM25 weight in [0, 1]; dense weight is its complement')
-    p.add_argument('--dense-index', type=Path, default=CORPUS_DIR / 'indexes/dense')
-    p.add_argument('--device', default='cpu', help='Device for hybrid query embeddings')
-    p.add_argument('--fp16', action=argparse.BooleanOptionalAction, default=None,
-                   help='Override query precision; default matches the dense index')
     p.add_argument('--output', type=Path)
     p.add_argument('--live', action='store_true', help='Allow paid model calls')
     p.add_argument('--interactive', action='store_true', help='Enter custom questions; retrieval only unless --live')
@@ -348,7 +342,7 @@ def main():
         p.error('--bm25-weight must be between 0 and 1')
     if args.interactive and args.workflow != 'agent':
         p.error('--workflow baseline/compare requires the development batch pilot')
-    required = [args.corpus, args.index / 'manifest.json']
+    required = [args.corpus, args.bm25_index / 'manifest.json']
     if not args.interactive:
         required.extend([args.questions, args.splits])
     if args.retrieval == 'hybrid':
@@ -363,23 +357,15 @@ def main():
         p.error('--live requires a positive total budget and both token prices')
     if not 0 < args.question_budget_usd < float('inf'):
         p.error('--question-budget-usd must be positive and finite')
-    from src.retrieval.corpus_bm25 import CorpusBM25, file_sha256
+    from src.retrieval.corpus_bm25 import file_sha256
 
     try:
         questions = ([] if args.interactive else development_sample(
             load_questions(args.questions, args.splits, 'development'), args.count, args.question_ids))
     except ValueError as exc:
         p.error(str(exc))
-    # Loading also verifies the actual corpus hash against the index manifest.
-    retriever = CorpusBM25.load(args.index, corpus_path=args.corpus)
-    if args.retrieval == 'hybrid':
-        from src.retrieval.corpus_dense import BGEModel, CorpusDense
-        from src.retrieval.hybrid import HybridConfig, HybridRetriever
-
-        dense = CorpusDense.load(args.dense_index, model=BGEModel.for_index(args.dense_index, args.device, fp16=args.fp16),
-                                 corpus_path=args.corpus, corpus=retriever.corpus)
-        retriever = HybridRetriever(retriever, dense, config=HybridConfig(
-            bm25_weight=args.bm25_weight, dense_weight=1 - args.bm25_weight))
+    from src.retrieval.factory import load_retriever, settings_from_args
+    retriever = load_retriever(settings_from_args(args))
     if not args.live and not args.interactive and not args.prepare:
         print(json.dumps({'ready': True, 'paid_calls': False, 'retrieval': args.retrieval,
                           'documents': len(retriever.doc_ids),

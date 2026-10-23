@@ -5,6 +5,31 @@ not established.** Small live runs are development checks, not final evaluation.
 Independent human review, judge validation, critic calibration and comparable
 BGE-base hybrid answer evaluation remain pending for these runs.
 
+## Match the web retriever
+
+The web runtime, pilot and retrieval evaluations share `RetrievalSettings` and
+manifest-aware loading. Hybrid defaults are BM25 weight 0.7, dense weight 0.3,
+50 candidates per retriever, a fused/rerank pool of 50, RRF k=60, CPU encoding,
+manifest-selected precision and no reranker. CLI evaluations do not read `.env`;
+pass the same artifact paths and any web overrides explicitly:
+
+```sh
+python -m src.evaluation.run_hybrid \
+  --corpus .cache/hybrid-artifacts/documents.parquet \
+  --bm25-index .cache/hybrid-artifacts/indexes/bm25 \
+  --dense-index .cache/hybrid-artifacts/indexes/dense-bge-base \
+  --questions .cache/corpus/questions.jsonl --split development \
+  --output-dir .cache/evaluation/hybrid-development
+```
+
+Use a fresh output directory. The questions file is separate from the assembled
+web bundle. Web `RAG_CANDIDATE_K`, `RAG_RERANK_K`, `RAG_RRF_K` and `RAG_FP16`
+correspond to `--candidate-k`, `--rerank-k`, `--rrf-k` and `--fp16/--no-fp16`.
+For hybrid evaluation, `--bm25-weights` accepts a comma-separated sweep; rerankers
+are opt-in with `--rerankers`. Existing notebooks pass their experiment settings
+explicitly. Retrieval metrics still request 20 results to score Recall@20;
+the web app's default answer context starts with five results.
+
 ## Retrieval results
 
 Both methods searched all **511,958 documents** for 300 development questions.

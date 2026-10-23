@@ -15,3 +15,6 @@ rag-dense 2/
 # Web application build and dependencies
 frontend/node_modules/
 frontend/dist/
+
+# Split artifact downloads
+rag-dense [0-9]*/

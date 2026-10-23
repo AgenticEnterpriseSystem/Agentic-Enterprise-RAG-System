@@ -255,12 +255,13 @@ def test_agent_rejects_scope_violation_before_critic_or_generator():
 
 def test_hybrid_manifest_failures_and_shared_corpus(tmp_path, monkeypatch):
     from src.retrieval.corpus_bm25 import CorpusBM25
-    from src.retrieval.corpus_dense import BGEModel, CorpusDense, INDEX_VERSION, QUERY_PREFIX
+    from src.retrieval.corpus_dense import BGEModel, CorpusDense, INDEX_VERSION
+    from src.config import BGE_QUERY_PREFIX as QUERY_PREFIX
     from src.retrieval.hybrid import HybridRetriever
     corpus = object()
     bm25 = SimpleNamespace(doc_ids=['fixture-policy'], corpus=corpus, manifest={'corpus_sha256': 'abc'})
     monkeypatch.setattr(CorpusBM25, 'load', lambda *a, **k: bm25)
-    model = {'name': 'BAAI/bge-base-en-v1.5', 'revision': 'a'*40, 'fp16': True, 'query_prefix': QUERY_PREFIX, 'normalize': True}
+    model = {'name': 'BAAI/bge-base-en-v1.5', 'revision': 'a5beb1e3e68b9ab74eb54cfd186867f64f240e1a', 'max_seq_length': 512, 'fp16': True, 'query_prefix': QUERY_PREFIX, 'normalize': True}
     manifest = {'version': INDEX_VERSION, 'complete': True, 'corpus_sha256': 'abc', 'shards': 1, 'model': model}
     def save():
         (tmp_path / 'manifest.json').write_text(json.dumps(manifest))
@@ -293,6 +294,6 @@ def test_hybrid_manifest_failures_and_shared_corpus(tmp_path, monkeypatch):
     monkeypatch.setattr(CorpusDense, 'load', load)
     hybrid = load_retriever(config)
     assert isinstance(hybrid, HybridRetriever)
-    assert captured['name'] == model['name'] and captured['revision'] == model['revision'] and captured['fp16']
+    assert captured['model'] == 'bge-base' and captured['fp16']
     assert hybrid.config.bm25_weight == .7
     assert hybrid.bm25.corpus is corpus

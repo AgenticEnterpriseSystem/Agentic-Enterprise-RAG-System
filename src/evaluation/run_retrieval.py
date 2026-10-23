@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from statistics import median
 
-from src.config import CORPUS_DIR, ROOT, runtime_versions
+from src.config import CORPUS_DIR, ROOT, RetrievalSettings, runtime_versions
 from src.evaluation.retrieval_metrics import evaluate_retrieval
 
 KS = (5, 10, 20)
@@ -24,17 +24,15 @@ def load_questions(path: Path, splits_path: Path, split: str) -> list[dict]:
     return sorted(selected, key=lambda q: q["question_id"])
 
 
-def load_retriever(method: str, index: Path, device: str = "cpu"):
+def load_retriever(method: str, index: Path, device: str = RetrievalSettings().device, fp16=None):
     if method == "bm25":
         from src.retrieval.corpus_bm25 import CorpusBM25
 
         return CorpusBM25.load(index)
     if method == "dense":
-        from src.retrieval.corpus_dense import BGEModel, CorpusDense
+        from src.retrieval.factory import load_dense
 
-        # Encode queries with the same precision as the stored passages.
-        fp16 = json.loads((index / "manifest.json").read_text())["model"]["fp16"]
-        return CorpusDense.load(index, BGEModel(device, fp16=fp16))
+        return load_dense(RetrievalSettings(dense_index=index, device=device, fp16=fp16))
     raise ValueError(f"Unsupported method: {method}")
 
 
@@ -86,13 +84,65 @@ def git_state() -> dict:
     return {"commit": git("rev-parse", "HEAD") or None, "dirty": bool(changes)}
 
 
+def build_summary(rows, latencies, *, method, split, top_k, index, load_seconds, **extra):
+    """Scores plus the provenance recorded with every saved run."""
+    metrics = evaluate_retrieval(rows, KS)
+    ordered = sorted(latencies)
+    corpus = json.loads((ROOT / "evaluation" / "corpus_manifest.json").read_text())
+    return {
+        "method": method,
+        "split": split,
+        "questions": len(rows),
+        "top_k": top_k,
+        "code": git_state(),
+        "runtime": runtime_versions(),
+        "corpus": {
+            k: corpus[k] for k in ("repo", "commit", "documents", "content_sha256")
+        },
+        "index": index,
+        **extra,
+        "timing_seconds": {
+            "index_load": round(load_seconds, 2),
+            "query_median": round(median(ordered), 4),
+            "query_p95": round(ordered[int(0.95 * (len(ordered) - 1))], 4),
+            "total_queries": round(sum(ordered), 2),
+        },
+        "overall": metrics["overall"],
+        "question_types": metrics["slices"],
+        "other_slices": slice_summaries(rows),
+    }
+
+
+def write_run(output: Path, rows: list[dict], summary: dict):
+    """Write predictions, the upstream answer format, and the summary."""
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "predictions.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows)
+    )
+    # Upstream EnterpriseRAG-Bench answer format (retrieval only, top 10 documents).
+    (output / "upstream_answers.jsonl").write_text(
+        "".join(
+            json.dumps(
+                {
+                    "question_id": r["question_id"],
+                    "document_ids": r["retrieved_doc_ids"][:10],
+                }
+            )
+            + "\n"
+            for r in rows
+        )
+    )
+    (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--method", choices=["bm25", "dense"], default="bm25")
     parser.add_argument(
         "--index", type=Path, help="Default: .cache/corpus/indexes/<method>"
     )
-    parser.add_argument("--device", default="cpu", help="Query encoder device (dense)")
+    parser.add_argument("--device", default=RetrievalSettings().device, help="Query encoder device (dense)")
+    parser.add_argument("--fp16", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument(
         "--questions", type=Path, default=CORPUS_DIR / "questions.jsonl"
     )
@@ -115,52 +165,15 @@ def main():
     )
     questions = load_questions(args.questions, args.splits, args.split)
     start = time.perf_counter()
-    index = args.index or CORPUS_DIR / "indexes" / args.method
-    retriever = load_retriever(args.method, index, args.device)
+    defaults = RetrievalSettings()
+    index = args.index or (defaults.bm25_index if args.method == "bm25" else defaults.dense_index)
+    retriever = load_retriever(args.method, index, args.device, args.fp16)
     load_seconds = time.perf_counter() - start
     rows, latencies = run(retriever, questions, args.top_k)
-    metrics = evaluate_retrieval(rows, KS)
-    ordered = sorted(latencies)
-    corpus = json.loads((ROOT / "evaluation" / "corpus_manifest.json").read_text())
-    summary = {
-        "method": args.method,
-        "split": args.split,
-        "questions": len(rows),
-        "top_k": args.top_k,
-        "code": git_state(),
-        "runtime": runtime_versions(),
-        "corpus": {
-            k: corpus[k] for k in ("repo", "commit", "documents", "content_sha256")
-        },
-        "index": retriever.manifest,
-        "timing_seconds": {
-            "index_load": round(load_seconds, 2),
-            "query_median": round(median(ordered), 4),
-            "query_p95": round(ordered[int(0.95 * (len(ordered) - 1))], 4),
-            "total_queries": round(sum(ordered), 2),
-        },
-        "overall": metrics["overall"],
-        "question_types": metrics["slices"],
-        "other_slices": slice_summaries(rows),
-    }
-    output.mkdir(parents=True, exist_ok=True)
-    (output / "predictions.jsonl").write_text(
-        "".join(json.dumps(r) + "\n" for r in rows)
-    )
-    # Upstream EnterpriseRAG-Bench answer format (retrieval only, top 10 documents).
-    (output / "upstream_answers.jsonl").write_text(
-        "".join(
-            json.dumps(
-                {
-                    "question_id": r["question_id"],
-                    "document_ids": r["retrieved_doc_ids"][:10],
-                }
-            )
-            + "\n"
-            for r in rows
-        )
-    )
-    (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    summary = build_summary(rows, latencies, method=args.method, split=args.split,
+                            top_k=args.top_k, index=retriever.manifest,
+                            load_seconds=load_seconds)
+    write_run(output, rows, summary)
     print(
         json.dumps(
             {
