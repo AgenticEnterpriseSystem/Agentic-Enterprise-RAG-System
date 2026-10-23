@@ -6,13 +6,18 @@ The index is built with vectorized NumPy instead of bm25s' per-token Python loop
 
 import argparse
 import json
+import os
 import re
 import time
 from collections import Counter
 from hashlib import sha256
 from pathlib import Path
 
-import bm25s
+# bm25s runs a JAX operation on import when JAX is installed (as on Colab). On a GPU, JAX
+# then reserves about 75% of its memory, leaving too little for embedding models and
+# rerankers. BM25 needs no GPU, so keep JAX on the CPU unless the caller chose otherwise.
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
+import bm25s  # noqa: E402
 import numpy as np
 import pyarrow.parquet as pq
 from pydantic import Field

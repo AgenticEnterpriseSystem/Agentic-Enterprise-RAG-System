@@ -649,3 +649,11 @@ def test_embedding_retries_smaller_batches_after_gpu_out_of_memory(monkeypatch):
     model = EmbeddingModel(model="qwen3-embedding-0.6b", batch_size=32)
     assert model.encode(["a", "b"]).shape == (2, 4)
     assert model.model.batches == [32, 16, 8] and model.batch_size == 8
+
+
+def test_bm25_keeps_jax_off_the_gpu():
+    import os
+    import src.retrieval.corpus_bm25  # noqa: F401 (import sets the default)
+
+    # "cpu" unless the environment already chose a platform before the import.
+    assert "JAX_PLATFORMS" in os.environ
