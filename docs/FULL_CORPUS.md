@@ -10,11 +10,15 @@ for **300 development questions**; 18 lack reference-document labels, leaving
 | BGE-small + FAISS | 0.382 | 0.468 | 0.525 | 0.367 |
 | BGE-small, title on every passage | 0.398 | 0.481 | 0.555 | 0.385 |
 | BGE-base, title on every passage | 0.448 | 0.487 | 0.562 | 0.416 |
-| **Hybrid: BM25+ and BGE-base (RRF, BM25 weight 0.7)** | **0.641** | **0.722** | **0.760** | **0.604** |
+| Arctic-embed-l-v2.0, title on every passage | 0.493 | 0.554 | 0.627 | 0.468 |
+| **Hybrid: BM25+ and BGE-base (RRF, BM25 weight 0.7)** | **0.641** | 0.722 | 0.760 | 0.604 |
+| Hybrid: BM25+ and Arctic (RRF, BM25 weight 0.7) | 0.638 | **0.723** | **0.768** | **0.628** |
 
 Recall measures the share of reference documents found; nDCG also rewards higher
-ranks. The hybrid row is the current best setting; it was confirmed on the calibration
-split (see [Hybrid search and reranking](#hybrid-search-and-reranking)). Historical query times were about 20 ms for BM25 on CPU and 130 ms for BGE
+ranks. **The BM25+ and BGE-base hybrid is the team's chosen setting**, confirmed on the
+calibration split (see [Hybrid search and reranking](#hybrid-search-and-reranking)). The
+Arctic hybrid scored marginally higher, but the difference is too small to justify
+switching for now (see [Full-corpus Arctic](#full-corpus-arctic-embed-l-v20)). Historical query times were about 20 ms for BM25 on CPU and 130 ms for BGE
 on GPU. Builds took roughly five minutes and two hours respectively. Hardware
 and run settings differ, so these are not controlled latency comparisons.
 
@@ -279,11 +283,65 @@ questions, paired on the same questions.
 but not the new models', so the new models' standalone gains are probably overstated. Only a
 full-corpus run settles them.
 
-**Next:** embed the full corpus with `arctic-embed-l-v2.0` (strongest alone, fewest
-questions worse than BGE-base, no drop on project questions; about 6–7 hours on an L4 in
-bf16), then rerun the hybrid on development and check it once on calibration against the
-current BGE-base hybrid (0.722 development, 0.767 calibration). Qwen3 is the second
-candidate.
+**Next (done):** Arctic was chosen for a full-corpus run (strongest alone, fewest questions
+worse than BGE-base, no drop on project questions); see the next section. Qwen3 was the
+second candidate.
 
 Results: `evaluation/results/screening/` (one folder per run, each with the sample manifest
 in `summary.json`).
+
+## Full-corpus Arctic-embed-l-v2.0
+
+**Result: Arctic is clearly better than BGE-base on its own, but the hybrid with BM25+ is
+only marginally better. BGE-base stays the team's dense model for now.**
+
+`arctic-embed-l-v2.0` (revision `ac6544c8a46e00af67e330e85a9028c66b8cfd9a`, `query: `
+prefix) embedded all 511,958 documents with the same passages as BGE-base (500-token
+windows, title on every passage), in bf16 on a Colab L4 (103 shards of 5,000 documents),
+from commit `38489e0`. The hybrid ran with
+[`notebooks/hybrid_colab.ipynb`](../notebooks/hybrid_colab.ipynb) from commit `62002a6`,
+without a reranker. There were no errors. Both searches together took about 1.2 seconds per
+question (BGE-base hybrid: about 0.9).
+
+**Arctic alone (development, 282 questions):** Recall@5 0.493, Recall@10 0.554, Recall@20
+0.627, nDCG@10 0.468. Against BGE-base alone, Recall@10 rose by 0.067 (95% confidence
+interval +0.026 to +0.108; 35 questions better, 20 worse). It finds a reference document
+for 11 of the 72 questions BM25+ misses (BGE-base: 7). Semantic questions rose from 0.093
+to 0.160. On calibration (94 questions) Arctic alone scored 0.580 vs 0.487 for BGE-base
+(+0.093, interval +0.008 to +0.181).
+
+**The sample overstated the gain.** On the screening sample Arctic alone scored 0.670 and
+found 24 BM25+ misses; on the full corpus, 0.554 and 11. BGE-base scored 0.487 in both,
+because the sample contained its own top competitors but not Arctic's. Treat sample gains
+as an upper bound: the model ranking held, but only about a third of the gain survived.
+
+**Hybrids with BM25+ (RRF, top 50 per method):**
+
+| Split | Run | Recall@5 | Recall@10 | Recall@20 | nDCG@10 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Development | BM25+ and BGE-base, weight 0.7 | 0.641 | 0.722 | 0.760 | 0.604 |
+| Development | BM25+ and Arctic, equal weights | 0.642 | 0.703 | 0.761 | 0.612 |
+| Development | BM25+ and Arctic, weight 0.7 | 0.638 | 0.723 | 0.768 | 0.628 |
+| Calibration | BM25+ alone | 0.653 | 0.712 | 0.792 | 0.592 |
+| Calibration | BM25+ and BGE-base, weight 0.7 | 0.658 | 0.767 | 0.821 | 0.625 |
+| Calibration | BM25+ and Arctic, weight 0.7 | 0.690 | 0.788 | 0.822 | 0.655 |
+
+- Development, Arctic hybrid vs BGE-base hybrid: Recall@10 +0.001 (−0.021 to +0.023; 9
+  better, 10 worse), a tie; nDCG@10 +0.023 (+0.002 to +0.046), slightly better ranking.
+- Calibration, Arctic hybrid vs BGE-base hybrid: Recall@10 +0.020 (−0.018 to +0.060) and
+  nDCG@10 +0.030 (−0.014 to +0.076), the same direction but not established on 94 questions.
+  Against BM25+ alone, the Arctic hybrid added +0.076 (+0.030 to +0.130).
+- This was the calibration split's second and last single check (the first was the BGE-base
+  hybrid). It should not be used to tune these settings further; the final split is untouched.
+- Offline estimates from the saved top-20 lists matched: BM25+ and BGE-base 0.712, BM25+ and
+  Arctic 0.710, all three together 0.713. Including Arctic raises the share of reference
+  documents found somewhere in the combined top-20 lists from 0.775 to 0.805, so it adds
+  candidates for a later step that reads them (an LLM selector, the agent, or a fixed reranker).
+
+**Decision:** BGE-base remains the dense model; Arctic is kept as a ready alternative. Better
+embeddings have stopped moving the merged top-10 recall; the next gains are expected from
+steps that read the candidates.
+
+Results: `evaluation/results/dense_arctic-embed-l-v2.0_titled_full_development/`,
+`hybrid_arctic-embed-l-v2.0_*_full_development/`, `hybrid_arctic-embed-l-v2.0_w0.7_full_calibration/`
+and `dense_arctic-embed-l-v2.0_full_calibration/`.

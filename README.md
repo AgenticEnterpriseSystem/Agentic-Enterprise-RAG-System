@@ -43,9 +43,9 @@ Scored on the 300 development questions (282 have labeled answer documents):
 - **nDCG@10**: also rewards ranking the correct documents near the top (1.0 is perfect).
 - The hybrid was confirmed once on the calibration questions: Recall@10 0.767 vs
   0.712 for BM25+ alone.
-- On a 20,000-document sample, newer embedding models (Arctic-embed-l-v2.0, Qwen3-Embedding)
-  beat BGE-base clearly; Arctic is next for a full-corpus run (see
-  [model screening](docs/FULL_CORPUS.md#embedding-model-screening-on-a-sample)).
+- Arctic-embed-l-v2.0 beats BGE-base on its own (Recall@10 0.554 vs 0.487), but its hybrid
+  with BM25+ is only marginally better (0.723 vs 0.722), so the team keeps BGE-base for now
+  (see [full-corpus Arctic](docs/FULL_CORPUS.md#full-corpus-arctic-embed-l-v20)).
 
 What this means:
 
