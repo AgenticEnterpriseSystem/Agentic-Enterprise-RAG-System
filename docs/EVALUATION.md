@@ -87,14 +87,9 @@ were ported; hashes identify the measured snapshots.
   before revision. These were prompt-development examples, not human judgments
   or an independent accuracy estimate. The fixture set now has 14 examples;
   the historical score applies only to the original eight and recorded hashes.
-- A later scope/verbosity prompt experiment was reverted. The current default
+- A later scope/verbosity prompt experiment was reverted. The historical default
   matches the [saved pre-experiment prompt](../evaluation/agent_development/critic_before_scope.txt).
   No latency or accuracy improvement was established for that experiment.
-
-Known issues include incomplete answers at round limits, ambiguous policy scope,
-missed passage details and occasional invalid model-generated citations. The
-critic can continue searching after identifying ambiguity; clarification dialogue
-is not implemented. More searches or valid citation IDs alone are not quality gains.
 
 Full traces and unfilled review packets remain in local ignored storage, including
 `.cache/integration-audit-20261021/` and `.cache/critic-scope-development/`.

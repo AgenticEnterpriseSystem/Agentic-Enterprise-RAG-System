@@ -5,7 +5,7 @@
 ```text
 React question form → FastAPI → configured retriever
   Fixed RAG: search → generate cited answer
-  Agent:     search → check evidence → follow-up searches if needed → answer
+  Agent:     search → check facts → read more/search again → cited answer or clarification
 ```
 
 The app serves the built frontend and `/api/*` from one origin. Both workflows
@@ -31,15 +31,29 @@ runtime shares the corpus table between retrievers; its settings and compatibili
 requirements are in the [hybrid handoff](WEB_APP.md#hybrid-handoff).
 
 Passage selection uses bounded exact text slices with original character offsets.
-It balances initial and follow-up evidence, but can still omit useful facts.
+The agent preserves passages cited for supported facts across rounds. It chooses
+the final context before assessment and reuses it for complete or partial answers.
+If a matching document is clipped, `read_more` reads one adjacent window of at
+most 3,000 characters from each of up to two already-retrieved documents. It uses
+the existing corpus table and preserves permissions, source/date filters and
+exact citation offsets. The parent hit's score is provenance, not a new score.
+Selection can still omit useful facts; these heuristics do not establish quality.
 The optional cross-encoder has a 512-token default input limit; the web app does
 not currently enable it.
 
-The agent stops on sufficient evidence, no new evidence, limits, or failure.
+The critic returns a fact checklist with supporting passage IDs; the adapter
+validates every ID and derives sufficiency from that checklist. Native Anthropic
+JSON schemas restrict citation choices to supplied passages, with local validation
+still applied afterward. A valid ID does not prove claim support.
+
+The agent stops on sufficient evidence, clarification, no new evidence, limits, or failure.
 Normal round/no-new-evidence stops can produce a cited partial answer; errors and
 exhausted budgets do not trigger fallback generation. The critic guides search;
-its confidence is **not calibrated answer accuracy**. Clarification dialogue and
-answer streaming are not implemented.
+its confidence is **not calibrated answer accuracy** and does not override a
+complete fact checklist. Legacy assessments without a checklist retain the
+confidence gate. A clarification is a normal incomplete response asking for an
+incident date or other distinguishing detail. Stateful clarification dialogue
+and answer streaming are not implemented; submit a new, complete question.
 
 ## API
 
