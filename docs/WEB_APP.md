@@ -69,7 +69,9 @@ RAG_FP16=
 ```
 
 The launcher reads `.env` and translates `/data` paths to the local artifact
-folder. Exported shell settings take precedence. Keep credentials in `.env`;
+folder. Hybrid is the default; a conflicting BM25 setting stops startup instead
+of silently changing retrieval. Other exported shell settings take precedence.
+Keep credentials in `.env`;
 never commit that file.
 
 | Mode | Result |
@@ -86,6 +88,9 @@ python scripts/run_web.py
 
 Leave the terminal open. Visit <http://127.0.0.1:8000> and wait for **Ready**.
 Initial startup loads the indexes and may download model weights.
+
+Use `python scripts/run_web.py --check` to inspect effective settings without
+starting. For a deliberate BM25 baseline only, use `--retrieval bm25`.
 
 Check <http://127.0.0.1:8000/api/ready>: HTTP 200 with `retrieval: hybrid` means
 hybrid search is ready. HTTP 503 means loading or a configuration error.

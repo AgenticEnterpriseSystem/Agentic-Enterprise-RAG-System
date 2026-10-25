@@ -15,10 +15,10 @@ CORPUS_DIR = ROOT / ".cache" / "corpus"
 class RetrievalSettings(BaseModel):
     """Shared retrieval settings; web environment and CLI options use these defaults."""
     model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
-    retrieval: Literal['bm25', 'hybrid'] = 'bm25'
+    retrieval: Literal['bm25', 'hybrid'] = 'hybrid'
     corpus: Path = CORPUS_DIR / 'documents.parquet'
     bm25_index: Path = CORPUS_DIR / 'indexes/bm25'
-    dense_index: Path = CORPUS_DIR / 'indexes/dense'
+    dense_index: Path = CORPUS_DIR / 'indexes/dense-bge-base'
     device: str = 'cpu'
     fp16: bool | None = None
     bm25_weight: float = Field(default=.7, ge=0, le=1)

@@ -20,7 +20,16 @@ supplied IDs supporting the answer). Identify supporting IDs in the answer text
 where relevant. Copy citation_ids CHARACTER FOR CHARACTER from the supplied
 citation_id fields, including every colon-delimited passage offset. Never shorten
 a passage citation ID to a document ID. Return exactly the three specified keys.
-Never invent citations or claim access to other sources."""
+Never invent citations or claim access to other sources.
+Excerpts with the same doc_id belong to the same document or thread: read them
+together to connect the customer/project context with the stated terms. Titles
+are context, not proof of facts absent from the text. Do not treat the descriptive
+phrase in a question as a requirement for a product with that exact name.
+Attribute proposed terms to the proposal; do not describe them as deployed or
+signed unless the text establishes that. Distinguish defaults from exceptions,
+per-file from per-chunk limits, and hosted from private deployment settings.
+Preserve units exactly: MiB means mebibytes, MB means megabytes.
+Use plain text with simple lists; the interface renders citations separately."""
 
 
 @dataclass(frozen=True)
@@ -103,7 +112,10 @@ class GroundedGenerator:
                 "evidence": [
                     {
                         "citation_id": e.citation_id,
+                        "doc_id": e.chunk.doc_id,
+                        "title": e.chunk.title,
                         "source_type": e.chunk.source_type,
+                        "timestamp": e.chunk.timestamp.isoformat() if e.chunk.timestamp else None,
                         "text": e.chunk.text,
                     }
                     for e in selected
