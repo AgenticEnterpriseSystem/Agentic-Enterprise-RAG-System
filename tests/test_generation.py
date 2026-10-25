@@ -204,6 +204,32 @@ def test_anthropic_budget_reservation_and_sdk_mapping():
     assert messages.created == 1
 
 
+def test_native_structured_output_is_counted_and_uses_the_same_spending_cap():
+    class StructuredMessages(Messages):
+        def __init__(self):
+            super().__init__()
+            self.count_options = []
+            self.create_options = []
+        def count_tokens(self, **kwargs):
+            self.count_options.append(kwargs)
+            return super().count_tokens(**kwargs)
+        def create(self, **kwargs):
+            self.create_options.append(kwargs)
+            return super().create(**kwargs)
+    messages = StructuredMessages()
+    provider = AnthropicProvider(AnthropicConfig(model='explicit-model', allow_paid=True,
+        budget_usd=.0004, input_usd_per_million=1, output_usd_per_million=2,
+        max_output_tokens=100), client=SimpleNamespace(messages=messages))
+    provider.complete_structured('system', '{}', Answer)
+    options = messages.create_options[0]['output_config']
+    assert options == messages.count_options[0]['output_config']
+    assert options['format']['type'] == 'json_schema'
+    assert options['format']['schema']['additionalProperties'] is False
+    with pytest.raises(ProviderError):
+        provider.complete_structured('system', '{}', Answer)
+    assert messages.created == 1
+
+
 def test_citation_to_evidence_excluded_by_context_budget_is_rejected():
     req = request()
     other = req.evidence[0].model_copy(

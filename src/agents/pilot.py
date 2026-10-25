@@ -81,9 +81,19 @@ class RecordingProvider:
         self.calls = []
 
     def complete(self, system, prompt):
+        return self._complete(system, prompt)
+
+    def complete_structured(self, system, prompt, schema):
+        return self._complete(system, prompt, schema)
+
+    def _complete(self, system, prompt, schema=None):
         record = {'system': system, 'prompt': json.loads(prompt)}
+        if schema:
+            record['response_schema'] = schema.get('title', 'JSON schema') if isinstance(schema, dict) else schema.__name__
         try:
-            result = self.provider.complete(system, prompt)
+            structured = getattr(self.provider, 'complete_structured', None)
+            result = (structured(system, prompt, schema) if schema and structured
+                      else self.provider.complete(system, prompt))
         except (ProviderError, RunBudgetExceeded) as exc:
             self.calls.append({**record, 'error': type(exc).__name__, 'usage': exc.usage.model_dump()})
             raise
@@ -106,6 +116,15 @@ class RecordingRetriever:
                     or (request.before and (chunk.timestamp is None or chunk.timestamp > request.before))):
                 raise ValueError('Retrieved evidence violates requested filters')
         self.searches.append({'query': request.query, 'source_types': request.source_types,
+                              'evidence': [e.model_dump(mode='json') for e in hits]})
+        return hits
+
+    def read_more(self, request, anchors, *, max_chars=3000):
+        operation = getattr(self.retriever, 'read_more', None)
+        hits = tuple(operation(request, anchors, max_chars=max_chars)) if operation else ()
+        validate_evidence(request.user, hits)
+        self.searches.append({'query': request.query, 'operation': 'read_more',
+                              'source_types': request.source_types,
                               'evidence': [e.model_dump(mode='json') for e in hits]})
         return hits
 
