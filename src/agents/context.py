@@ -3,8 +3,9 @@ import math
 import re
 from collections import Counter
 
+from src.contracts import validate_evidence
 from src.generation.generator import select_context
-from src.retrieval.passages import bounded_passage
+from src.retrieval.passages import bounded_passage, slice_passage
 
 _STOP = frozenset('a an and are as at be by do does for from how i in is it of on or our should that the this to was we what when where which who why with'.split())
 
@@ -13,7 +14,11 @@ def terms(text):
     return set(re.findall(r'\w+', text.lower())) - _STOP
 
 
-def select_agent_context(request, limit, initial_ids):
+class ContextBudgetError(ValueError):
+    """Previously supported evidence cannot fit without silently dropping facts."""
+
+
+def select_agent_context(request, limit, initial_ids, retained=()):
     """Keep relevant evidence from both rounds without consulting labels or answers.
 
     Initial-only requests preserve retrieval ranking. With useful follow-up hits,
@@ -21,6 +26,45 @@ def select_agent_context(request, limit, initial_ids):
     question coverage, and reward terms not already covered. Real token counting
     remains the provider's responsibility.
     """
+    if retained:
+        # Retain exact passages cited by the previous assessment, not its prose.
+        # Remove overlapping text from candidates so it does not consume room twice.
+        if sum(len(e.chunk.text) for e in retained) > limit:
+            raise ContextBudgetError("Supported passages exceed the remaining context allowance")
+        validate_evidence(request.user, tuple(retained))
+        for keep in retained:
+            if not any(e.chunk.doc_id == keep.chunk.doc_id
+                       and e.chunk.source_type == keep.chunk.source_type
+                       and e.chunk.start_char <= keep.chunk.start_char
+                       and e.chunk.end_char >= keep.chunk.end_char
+                       and e.chunk.text[keep.chunk.start_char-e.chunk.start_char:
+                                        keep.chunk.end_char-e.chunk.start_char] == keep.chunk.text
+                       for e in request.evidence):
+                raise ValueError('Retained passage is outside the collected evidence')
+        remaining = []
+        consumed = [e.chunk for e in retained]
+        original_ids = set(initial_ids)
+        rewritten_ids = set()
+        for item in request.evidence:
+            spans = [(item.chunk.start_char, item.chunk.end_char)]
+            for keep in consumed:
+                if keep.doc_id != item.chunk.doc_id:
+                    continue
+                if item.chunk.source_type != keep.source_type:
+                    raise ValueError("Retained passage source differs from the evidence pool")
+                spans = [(left, right) for start, end in spans
+                         for left, right in ((start, min(end, keep.start_char)),
+                                             (max(start, keep.end_char), end)) if left < right]
+            for start, end in spans:
+                part = slice_passage(item, start, end)
+                remaining.append(part)
+                consumed.append(part.chunk)
+                if item.citation_id in original_ids:
+                    rewritten_ids.add(part.citation_id)
+        allowance = limit - sum(len(e.chunk.text) for e in retained)
+        rest = select_agent_context(request.model_copy(update={"evidence": tuple(remaining)}),
+                                    allowance, rewritten_ids) if allowance else []
+        return list(retained) + rest
     initial_ids = set(initial_ids)
     original = [e for e in request.evidence if e.citation_id in initial_ids]
     followup = [e for e in request.evidence if e.citation_id not in initial_ids]

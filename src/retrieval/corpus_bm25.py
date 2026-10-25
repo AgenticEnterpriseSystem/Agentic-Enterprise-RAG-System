@@ -17,7 +17,7 @@ import numpy as np
 import pyarrow.parquet as pq
 from pydantic import Field
 
-from src.retrieval.passages import bounded_passage
+from src.retrieval.passages import bounded_passage, slice_passage
 from src.config import CORPUS_DIR
 from src.contracts import Chunk, Contract, Evidence, SearchRequest, validate_evidence
 
@@ -184,8 +184,49 @@ class CorpusBM25:
         validate_evidence(request.user, results)
         return results
 
+    def read_more(self, request: SearchRequest, anchors: tuple[Evidence, ...], *, max_chars=3000):
+        """Read one adjacent exact window per matched document; never search new IDs.
+
+        This uses the existing corpus table, not a new index or a model call.
+        The parent hit's score/method are provenance, not a new relevance score.
+        """
+        validate_evidence(request.user, anchors)
+        if not 1 <= max_chars <= 6000 or len(anchors) > 2:
+            raise ValueError("Document expansion exceeds its configured bounds")
+        if self.corpus is None:
+            raise ValueError("Document expansion requires the corpus")
+        if request.after or request.before:
+            return ()  # Unknown timestamps must not pass date filters.
+        results, seen = [], set()
+        for anchor in anchors:
+            chunk = anchor.chunk
+            if chunk.doc_id in seen or chunk.doc_id not in self.position:
+                continue
+            seen.add(chunk.doc_id)
+            full = self._chunk(chunk.doc_id)
+            if full is None or (request.source_types and full.source_type not in request.source_types):
+                continue
+            if (full.source_type != chunk.source_type or chunk.end_char > full.end_char
+                    or full.text[chunk.start_char:chunk.end_char] != chunk.text):
+                raise ValueError("Expansion anchor differs from the canonical document")
+            if chunk.end_char < full.end_char:
+                start = max(0, chunk.end_char - min(256, max_chars // 4))
+                end = min(full.end_char, start + max_chars)
+            else:
+                end = min(full.end_char, chunk.start_char + min(256, max_chars // 4))
+                start = max(0, end - max_chars)
+            if start >= end or (start >= chunk.start_char and end <= chunk.end_char):
+                continue
+            full_hit = anchor.model_copy(update={"chunk": full, "citation_id": full.chunk_id})
+            results.append(slice_passage(full_hit, start, end))
+        result = tuple(results)
+        validate_evidence(request.user, result)
+        return result
+
     def _chunk(self, doc_id):
         # Slice one row without concatenating the full chunked string columns.
+        if self.corpus is None:
+            raise ValueError('Document text requires a loaded corpus')
         row = self.corpus.slice(self.position[doc_id], 1).to_pylist()[0]
         text = document_text(row["title"], row["content"])
         if not text.strip():

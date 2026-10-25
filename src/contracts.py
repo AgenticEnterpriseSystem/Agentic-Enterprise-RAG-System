@@ -100,6 +100,18 @@ def validate_evidence(user: UserContext, evidence: tuple[Evidence, ...]) -> None
         raise ValueError("Duplicate citation IDs")
 
 
+class FactAssessment(Contract):
+    fact: Identifier
+    status: Literal['supported', 'missing', 'conflicting', 'ambiguous']
+    citation_ids: tuple[Identifier, ...] = Field(default=(), max_length=6)
+
+    @model_validator(mode='after')
+    def supported_has_citations(self):
+        if self.status in ('supported', 'conflicting') and not self.citation_ids:
+            raise ValueError('Supported or conflicting facts require evidence citations')
+        return self
+
+
 class CriticDecision(Contract):
     sufficient: bool
     confidence: float = Field(ge=0, le=1)
@@ -107,6 +119,9 @@ class CriticDecision(Contract):
     missing_facts: tuple[str, ...] = ()
     suggested_queries: tuple[str, ...] = ()
     suggested_sources: tuple[str, ...] = ()
+    facts: tuple[FactAssessment, ...] = Field(default=(), max_length=10)
+    read_more_doc_ids: tuple[Identifier, ...] = Field(default=(), max_length=2)
+    clarification_question: Annotated[str, Field(min_length=1, max_length=500)] | None = None
 
 
 class Usage(Contract):
@@ -133,7 +148,7 @@ class Trace(Contract):
     total_latency_ms: Nonnegative = 0
     usage: Usage = Field(default_factory=Usage)
     stop_reason: Literal[
-        "sufficient", "round_limit", "no_new_evidence", "budget", "error", "single_pass"
+        "sufficient", "round_limit", "no_new_evidence", "budget", "error", "single_pass", "clarification"
     ]
 
 
@@ -166,6 +181,7 @@ class QueryResponse(Contract):
 
 class GenerationRequest(Contract):
     search_limitation: str | None = None
+    assessment: CriticDecision | None = None
     question: Identifier
     user: UserContext
     evidence: tuple[Evidence, ...] = ()

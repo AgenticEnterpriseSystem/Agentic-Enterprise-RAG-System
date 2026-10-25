@@ -5,9 +5,9 @@ from uuid import uuid4
 
 from pydantic import Field
 
-from src.agents.context import select_agent_context
+from src.agents.context import ContextBudgetError, select_agent_context
 from src.agents.budget import CallBudget, RunBudgetExceeded, call_budget
-from src.agents.routing import TextRouter
+from src.agents.routing import Route, TextRouter
 from src.agents.search_critic import AgentError
 from src.contracts import (
     Answer, Contract, GenerationRequest, QueryResponse, SearchRequest, Trace,
@@ -38,6 +38,8 @@ class SearchAgent:
         steps, usages, evidence = [], [], {}
         feedback = None
         context_order = []
+        retained = {}
+        last_context = None
         initial_ids = set()
         config = self.config
         round_number = 1
@@ -110,16 +112,13 @@ class SearchAgent:
             nonlocal active_tool, began
             if exhausted():
                 return finish("budget", "Search budget reached.")
-            context = GenerationRequest(question=request.query, user=request.user,
-                                        evidence=tuple(evidence.values()), search_limitation=limitation)
-            usage = combined_usage(usages)
-            remaining = config.max_tokens - usage.input_tokens - usage.output_tokens
-            # Reserve output/prompt room and reduce context under a tight allowance.
-            # This is a sizing heuristic; provider token counting remains authoritative.
-            context_limit = min(config.max_context_chars, max(1, (remaining - 1500) * 2))
-            context = context.model_copy(update={"evidence": tuple(select_agent_context(context, context_limit, initial_ids))})
-            if not context.evidence:
+            # Do not reselect or crop evidence after it has been assessed. The
+            # final-round selection already reserves room for answer generation;
+            # provider token counting still enforces the actual remaining budget.
+            if last_context is None or not last_context.evidence:
                 return finish(reason, limitation)
+            context = last_context.model_copy(update={
+                'search_limitation': limitation, 'assessment': feedback})
             active_tool, began = "generate", self.clock()
             answer, usage = model_call(self.generator.generate, context)
             record(active_tool, began, hits=context.evidence, usage=usage)
@@ -142,12 +141,38 @@ class SearchAgent:
             before = len(evidence)
             active_tool, began = "route", self.clock()
             try:
-                route, usage = model_call(self.router.route, request, feedback, self.tools)
+                expand = getattr(self.retriever, 'read_more', None)
+                anchors = ()
+                if not single_pass and feedback and feedback.read_more_doc_ids and expand and last_context:
+                    candidates = last_context.evidence
+                    anchors = tuple(max((e for e in candidates if e.chunk.doc_id == doc),
+                                        key=lambda e: e.chunk.end_char)
+                                    for doc in feedback.read_more_doc_ids
+                                    if any(e.chunk.doc_id == doc for e in candidates))
+                if anchors:
+                    route = Route(reason='Read nearby passages in matching documents.')
+                    usage = Usage(estimated_cost_usd=0)
+                else:
+                    route, usage = model_call(self.router.route, request, feedback, self.tools)
                 record("route", began, query=route.reason, usage=usage)
                 if exhausted():
                     return finish("budget", "Search budget reached.")
                 if route.limitation:
                     return finish("no_new_evidence", route.limitation)
+                if anchors and expand is not None:
+                    active_tool, began = 'read_more', self.clock()
+                    expanded = tuple(expand(request, anchors, max_chars=3000))
+                    if any(e.chunk.doc_id not in {a.chunk.doc_id for a in anchors} for e in expanded):
+                        raise AgentError('Document expansion returned an unrelated document.')
+                    hits = accept(expanded, request.source_types)
+                    record(active_tool, began, hits=hits, sources=request.source_types)
+                    if len(evidence) == before and not exhausted():
+                        # No adjacent text remains; use the normal missing-fact search.
+                        active_tool, began = 'route', self.clock()
+                        route, usage = model_call(self.router.route, request, feedback, self.tools)
+                        record('route', began, query=route.reason, usage=usage)
+                        if route.limitation:
+                            return partial_answer('no_new_evidence', route.limitation)
                 sources = route.source_types or request.source_types
                 if request.source_types and not set(sources) <= set(request.source_types):
                     raise AgentError("Router tried to widen the source scope.")
@@ -192,7 +217,7 @@ class SearchAgent:
                 context_order = new_evidence + context_order
                 context = GenerationRequest(question=request.query, user=request.user,
                                             evidence=tuple(context_order))
-                selected = (select_agent_context(context, config.max_context_chars, initial_ids)
+                selected = (select_agent_context(context, config.max_context_chars, initial_ids, tuple(retained.values()))
                             if round_number > 1 else select_context(context, config.max_context_chars))
                 context = context.model_copy(update={"evidence": tuple(selected)})
                 if not single_pass:
@@ -204,16 +229,35 @@ class SearchAgent:
                         # than spending nearly all of it assessing more evidence.
                         critic_limit = min(config.max_context_chars, max(1, (remaining // 2 - 1500) * 2))
                         critic_pool = GenerationRequest(question=request.query, user=request.user, evidence=tuple(evidence.values()))
-                        context = critic_pool.model_copy(update={"evidence": tuple(select_agent_context(critic_pool, critic_limit, initial_ids))})
+                        context = critic_pool.model_copy(update={"evidence": tuple(select_agent_context(
+                            critic_pool, critic_limit, initial_ids, tuple(retained.values())))})
                     # An approval applies only to this exact evidence set. Use it
                     # for generation too, including the reduced final-round pool.
                     feedback, usage = model_call(self.critic.assess, context)
                     record(active_tool, began, hits=context.evidence, decision=feedback, usage=usage)
+                    supplied = {e.citation_id: e for e in context.evidence}
+                    for fact in feedback.facts:
+                        if not set(fact.citation_ids) <= supplied.keys():
+                            raise AgentError('Critic referenced an unknown citation.')
+                        if fact.status == 'supported':
+                            retained.update((cid, supplied[cid]) for cid in fact.citation_ids)
+                last_context = context
                 if exhausted():
                     return finish("budget", "Search budget reached.")
+                ambiguous_docs = ({e.chunk.doc_id for fact in feedback.facts
+                                   if fact.status == 'ambiguous' for e in context.evidence
+                                   if e.citation_id in fact.citation_ids} if feedback else set())
+                if (not single_pass and feedback and feedback.clarification_question
+                        and (len(ambiguous_docs) > 1 or not feedback.read_more_doc_ids
+                             or round_number == config.max_rounds)):
+                    # Clarification is a normal stop, not evidence of a complete answer.
+                    cited = tuple(dict.fromkeys(cid for fact in feedback.facts
+                                  if fact.status == 'ambiguous' for cid in fact.citation_ids))
+                    return finish('clarification', '', Answer(status='insufficient_evidence',
+                        text=feedback.clarification_question, citation_ids=cited), context.evidence)
                 if single_pass or (feedback is not None and feedback.sufficient
                                    and not feedback.missing_facts
-                                   and feedback.confidence >= config.confidence_threshold):
+                                   and (feedback.facts or feedback.confidence >= config.confidence_threshold)):
                     active_tool, began = "generate", self.clock()
                     answer, usage = model_call(self.generator.generate, context)
                     record(active_tool, began, hits=context.evidence, usage=usage)
@@ -226,6 +270,8 @@ class SearchAgent:
                     return finish(reason, "", answer, context.evidence)
                 if round_number == config.max_rounds:
                     return partial_answer("round_limit", "Search round limit reached before evidence was judged sufficient.")
+            except ContextBudgetError:
+                return finish('budget', 'Supported evidence no longer fits the remaining context budget.')
             except RunBudgetExceeded as exc:
                 record(active_tool + ":budget", began, usage=exc.usage)
                 return finish("budget", "Model call exceeds remaining run budget.")

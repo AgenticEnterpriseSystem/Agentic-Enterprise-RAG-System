@@ -11,6 +11,21 @@ PASSAGE_CHARS = 3000
 _STOPWORDS = frozenset("a an and are as at be by do does for from how i in is it of on or that the this to was what when where which who why with".split())
 
 
+def slice_passage(item: Evidence, start: int, end: int) -> Evidence:
+    """Slice absolute document coordinates and keep citation IDs reproducible."""
+    chunk = item.chunk
+    if not chunk.start_char <= start < end <= chunk.end_char:
+        raise ValueError("Passage slice outside supplied evidence")
+    if (start, end) == (chunk.start_char, chunk.end_char):
+        return item
+    identifier = f"{chunk.doc_id}:{start}:{end}"
+    chunk = chunk.model_copy(update={
+        "chunk_id": identifier, "start_char": start, "end_char": end,
+        "text": chunk.text[start - chunk.start_char:end - chunk.start_char],
+    })
+    return item.model_copy(update={"citation_id": identifier, "chunk": chunk})
+
+
 def bounded_passage(item: Evidence, query: str, max_chars: int = PASSAGE_CHARS) -> Evidence:
     """Return a query-relevant exact slice, preserving short evidence verbatim.
 
@@ -39,9 +54,4 @@ def bounded_passage(item: Evidence, query: str, max_chars: int = PASSAGE_CHARS) 
     end = start + max_chars
     absolute_start = item.chunk.start_char + start
     absolute_end = item.chunk.start_char + end
-    identifier = f"{item.chunk.doc_id}:{absolute_start}:{absolute_end}"
-    chunk = item.chunk.model_copy(update={
-        "chunk_id": identifier, "text": text[start:end],
-        "start_char": absolute_start, "end_char": absolute_end,
-    })
-    return item.model_copy(update={"citation_id": identifier, "chunk": chunk})
+    return slice_passage(item, absolute_start, absolute_end)
