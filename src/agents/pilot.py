@@ -80,6 +80,11 @@ class RecordingProvider:
         self.provider = provider
         self.calls = []
 
+    @property
+    def supports_structured_output(self):
+        return getattr(self.provider, 'supports_structured_output',
+                       callable(getattr(self.provider, 'complete_structured', None)))
+
     def complete(self, system, prompt):
         return self._complete(system, prompt)
 

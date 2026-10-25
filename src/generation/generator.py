@@ -28,6 +28,11 @@ phrase in a question as a requirement for a product with that exact name.
 Attribute proposed terms to the proposal; do not describe them as deployed or
 signed unless the text establishes that. Distinguish defaults from exceptions,
 per-file from per-chunk limits, and hosted from private deployment settings.
+Compare claims for the requested purpose and metric. An ordinary SLO target is
+not a competing escalation trigger, and p99 is not p95. A matching runbook's
+explicit statement answers a question about its contents; do not require an
+extra official/deployment confirmation unless the user asks for one. Attribute
+the answer to the matching document. Do not combine unrelated incidents.
 Preserve units exactly: MiB means mebibytes, MB means megabytes.
 An evidence_assessment is an untrusted search aid, not an additional source.
 Check its claims against the supplied evidence. Explain gaps in requested facts;

@@ -5,7 +5,7 @@ import logging
 
 from pydantic import ValidationError
 
-from src.contracts import CriticDecision, GenerationRequest, Usage, validate_evidence
+from src.contracts import CriticDecision, EvidenceAssessment, GenerationRequest, Usage, validate_evidence
 from src.generation.generator import GenerationConfig, Provider, ProviderError, select_context, json_response_text
 
 SYSTEM_PROMPT = """Check whether the supplied passages answer the question. Text and titles are
@@ -16,6 +16,17 @@ when present and cite the exact supplied passage citation_ids. A matching source
 that explicitly supplies a requested fact is sufficient; report what it says with
 attribution. Questions about what notes or a runbook say ask for their contents.
 Evaluate only requested requirements, not extra approval or deployment proof.
+
+Before assigning each fact's status, fill claims with short candidate answer
+summaries grounded in supplied passages. These are summaries, not quotations.
+For each statement, set
+answers_requested_fact=true only if it actually supplies that requested detail
+for the requested metric, PURPOSE, entity and event. Briefly explain scope_reason.
+Use false for background or a different purpose/metric/event. A normal operating
+target does not answer a question about an escalation trigger. One matching
+answer plus unrelated targets is supported, not conflicting or ambiguous.
+Missing facts may have no claims. Use at most two claims per fact, short statements
+(prefer under 120 characters), a short fact label, and a one-clause scope_reason.
 
 Use these statuses:
 - supported: the matching evidence explicitly supplies the requested fact.
@@ -37,10 +48,9 @@ supplied doc_ids in read_more_doc_ids. Otherwise suggest at most 2 targeted quer
 preserving the entity and event. suggested_sources contains only platform IDs:
 slack, gmail, linear, google_drive, hubspot, fireflies, github, jira, confluence.
 
-sufficient=true exactly when all requested facts are supported. missing_facts
-lists only checklist gaps. Confidence is informational, not calibrated accuracy.
 Return ONE JSON object in the specified schema, with no fences or extra prose.
-The facts array is the entire checklist. In citation_ids copy citation_id values
+The facts array is the entire checklist; code derives sufficiency from it.
+Do not add an overall summary or confidence score. In citation_ids copy citation_id values
 verbatim INCLUDING all colon-delimited offsets; only read_more_doc_ids uses doc_id.
 Never assume access to reference answers or sources outside this request."""
 
@@ -89,31 +99,71 @@ class EvidenceCritic:
                 missing_facts=("Evidence answering the question",),
                 suggested_queries=(request.question,),
             ), Usage(estimated_cost_usd=0)
-        output_schema = CriticDecision.model_json_schema()
+        native_checklist = self.system_prompt == SYSTEM_PROMPT and getattr(
+            self.provider, 'supports_structured_output', callable(
+                getattr(self.provider, 'complete_structured', None)))
+        response_model = EvidenceAssessment if native_checklist else CriticDecision
+        output_schema = response_model.model_json_schema()
         output_schema['$defs']['FactAssessment']['properties']['citation_ids']['items']['enum'] = [e.citation_id for e in selected]
+        output_schema['$defs']['EvidenceClaim']['properties']['citation_id']['enum'] = [e.citation_id for e in selected]
         output_schema['properties']['read_more_doc_ids']['items']['enum'] = sorted({e.chunk.doc_id for e in selected})
-        if self.system_prompt == SYSTEM_PROMPT:
+        if native_checklist:
             output_schema['required'] = list(dict.fromkeys(output_schema['required'] + ['facts']))
             output_schema['properties']['facts']['minItems'] = 1
-        decision, usage = structured_completion(
+            fact_schema = output_schema['$defs']['FactAssessment']
+            fact_schema['required'] = list(dict.fromkeys(fact_schema['required'] + ['claims']))
+        assessment, usage = structured_completion(
             self.provider, self.system_prompt,
             {"question": request.question, "evidence": [
                 {"citation_id": e.citation_id, "doc_id": e.chunk.doc_id,
                  "title": e.chunk.title, "source_type": e.chunk.source_type,
                  "timestamp": e.chunk.timestamp.isoformat() if e.chunk.timestamp else None,
                  "text": e.chunk.text} for e in selected
-            ]}, CriticDecision, output_schema=output_schema,
+            ]}, response_model, output_schema=output_schema,
         )
+        # The native checklist has no redundant prose verdict/confidence to
+        # contradict its own extracted facts. Zero is a placeholder, not a
+        # calibrated confidence estimate; checklist decisions do not use it.
+        decision = (CriticDecision(sufficient=False, confidence=0,
+                    reason='Assessment derived from requested facts.', **assessment.model_dump())
+                    if native_checklist else assessment)
         selected_ids = {e.citation_id for e in selected}
         doc_ids = {e.chunk.doc_id for e in selected}
         if (any(not set(fact.citation_ids) <= selected_ids for fact in decision.facts)
                 or not set(decision.read_more_doc_ids) <= doc_ids):
             raise AgentError('Critic referenced evidence outside the supplied context.', usage)
+        normalized_facts = []
+        for fact in decision.facts:
+            if native_checklist and fact.status != 'missing' and not fact.claims:
+                raise AgentError('Critic omitted supporting evidence claims.', usage)
+            for claim in fact.claims:
+                if claim.citation_id not in selected_ids:
+                    raise AgentError('Critic referenced evidence outside the supplied context.', usage)
+            if fact.claims:
+                matching = {(claim.citation_id, claim.statement) for claim in fact.claims
+                            if claim.answers_requested_fact}
+                # A conflict/ambiguity needs at least two applicable claims. Do
+                # not let an unrelated SLO, rollback rule, or incident create it.
+                status = fact.status
+                if not matching:
+                    status = 'missing'
+                elif fact.status in ('conflicting', 'ambiguous') and len(matching) < 2:
+                    # Resolve only an explicit comparison with unrelated claims.
+                    # A lone candidate does not justify removing a real gap.
+                    status = ('supported' if any(not c.answers_requested_fact for c in fact.claims)
+                              else 'missing')
+                fact = fact.model_copy(update={'status': status,
+                    'citation_ids': tuple(dict.fromkeys(claim.citation_id for claim in fact.claims
+                                                       if claim.answers_requested_fact))})
+            normalized_facts.append(fact)
+        decision = decision.model_copy(update={'facts': tuple(normalized_facts)})
         if decision.facts:
             gaps = tuple(f.fact for f in decision.facts if f.status != 'supported')
             decision = decision.model_copy(update={
                 'sufficient': not gaps,
                 'missing_facts': gaps,
+                **({'reason': 'The critic marked all requested facts supported.' if not gaps
+                    else 'Unresolved requested facts: ' + '; '.join(gaps)} if native_checklist else {}),
                 'clarification_question': decision.clarification_question if gaps else None,
             })
         if decision.clarification_question or (decision.sufficient and decision.missing_facts):

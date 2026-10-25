@@ -100,8 +100,18 @@ def validate_evidence(user: UserContext, evidence: tuple[Evidence, ...]) -> None
         raise ValueError("Duplicate citation IDs")
 
 
+class EvidenceClaim(Contract):
+    citation_id: Identifier
+    statement: Identifier
+    scope_reason: Identifier
+    answers_requested_fact: bool
+
+
 class FactAssessment(Contract):
     fact: Identifier
+    # Native structured output is generated in this order: inspect claims and
+    # scope before assigning the verdict, rather than justifying it afterward.
+    claims: tuple[EvidenceClaim, ...] = Field(default=(), max_length=2)
     status: Literal['supported', 'missing', 'conflicting', 'ambiguous']
     citation_ids: tuple[Identifier, ...] = Field(default=(), max_length=6)
 
@@ -112,16 +122,21 @@ class FactAssessment(Contract):
         return self
 
 
-class CriticDecision(Contract):
+class EvidenceAssessment(Contract):
+    """Native model output; overall search decisions are derived in code."""
+    facts: tuple[FactAssessment, ...] = Field(min_length=1, max_length=10)
+    suggested_queries: tuple[str, ...] = ()
+    suggested_sources: tuple[str, ...] = ()
+    read_more_doc_ids: tuple[Identifier, ...] = Field(default=(), max_length=2)
+    clarification_question: Annotated[str, Field(min_length=1, max_length=500)] | None = None
+
+
+class CriticDecision(EvidenceAssessment):
     sufficient: bool
     confidence: float = Field(ge=0, le=1)
     reason: Identifier
     missing_facts: tuple[str, ...] = ()
-    suggested_queries: tuple[str, ...] = ()
-    suggested_sources: tuple[str, ...] = ()
     facts: tuple[FactAssessment, ...] = Field(default=(), max_length=10)
-    read_more_doc_ids: tuple[Identifier, ...] = Field(default=(), max_length=2)
-    clarification_question: Annotated[str, Field(min_length=1, max_length=500)] | None = None
 
 
 class Usage(Contract):

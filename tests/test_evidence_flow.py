@@ -12,8 +12,9 @@ import pytest
 from src.agents.context import ContextBudgetError, select_agent_context
 from src.agents.search_agent import AgentConfig, SearchAgent
 from src.agents.search_critic import AgentError, EvidenceCritic
-from src.contracts import (Answer, Chunk, CriticDecision, Evidence, FactAssessment,
-                           GenerationRequest, SearchRequest, Usage, UserContext)
+from src.agents.pilot import RecordingProvider
+from src.contracts import (Answer, Chunk, CriticDecision, Evidence, EvidenceClaim, FactAssessment,
+                           EvidenceAssessment, GenerationRequest, SearchRequest, Usage, UserContext)
 from src.generation.generator import Completion, GroundedGenerator
 from src.retrieval.corpus_bm25 import BM25Config, CorpusBM25, document_text
 from src.retrieval.hybrid import HybridRetriever
@@ -191,6 +192,8 @@ def test_complete_fact_checklist_does_not_research_based_on_uncalibrated_confide
         SearchRequest(query='What recovery target do the runner notes specify?', user=USER))
     assert result.trace.stop_reason == 'sufficient'
     assert len(provider.calls) == 2
+    assessment_payload = json.loads(provider.calls[1][1])['evidence_assessment']
+    assert assessment_payload['facts'][0]['status'] == 'supported'
 
 
 def test_conflicting_fact_checklist_cannot_be_overridden_by_sufficient_boolean():
@@ -206,14 +209,93 @@ def test_native_critic_schema_allows_only_supplied_passages_and_matched_document
     item = hit('ticket', 'The configured recovery target is under 9 minutes.')
     class StructuredProvider:
         calls = []
+        def complete(self, system, prompt):
+            raise AssertionError('Expected native schema completion')
         def complete_structured(self, system, prompt, schema):
             self.calls.append(schema)
-            return reply(facts=(FactAssessment(fact='Target: under 9 minutes', status='supported',
-                                              citation_ids=(item.citation_id,)),))
+            return Completion(EvidenceAssessment(facts=(FactAssessment(fact='Target: under 9 minutes', status='supported',
+                citation_ids=(item.citation_id,), claims=(EvidenceClaim(citation_id=item.citation_id,
+                    statement='under 9 minutes', answers_requested_fact=True,
+                    # Live models sometimes exceed the requested brevity. This
+                    # must not reject an otherwise valid, bounded response.
+                    scope_reason='The notes explicitly supply the requested recovery target. ' * 4),)),)).model_dump_json(), ZERO)
     provider = StructuredProvider()
     decision, _ = EvidenceCritic(provider).assess(context(item))
     schema = provider.calls[0]
     assert schema['$defs']['FactAssessment']['properties']['citation_ids']['items']['enum'] == [item.citation_id]
     assert schema['properties']['read_more_doc_ids']['items']['enum'] == ['ticket']
     assert 'facts' in schema['required'] and schema['properties']['facts']['minItems'] == 1
+    assert 'claims' in schema['$defs']['FactAssessment']['required']
+    assert schema['$defs']['EvidenceClaim']['properties']['citation_id']['enum'] == [item.citation_id]
+    assert not {'sufficient', 'confidence', 'reason', 'missing_facts'} & schema['properties'].keys()
+    fact_fields = list(schema['$defs']['FactAssessment']['properties'])
+    claim_fields = list(schema['$defs']['EvidenceClaim']['properties'])
+    assert fact_fields.index('claims') < fact_fields.index('status')
+    assert claim_fields.index('scope_reason') < claim_fields.index('answers_requested_fact')
     assert decision.sufficient
+
+
+def claim(item, statement, applies=True):
+    return EvidenceClaim(citation_id=item.citation_id, statement=statement,
+                         answers_requested_fact=applies,
+                         scope_reason='Same requested purpose.' if applies else 'Different purpose.')
+
+
+def test_unrelated_operating_target_cannot_create_an_escalation_conflict():
+    escalation = hit('ticket', 'Escalate p95 above 1800 ms for 8 minutes.')
+    slo = hit('other', 'Normal service SLO: p95 below 280 ms.')
+    assessment = reply(clarification_question='Which threshold?', facts=(FactAssessment(
+        fact='Escalation threshold', status='conflicting',
+        citation_ids=(escalation.citation_id, slo.citation_id),
+        claims=(claim(escalation, 'p95 above 1800 ms'), claim(slo, 'p95 below 280 ms', False))),))
+    decision, _ = EvidenceCritic(FakeProvider([assessment])).assess(context(escalation, slo))
+    assert decision.sufficient and decision.clarification_question is None
+    assert decision.facts[0].status == 'supported'
+    assert decision.facts[0].citation_ids == (escalation.citation_id,)
+
+
+@pytest.mark.parametrize('status', ['conflicting', 'ambiguous'])
+def test_two_applicable_disagreeing_claims_still_require_resolution(status):
+    a, b = hit('ticket', 'Retention is 15 days.'), hit('other', 'Retention is 25 days.')
+    assessment = reply(facts=(FactAssessment(fact='Retention', status=status,
+        citation_ids=(a.citation_id, b.citation_id),
+        claims=(claim(a, '15 days'), claim(b, '25 days'))),))
+    decision, _ = EvidenceCritic(FakeProvider([assessment])).assess(context(a, b))
+    assert not decision.sufficient and decision.facts[0].status == status
+
+
+def test_critic_claims_cannot_reference_unsupplied_passages():
+    item = hit('ticket', 'Retention is 15 days.')
+    assessment = reply(facts=(FactAssessment(fact='Retention', status='supported',
+        citation_ids=(item.citation_id,), claims=(EvidenceClaim(
+            citation_id='unseen', statement='15 days',
+            answers_requested_fact=True, scope_reason='Same context.'),)),))
+    with pytest.raises(AgentError, match='outside the supplied context'):
+        EvidenceCritic(FakeProvider([assessment])).assess(context(item))
+
+
+def test_background_claims_alone_do_not_supply_a_requested_fact():
+    item = hit('ticket', 'Normal operating target: below 280 ms.')
+    assessment = reply(facts=(FactAssessment(fact='Escalation threshold', status='supported',
+        citation_ids=(item.citation_id,), claims=(claim(item, 'below 280 ms', False),)),))
+    decision, _ = EvidenceCritic(FakeProvider([assessment])).assess(context(item))
+    assert not decision.sufficient and decision.facts[0].status == 'missing'
+    assert decision.facts[0].citation_ids == ()
+
+
+def test_a_relevant_candidate_does_not_override_an_explicit_missing_fact():
+    item = hit('ticket', 'Initial hypothesis: policy may have revoked tokens.')
+    assessment = reply(read_more_doc_ids=('ticket',), facts=(FactAssessment(
+        fact='Confirmed cause', status='missing', citation_ids=(item.citation_id,),
+        claims=(claim(item, 'A policy may have revoked tokens'),)),))
+    decision, _ = EvidenceCritic(FakeProvider([assessment])).assess(context(item))
+    assert not decision.sufficient and decision.facts[0].status == 'missing'
+    assert decision.read_more_doc_ids == ('ticket',)
+
+
+def test_recording_wrapper_preserves_underlying_provider_schema_capability():
+    assert not RecordingProvider(FakeProvider([])).supports_structured_output
+    class Native:
+        def complete_structured(self, system, prompt, schema):
+            raise AssertionError('Capability check must not make a model call')
+    assert RecordingProvider(Native()).supports_structured_output

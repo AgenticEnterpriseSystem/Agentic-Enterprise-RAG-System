@@ -227,7 +227,9 @@ class SearchAgent:
                         remaining = config.max_tokens - usage_so_far.input_tokens - usage_so_far.output_tokens
                         # Share the remaining allowance with the final answer rather
                         # than spending nearly all of it assessing more evidence.
-                        critic_limit = min(config.max_context_chars, max(1, (remaining // 2 - 1500) * 2))
+                        # Reserve prompt/schema metadata and the extracted fact
+                        # checklist passed to generation, in addition to text.
+                        critic_limit = min(config.max_context_chars, max(1, (remaining // 2 - 2500) * 2))
                         critic_pool = GenerationRequest(question=request.query, user=request.user, evidence=tuple(evidence.values()))
                         context = critic_pool.model_copy(update={"evidence": tuple(select_agent_context(
                             critic_pool, critic_limit, initial_ids, tuple(retained.values())))})
@@ -259,7 +261,8 @@ class SearchAgent:
                                    and not feedback.missing_facts
                                    and (feedback.facts or feedback.confidence >= config.confidence_threshold)):
                     active_tool, began = "generate", self.clock()
-                    answer, usage = model_call(self.generator.generate, context)
+                    answer, usage = model_call(self.generator.generate,
+                        context.model_copy(update={'assessment': feedback}))
                     record(active_tool, began, hits=context.evidence, usage=usage)
                     if not set(answer.citation_ids) <= {e.citation_id for e in context.evidence}:
                         raise AgentError("Generator returned an unknown citation.")

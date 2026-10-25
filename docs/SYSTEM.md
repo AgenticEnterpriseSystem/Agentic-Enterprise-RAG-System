@@ -41,17 +41,22 @@ Selection can still omit useful facts; these heuristics do not establish quality
 The optional cross-encoder has a 512-token default input limit; the web app does
 not currently enable it.
 
-The critic returns a fact checklist with supporting passage IDs; the adapter
-validates every ID and derives sufficiency from that checklist. Native Anthropic
-JSON schemas restrict citation choices to supplied passages, with local validation
-still applied afterward. A valid ID does not prove claim support.
+The native critic considers candidate claims and their scope before assigning
+each fact's status. Claims are model summaries, not verbatim quotations. The
+adapter validates passage IDs and derives sufficiency from the checklist; a
+conflict needs at least two claims marked applicable to the requested fact.
+Native Anthropic JSON schemas restrict citation choices to supplied passages,
+with local validation afterward. Scope matching remains a model judgment; a
+valid ID does not prove claim support. The generator receives the same evidence
+and validated checklist, and checks the claims against the actual passages.
 
 The agent stops on sufficient evidence, clarification, no new evidence, limits, or failure.
 Normal round/no-new-evidence stops can produce a cited partial answer; errors and
 exhausted budgets do not trigger fallback generation. The critic guides search;
 its confidence is **not calibrated answer accuracy** and does not override a
-complete fact checklist. Legacy assessments without a checklist retain the
-confidence gate. A clarification is a normal incomplete response asking for an
+complete fact checklist. Native checklists do not estimate confidence (the legacy
+field is zero); legacy assessments without a checklist retain the confidence
+gate. A clarification is a normal incomplete response asking for an
 incident date or other distinguishing detail. Stateful clarification dialogue
 and answer streaming are not implemented; submit a new, complete question.
 
