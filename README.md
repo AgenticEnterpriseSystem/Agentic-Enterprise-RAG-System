@@ -16,7 +16,9 @@ python scripts/run_web.py
 ```
 
 Open <http://127.0.0.1:8000> and wait for **Ready**. Stop with Ctrl+C.
-Docker is an optional alternative covered in the setup guide.
+Hybrid search is the default. `python scripts/run_web.py --check` prints the
+settings the app would use without starting it; a BM25-only baseline needs
+`--retrieval bm25`. Docker is an optional alternative covered in the setup guide.
 
 | Mode | Behavior |
 | --- | --- |
@@ -30,9 +32,12 @@ Neither generates answers in retrieval-only mode.
 ## Status
 
 Working alpha: full-corpus native hybrid search and a live agent request have
-been verified. Broader answer-quality testing and full-corpus Docker validation
-remain unfinished. Known issues are described in [Setup](docs/WEB_APP.md) and
-[System](docs/SYSTEM.md).
+been verified. A first answer-quality baseline exists: 20 development questions
+answered by GPT-OSS from BM25 evidence and graded 0–2 by an LLM judge (mean
+correctness 1.30, citation support 1.55; see [Answer evaluation](docs/ANSWER_EVALUATION.md)).
+Answer quality of the web configuration (hybrid + Claude) and full-corpus Docker
+validation remain unfinished. Known issues are described in [Setup](docs/WEB_APP.md),
+[System](docs/SYSTEM.md) and the [system card](docs/system_card.md).
 
 Artifacts are supplied separately by the team; a download URL is not yet published.
 Never commit `.env` or API keys.
@@ -92,7 +97,10 @@ Full results by question type: [docs/FULL_CORPUS.md](docs/FULL_CORPUS.md).
 - [Setup](docs/WEB_APP.md)
 - [System](docs/SYSTEM.md)
 - [Evaluation](docs/EVALUATION.md)
+- [Answer evaluation](docs/ANSWER_EVALUATION.md): the 20-question GPT-OSS generation and LLM-judge baseline
 - [Retrieval results](docs/FULL_CORPUS.md)
 - [Dataset](docs/DATA_CARD.md)
+- [Model card: hybrid retriever](docs/model_card_hybrid_retriever.md)
+- [System card](docs/system_card.md)
 
 Team: Hira Mian, Jane Choi, Alexander Xykis. [MIT License](LICENSE).

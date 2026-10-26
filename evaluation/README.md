@@ -17,6 +17,7 @@ and reproduction commands.
 | `results/*arctic-embed-l-v2.0*` | Arctic-embed-l-v2.0 on the full corpus: alone and in hybrids with BM25+ |
 | [agent_development/20261021.json](agent_development/20261021.json) | Historical live development measurements and provenance |
 | [agent_development/critic_before_scope.txt](agent_development/critic_before_scope.txt) | Saved prompt for repeatable development comparisons |
+| [../outputs/alex_evaluation/](../outputs/alex_evaluation/) | Answer-evaluation baseline: 20 curated development questions, their BM25 evidence, GPT-OSS answers, LLM-judge scores and the human/judge comparison workbook. See [Answer evaluation](../docs/ANSWER_EVALUATION.md). |
 
 Large corpus/index files and full answer/evidence traces stay in ignored `.cache/`.
 Old local reduced-corpus experiments are not the full-corpus results above. Review

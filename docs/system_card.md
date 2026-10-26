@@ -1,6 +1,6 @@
 # System card: Agentic RAG for Enterprise Knowledge Search
 
-**Card date:** 2026-10-24 · **App version:** 0.1.0 (working alpha)
+**Card date:** 2026-10-26 · **App version:** 0.1.0 (working alpha)
 **Owners:** Hira Mian, Jane Choi, Alexander Xykis (CIS 5980 capstone team)
 
 ## System overview and purpose
@@ -55,6 +55,7 @@ Answer, source excerpts, and a trace of every step (latency, tokens, cost)
 | Generator | `src/generation/generator.py` | LLM answer, JSON validation, citation validation, cost accounting |
 | Retrieval | `src/retrieval/` | BM25+, BGE-base dense search, fusion, passage selection |
 | Evaluation | `src/evaluation/`, `src/agents/pilot.py` | Retrieval scoring and agent comparison runs (offline) |
+| Answer evaluation | `src/evaluation/answer_metrics.py`, `scripts/run_ollama_*.py` | Offline LLM-judge grading of answers on a 0–2 rubric; not used by the app |
 
 **Models used**
 
@@ -62,6 +63,8 @@ Answer, source excerpts, and a trace of every step (latency, tokens, cost)
 - **Critic and generator:** an Anthropic Claude model called through the API, chosen by
   the operator with `RAG_MODEL`. Recorded development runs used
   `claude-haiku-4-5-20251001`. Temperature 0, at most 1,024 output tokens per call.
+- **Offline answer evaluation only:** GPT-OSS 20B (`gpt-oss:20b-cloud`, called through
+  Ollama) generated and graded the 20-question baseline. The web app does not use it.
 
 **Run modes**
 
@@ -82,7 +85,9 @@ Answer, source excerpts, and a trace of every step (latency, tokens, cost)
    per query, filtered to the allowed scope.
 4. **Model calls (live mode only).** The question and selected excerpts (up to 24,000
    characters) are sent to the Anthropic API, first to the critic and then to the
-   generator. **This is the only time data leaves the computer.** The API key is read
+   generator. Each excerpt carries its citation ID, document ID, title, platform,
+   date when known, and text. In the final round the generator
+   receives exactly the evidence the critic approved. **This is the only time data leaves the computer.** The API key is read
    from the environment and is never written to responses, traces or logs.
 5. **Follow-up (agent only).** If the critic finds gaps, the router makes up to four new
    queries within the same scope, for at most two rounds in total.
@@ -98,9 +103,12 @@ Answer, source excerpts, and a trace of every step (latency, tokens, cost)
 - **Corpus and indexes:** stored locally in `.cache/` (ignored by Git) and mounted
   read-only in Docker.
 - **Evaluation and pilot runs:** save full traces, evidence and model outputs to local
-  `.cache/` folders by design, for review. Only summaries are committed.
+  `.cache/` folders by design, for review. Only summaries are committed, except the
+  20-question answer-evaluation baseline in `outputs/alex_evaluation/`, which includes
+  retrieved excerpts of the synthetic corpus.
 - **Model provider:** in live mode, prompts and excerpts are processed under the
-  provider's API data policy, which the operator should review.
+  provider's API data policy, which the operator should review. The offline answer
+  evaluation sends excerpts to the Ollama cloud model under its policy.
 - **Secrets:** stay in a local `.env` file that Git ignores and that must never be committed.
 
 ## Safety measures
@@ -158,6 +166,9 @@ Answer, source excerpts, and a trace of every step (latency, tokens, cost)
 ### Deployment hardening
 
 - Served only on `127.0.0.1` (Docker publishes to localhost only).
+- Hybrid retrieval is the default. The launcher refuses a `RAG_RETRIEVAL=bm25` setting
+  unless started with `--retrieval bm25`, so the app cannot silently run the weaker
+  baseline; `--check` shows the effective settings without secrets.
 - Docker runs as a non-root user with the data folder mounted read-only.
 - Error responses use fixed messages and never include provider error text,
   credentials or document text.
@@ -175,10 +186,17 @@ Answer, source excerpts, and a trace of every step (latency, tokens, cost)
   cost was $0.062 vs $0.160. Fixed RAG ran first, so caching affects the timing.
 - **Critic prompt:** matched 8/8 synthetic, AI-proposed labels after revision (5/8 before).
   These were prompt-development examples, not an independent test.
-- **Automated tests:** 180 tests run in CI on every push, plus a Docker smoke test of both
-  workflows in fixture mode. They use fake data and make no paid calls.
-- **Not yet measured:** answer correctness, citation support, critic calibration, the
-  agent with the hybrid retriever, human review and red-teaming.
+- **Answer quality, first baseline (2026-10-17):** 20 curated development questions answered
+  by GPT-OSS 20B from the top five BM25 documents and graded 0–2 by the same model. Means:
+  correctness 1.30, completeness 1.20, citation support 1.55, abstention/limits 1.70; 11 of
+  20 fully correct. This is not the web configuration (hybrid + Claude), and a model
+  grading its own answers can inflate scores.
+- **Automated tests:** 206 tests (205 pass; one is skipped without the raw upstream
+  benchmark clone) run in CI on every push, plus a Docker smoke test of both workflows in
+  fixture mode. They use fake data and make no paid calls.
+- **Not yet measured:** answer quality of the web configuration (hybrid + Claude), judge
+  validation against human scores, critic calibration, the agent with the hybrid
+  retriever, and red-teaming.
 
 **Monitoring**
 
@@ -188,8 +206,9 @@ Answer, source excerpts, and a trace of every step (latency, tokens, cost)
 
 ## Known limitations
 
-- **Answer quality is unproven.** An "answered" status and valid citation IDs do not
-  mean the answer is correct or that each claim is supported.
+- **Answer quality is unproven** for the web configuration. An "answered" status and
+  valid citation IDs do not mean the answer is correct or that each claim is supported.
+  The only answer-quality numbers so far come from a different generator (GPT-OSS).
 - **Critic confidence is not calibrated.** It guides searching; it is not an accuracy score.
 - **Incomplete answers** can happen at the round limit or when useful facts fall outside
   the selected passages.
@@ -218,8 +237,9 @@ Answer, source excerpts, and a trace of every step (latency, tokens, cost)
 
 ## Open issues and questions
 
-- Measure answer quality and citation support with human review and a validated judge,
-  using the rubric in [Evaluation](EVALUATION.md).
+- Measure answer quality and citation support for the web configuration with human
+  review and a validated judge, using the rubric in [Evaluation](EVALUATION.md). Started:
+  a 20-question GPT-OSS judge baseline exists ([Answer evaluation](ANSWER_EVALUATION.md)).
 - Red-team the system (prompt injection in documents, scope escapes, cost abuse) in Phase 4.
 - Decide whether to add a content-moderation filter and a clarifying-question step.
 - Calibrate or replace the critic's confidence threshold.
@@ -237,4 +257,4 @@ console first, then report it.
 
 **Related documents:** [Model card](model_card_hybrid_retriever.md) ·
 [System](SYSTEM.md) · [Setup](WEB_APP.md) · [Evaluation](EVALUATION.md) ·
-[Data card](DATA_CARD.md)
+[Answer evaluation](ANSWER_EVALUATION.md) · [Data card](DATA_CARD.md)

@@ -41,6 +41,11 @@ exhausted budgets do not trigger fallback generation. The critic guides search;
 its confidence is **not calibrated answer accuracy**. Clarification dialogue and
 answer streaming are not implemented.
 
+The critic and generator receive each excerpt's citation ID, document ID, title,
+platform, date when known, and text. Excerpts that
+share a document ID can be read together, and titles are context, not proof. In the
+final round, the answer is generated from exactly the evidence the critic approved.
+
 ## API
 
 | Endpoint | Result |

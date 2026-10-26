@@ -103,7 +103,9 @@ The [October 21 run record](../evaluation/agent_development/20261021.json) prese
 model/settings, question IDs, source/prompt hashes, runtime versions, usage and
 per-case outcomes. These runs used **BM25 and Haiku 4.5**, not GPT-OSS or BGE-base
 hybrid. They were recorded in an isolated integration checkout before changes
-were ported; hashes identify the measured snapshots.
+were ported; hashes identify the measured snapshots. The critic and generator
+prompts have changed since (commit `c1a5ea5`), so these runs describe the
+earlier prompts.
 
 - Ten development pairs: follow-ups found additional reference documents in two
   cases, but their useful passages were initially dropped before generation.
@@ -142,7 +144,10 @@ run so historical results are preserved.
 python -m pytest -q
 
 # Artifact readiness; no generated answers
-python -m src.agents.pilot
+python -m src.agents.pilot \
+  --corpus .cache/hybrid-artifacts/documents.parquet \
+  --index .cache/hybrid-artifacts/indexes/bm25 \
+  --dense-index .cache/hybrid-artifacts/indexes/dense-bge-base
 
 # Full-development retrieval scoring
 python -m src.evaluation.run_retrieval --method bm25 --split development \
@@ -153,9 +158,17 @@ python -m src.evaluation.compare_fixes --label new-check
 
 # Save real first-search evidence and references without model calls
 python -m src.agents.pilot --prepare \
+  --corpus .cache/hybrid-artifacts/documents.parquet \
+  --index .cache/hybrid-artifacts/indexes/bm25 \
+  --dense-index .cache/hybrid-artifacts/indexes/dense-bge-base \
   --question-ids qst_0001 qst_0316 qst_0412 qst_0342 qst_0384 qst_0482 \
   --output .cache/agent-pilot/new-review
 ```
+
+The pilot defaults to hybrid retrieval, like the web app, but does not read `.env`:
+pass the assembled bundle's paths as above (its own defaults point at
+`.cache/corpus/`). For a BM25 baseline, use `--retrieval bm25` with `--corpus` and
+`--index`. Questions default to `.cache/corpus/questions.jsonl`.
 
 The six explicit cases cover defaults, escrow, conflicting reports, policy
 interpretation, multi-part completeness and missing production facts. Selection
@@ -177,6 +190,9 @@ an allocated remaining budget:
 
 ```sh
 python -m src.agents.pilot --live --workflow compare --count 3 \
+  --corpus .cache/hybrid-artifacts/documents.parquet \
+  --index .cache/hybrid-artifacts/indexes/bm25 \
+  --dense-index .cache/hybrid-artifacts/indexes/dense-bge-base \
   --model MODEL_ID --budget-usd TOTAL_DOLLARS --question-budget-usd 0.10 \
   --input-price INPUT_USD_PER_MILLION --output-price OUTPUT_USD_PER_MILLION \
   --output .cache/agent-pilot/new-comparison
@@ -235,6 +251,27 @@ IDs, ranked evidence, selected context, answer, failed dimension and suspected
 cause. Distinguish retrieval misses, passage omission, generation errors and bad
 abstention. Selected failures do not estimate an overall failure rate. Test fixes
 on the same development set and retain real-conflict/unanswerable counterexamples.
+
+## Answer evaluation: first baseline
+
+[Answer evaluation](ANSWER_EVALUATION.md) runs the rubric above with an LLM judge.
+Its first run (2026-10-17) answered 20 curated development questions with GPT-OSS
+20B (through Ollama) from the top five BM25 documents, then graded each answer with
+the same model. Results are in `outputs/alex_evaluation/`.
+
+| Dimension | Mean (0–2) | Scored 2 |
+| --- | ---: | ---: |
+| Correctness | 1.30 | 11 of 20 |
+| Completeness | 1.20 | 9 of 20 |
+| Citation support | 1.55 | 15 of 20 |
+| Abstention/limits | 1.70 | 16 of 20 |
+
+Fifteen answers were given and five marked insufficient evidence. This is not a
+measurement of the web configuration (hybrid retrieval with Claude), and the same
+model wrote and graded the answers, which can inflate scores. Human scores for
+comparison are in `outputs/alex_evaluation/rag_evaluation_results.xlsx`; agreement
+statistics are not yet reproducible from committed code. A comparable run on the
+hybrid retriever and the deployed generator is the next step.
 
 ## Application verification
 

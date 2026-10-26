@@ -123,7 +123,7 @@ Exclude N/A pairs instead of treating them as zeros. Store the comparison script
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-At the time of this documentation, the user reported **19/19** answer-metrics tests and **133/133** full-project tests passing. These tests do not by themselves establish a successful fresh run against the live Ollama service.
+At the time of this documentation, the user reported **19/19** answer-metrics tests and **133/133** full-project tests passing. After merging into `hira/dev` with the web app (2026-10-26), the full suite is **205 passed, 1 skipped**; the skipped answer-metrics test needs the raw EnterpriseRAG-Bench clone. These tests do not by themselves establish a successful fresh run against the live Ollama service.
 
 ## 9. Git sharing and data handling
 
