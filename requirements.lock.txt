@@ -79,3 +79,5 @@ urllib3==2.8.0
 uvicorn==0.54.0
 xxhash==4.0.1
 yarl==1.25.1
+
+ollama==0.6.3

@@ -1,0 +1,405 @@
+[
+  {
+    "question_id": "qst_0001",
+    "question_type": "basic",
+    "source_types": [
+      "github"
+    ],
+    "question": "What are the default size limits for file uploads and total request size for the new multipart upload support on the OpenAI-compatible API endpoints?",
+    "expected_doc_ids": [
+      "dsid_ae068ee4aa9640159427cd941bef0238"
+    ],
+    "gold_answer": "The default limits are 10 MiB per file (max_file_size) and 50 MiB total per request (max_total_request_size) for multipart uploads on the OpenAI-compatible endpoints.",
+    "answer_facts": [
+      "The default per file upload size limit (max_file_size) for multipart uploads on OpenAI-compatible endpoints is 10 MiB.",
+      "The default total request size limit (max_total_request_size) for multipart uploads on OpenAI-compatible endpoints is 50 MiB."
+    ]
+  },
+  {
+    "question_id": "qst_0179",
+    "question_type": "semantic",
+    "source_types": [
+      "jira"
+    ],
+    "question": "What caused an enterprise tenant in Western Europe to suddenly get routed to a Southeast Asia edge during a short mid March 2026 load spike on the vectorization service, adding about 200ms and triggering ingestion timeouts, even though the tenant was supposed to stay in Europe?",
+    "expected_doc_ids": [
+      "dsid_a0f25cffcb264f0ea6eba5e501de0e08"
+    ],
+    "gold_answer": "A transient control-plane heartbeat lag delayed the tenant's residency-stamp refresh under high concurrent embedding load, causing the stamp to be treated as stale and triggering fallback routing. Combined with EU-edge NAT/DNS rebinds and brief EU auth timeouts, the edge selected the \"nearest healthy edge\" bucket-which included ap-southeast-so some requests were routed to Southeast Asia, adding ~220 ms RTT and causing ingestion timeouts.",
+    "answer_facts": [
+      "A transient control-plane heartbeat lag occurred during high concurrent embedding load.",
+      "The heartbeat lag delayed the tenants residency-stamp refresh.",
+      "The delayed refresh caused the residency stamp to be treated as stale and triggered fallback routing.",
+      "EU-edge NAT or DNS rebinds and brief EU authentication timeouts also occurred during the event.",
+      "Because of these issues, routing selected a nearest healthy edge bucket that included ap-southeast.",
+      "Some requests from the Western Europe tenant were routed to a Southeast Asia edge.",
+      "The Southeast Asia routing added about 200 ms (about 220 ms RTT) latency and caused ingestion timeouts."
+    ]
+  },
+  {
+    "question_id": "qst_0211",
+    "question_type": "semantic",
+    "source_types": [
+      "jira"
+    ],
+    "question": "In our hosted chat streaming, a corporate gateway forces the stream into a polling style connection and after a reconnect the assistant reply consistently loses the last couple sentences and the final completion status never arrives; what is the recommended short term mitigation for customers until a server side fix is deployed?",
+    "expected_doc_ids": [
+      "dsid_23438eef0a4c47f1a8921f4a74353a2b"
+    ],
+    "gold_answer": "Until the server-side fix is rolled out, customers should either enable direct SSE passthrough for the hosted API endpoints (so the gateway doesn't downgrade to long-polling) or increase the proxy/gateway keepalive timeout to at least 60 seconds to avoid the reconnect that triggers truncation and missing finish metadata.",
+    "answer_facts": [
+      "Short term mitigation is to enable direct SSE passthrough for the hosted API endpoints so the corporate gateway does not downgrade the stream to long polling",
+      "Alternative short term mitigation is to increase the proxy or gateway keepalive timeout to at least 60 seconds to avoid the reconnect that causes truncated assistant output and missing final completion status metadata"
+    ]
+  },
+  {
+    "question_id": "qst_0316",
+    "question_type": "intra_document_reasoning",
+    "source_types": [
+      "gmail"
+    ],
+    "question": "For the ProofPoint pentest artifact audit-proxy escrow, what is the default retention period, what is the standard access request turnaround time, and who is billed for the AuditWorks storage fees?",
+    "expected_doc_ids": [
+      "dsid_36bdca5b925c4550b5eca1990f2d798b"
+    ],
+    "gold_answer": "The default retention period is 90 days, the standard access request turnaround time is 4 business hours, and AuditWorks storage fees are billed separately to the customer (with Redwood coordinating but not billing storage fees unless otherwise agreed).",
+    "answer_facts": [
+      "The default retention period for the audit-proxy escrow is 90 days.",
+      "The standard access request turnaround time is 4 business hours.",
+      "AuditWorks storage fees are billed separately to the customer."
+    ]
+  },
+  {
+    "question_id": "qst_0315",
+    "question_type": "intra_document_reasoning",
+    "source_types": [
+      "linear"
+    ],
+    "question": "What UI indicator did the team plan to show for tenants in escalation mode, and what default grace-window duration was chosen for the circuit-breaker?",
+    "expected_doc_ids": [
+      "dsid_e6c0f4ec1f2d4937925ce9b9ef2c3057"
+    ],
+    "gold_answer": "They planned to show an \"Escalation\" badge on the tenant dashboard, and they chose a 10-second default grace-window for the circuit-breaker.",
+    "answer_facts": [
+      "The team planned to show an Escalation badge on the tenant dashboard for tenants in escalation mode.",
+      "The circuit-breaker default grace-window duration chosen was 10 seconds."
+    ]
+  },
+  {
+    "question_id": "qst_0309",
+    "question_type": "intra_document_reasoning",
+    "source_types": [
+      "slack"
+    ],
+    "question": "After the docs deploy failed due to mkdocs linkcheck reporting broken anchor fragments from an include refactor, what final deploy-bot status was reported once prod was updated?",
+    "expected_doc_ids": [
+      "dsid_107621ec137a40e5a966e429a531125e"
+    ],
+    "gold_answer": "Deploy-bot's final status after prod was updated was: \"success, linkcheck warnings only (no broken fragments).\"",
+    "answer_facts": [
+      "After prod was updated, deploy-bot reported a final status of success.",
+      "The final deploy-bot status indicated linkcheck warnings only.",
+      "The final deploy-bot status indicated there were no broken fragments."
+    ]
+  },
+  {
+    "question_id": "qst_0399",
+    "question_type": "constrained",
+    "source_types": [
+      "slack"
+    ],
+    "question": "In the mid-March 2026 eu-west canary rollout where sticky fallback kept pinning requests back onto the failing canary instead of the stable quantized variant, what configuration mistake caused the loop and what mitigations were applied to stop it?",
+    "expected_doc_ids": [
+      "dsid_4cfe0c490c974065bd497f06ad4a1105"
+    ],
+    "gold_answer": "The loop was caused by the rollout fallback_policy using sticky fallback with preferred_variant set to the ambiguous label \"latest\", which resolved back to the canary (also tagged \"latest\") instead of the stable-quantized variant, and the long sticky_ttl kept sessions pinned. Mitigations: pause the canary rollout, change fallback to a forced_variant of stable-quantized, drain the eu-west canary pods, reduce sticky TTL, and enable a temporary eu-west circuit-breaker to force stable routing on elevated error rate.",
+    "answer_facts": [
+      "The loop was caused by the fallback_policy using sticky fallback with preferred_variant set to the ambiguous label \"latest\".",
+      "The label \"latest\" resolved back to the canary because the canary was also tagged \"latest\", instead of resolving to the stable-quantized variant.",
+      "A long sticky_ttl kept sessions pinned to the canary and sustained the loop.",
+      "Mitigation included pausing the canary rollout.",
+      "Mitigation included changing fallback to a forced_variant of stable-quantized.",
+      "Mitigation included draining the eu-west canary pods.",
+      "Mitigation included reducing the sticky TTL.",
+      "Mitigation included enabling a temporary eu-west circuit-breaker to force stable routing when error rate was elevated.",
+      "The answer must not attribute the cause to a canary model-variant typo like \"v2-8q not found\" or to smart-router bouncing between us-west and eu-west due to low capacity; that is a different incident.",
+      "The answer must not describe a greedy routing rule like matching \"region:eu*\" or KV-cache incompatibility between 7b/13b quant variants; that routing-policy incident is separate from this eu-west canary rollout.",
+      "The answer must not claim the mitigations were \"clear sticky pins for /generate\" or applying the control-plane toggle \"fallback_disable_sticky_during_canary=true\"; those actions belong to a different canary incident.",
+      "The answer must not cite a missing hop-count header or edge-router re-ingest loop from a February 2026 dedicated-routing postmortem; that is unrelated to this mid-March eu-west canary rollout.",
+      "The answer must not say the event was a customer traffic surge that routed a pinned dedicated deployment to a legacy quantized variant (e.g., redwood/quant-13b-q4) and was mitigated via per-customer strict pinning; that is a different March 12 review."
+    ]
+  },
+  {
+    "question_id": "qst_0424",
+    "question_type": "conflicting_info",
+    "source_types": [
+      "confluence",
+      "linear"
+    ],
+    "question": "For the Interactive Latency Canvas, what are the current prompt_len_bucket cutoffs (short/medium/long)?",
+    "expected_doc_ids": [
+      "dsid_f039509796f842cd84ba3bfb895c7132",
+      "dsid_7f2a6f2d2de34f94a5b6f3d5d0d1f6a2"
+    ],
+    "gold_answer": "Current (token-based) prompt_len_bucket definitions: short <128 tokens, medium 128-1024 tokens, long >1024 tokens. An earlier draft used smaller buckets: short <64, medium 64-512, long >512.",
+    "answer_facts": [
+      "The answer must state the current buckets are token-based.",
+      "The answer must state: short is <128 tokens.",
+      "The answer must state: medium is 128-1024 tokens.",
+      "The answer must state: long is >1024 tokens.",
+      "If the answer mentions older guidance, it must describe the earlier buckets as short <64, medium 64-512, long >512.",
+      "If older buckets are mentioned, the answer must clearly indicate they are outdated/earlier and not the current standard.",
+      "The answer must not claim the current medium bucket ends at 512 tokens.",
+      "The answer must not claim the current short bucket is <64 tokens.",
+      "The answer must not introduce extra prompt_len_bucket categories beyond short/medium/long (e.g., 'xlong').",
+      "The answer must not claim the current buckets are character-based."
+    ]
+  },
+  {
+    "question_id": "qst_0412",
+    "question_type": "conflicting_info",
+    "source_types": [
+      "confluence",
+      "google_drive"
+    ],
+    "question": "For extraction, what price-normalization correctness is reported at temp=0.0 with strict JSON + canonicalization, and what earlier % is it compared to?",
+    "expected_doc_ids": [
+      "dsid_89c0c31e220c4777b15c3c6ff0eff61d",
+      "dsid_a2bf755670ad44e09b42c11e9d73e5d3"
+    ],
+    "gold_answer": "The updated mini-results report ~96% price-normalization correctness at temp=0.0 when using strict JSON plus canonicalization rules; this is compared to an earlier ~89% figure from scratch runs that did not include canonicalization.",
+    "answer_facts": [
+      "The answer must state that the updated reported price-normalization correctness at temp=0.0 (with strict JSON + canonicalization rules) is ~96%.",
+      "The answer must state that this updated result is compared against an earlier ~89% figure.",
+      "The answer must attribute the improvement to adding canonicalization rules (e.g., stripping currency symbols), not to unrelated changes.",
+      "The answer must not claim the earlier result was ~96% or that the updated result was ~89%.",
+      "The answer must not introduce other percentages (e.g., 92%, 98%) as the reported temp=0.0 extraction normalization correctness."
+    ]
+  },
+  {
+    "question_id": "qst_0431",
+    "question_type": "completeness",
+    "source_types": [
+      "confluence"
+    ],
+    "question": "What is the procedure for an emergency rollback of a Serving Runtime release (Hosted and Dedicated)?",
+    "expected_doc_ids": [
+      "dsid_f6e3b7ad413142019dbb5a5fed07f548",
+      "dsid_840703a1cc37438a84e9beb68029d80b"
+    ],
+    "gold_answer": "For an emergency rollback of a Serving Runtime release in Hosted and Dedicated, first pause/freeze any in-flight progressive rollout so it cannot auto-advance, then re-pin the runtime to a known-good prior runtime release tag, trigger a redeploy, and verify fleet health (e.g., 5xx rate, p95 TTFT, GPU OOMs) before closing the incident/change record. For Hosted, apply the rollback across regions in order (non-critical/canary first, then remaining canary, then all affected regions) and lock the tag to prevent re-advance; for Dedicated, identify impacted tenant clusters, pin and redeploy per cluster (coordinating customer comms as required), and keep the incident open until metrics are stable (\u224830 minutes Hosted, \u224860 minutes Dedicated) while capturing CI/CD job links, affected regions/clusters, tags, timings, and verification evidence.",
+    "answer_facts": [
+      "In an emergency rollback of a Serving Runtime release, first pause or freeze any in-flight progressive rollout so it cannot auto-advance.",
+      "Re-pin the serving runtime to a known-good prior runtime release tag.",
+      "Trigger a redeploy after re-pinning the runtime tag.",
+      "Verify fleet health after the rollback using metrics such as 5xx rate, p95 TTFT, and GPU OOMs.",
+      "Close the incident or change record only after verification is complete.",
+      "For Hosted, apply the rollback across regions in order: non-critical or canary first, then remaining canary, then all affected regions.",
+      "For Hosted, lock the runtime tag to prevent re-advance after rollback.",
+      "For Dedicated, identify the impacted tenant clusters.",
+      "For Dedicated, pin and redeploy per impacted tenant cluster.",
+      "For Dedicated, coordinate customer communications as required during the rollback.",
+      "Keep the incident open until metrics are stable, approximately 30 minutes for Hosted and approximately 60 minutes for Dedicated.",
+      "Capture incident evidence including CI/CD job links, affected regions or clusters, runtime tags, timings, and verification evidence."
+    ]
+  },
+  {
+    "question_id": "qst_0474",
+    "question_type": "high_level",
+    "source_types": [],
+    "question": "Which serving-runtime optimizations are explicitly called out as part of Redwood's inference engine design?",
+    "expected_doc_ids": [],
+    "gold_answer": "Modern attention optimizations; continuous batching; KV cache management (including prefix/KV caching); quantization-friendly execution paths; and architecture/sequence-length/hardware-aware optimized kernel selection.",
+    "answer_facts": [
+      "Redwood explicitly includes modern attention optimizations in its inference engine design.",
+      "Redwood explicitly includes continuous batching in its inference engine design.",
+      "Redwood explicitly includes KV cache management, including prefix or KV caching, in its inference engine design.",
+      "Redwood explicitly includes quantization-friendly execution paths in its inference engine design.",
+      "Redwood explicitly includes optimized kernel selection that is aware of architecture, sequence length, and hardware in its inference engine design."
+    ]
+  },
+  {
+    "question_id": "qst_0488",
+    "question_type": "info_not_found",
+    "source_types": [],
+    "question": "When we use the GPU firmware operator to do a BIOS/firmware rollout, what BIOS settings are included in Redwood's \"safe mode boot\" profile for A100/H100 nodes (e.g., Secure Boot, Above 4G decoding, Resizable BAR), and what are the default values for each?",
+    "expected_doc_ids": [],
+    "gold_answer": "The answer must state at some point that the query is not fully answerable from available documents or caveat the provided information with why it does not fully address the query. The answer may present relevant and related information to be helpful to the user however it must clearly also mention that at least some aspects are not found or answered. The answer may also simply state that the query is not answerable from the documents, this is perfectly acceptable.",
+    "answer_facts": [
+      "The answer must state at some point that the query is not fully answerable from available documents or caveat the provided information with why it does not fully address the query. The answer may present relevant and related information to be helpful to the user however it must clearly also mention that at least some aspects are not found or answered. The answer may also simply state that the query is not answerable from the documents, this is perfectly acceptable."
+    ]
+  },
+  {
+    "question_id": "qst_0139",
+    "question_type": "basic",
+    "source_types": [
+      "hubspot"
+    ],
+    "question": "What false positive threshold did the prospect set for suggested code review comments in the evaluation criteria for their PR review assistant POC?",
+    "expected_doc_ids": [
+      "dsid_9f92a42dc8d24c93a0a696a0727063b9"
+    ],
+    "gold_answer": "They set a target of keeping the false-positive rate on suggested review comments below 8%.",
+    "answer_facts": [
+      "The prospect set a target false positive rate for suggested code review comments below 8%."
+    ]
+  },
+  {
+    "question_id": "qst_0028",
+    "question_type": "basic",
+    "source_types": [
+      "slack"
+    ],
+    "question": "What steps and commands were recommended for creating and pushing a signed annotated Git tag and then making a draft GitHub release for the v1.14.0 release?",
+    "expected_doc_ids": [
+      "dsid_7c0157af909c4a6190e00e1fc6b92b73"
+    ],
+    "gold_answer": "Recommended steps were to update the release branch, create an annotated tag (and GPG-sign it), push it, then create a draft GitHub release via the gh CLI:\n\n```sh\n# ensure branch is up to date\ngit checkout release/v1.14\ngit pull --ff-only origin release/v1.14\n\n# create an annotated tag\ngit tag -a v1.14.0 -m \"Release v1.14.0 - runtime + CLI: perf improvements, bugfixes\"\n\n# GPG-sign the tag locally (required for this release)\ngit tag -s v1.14.0 -m \"Release v1.14.0\"\n\n# push the tag to origin\ngit push origin v1.14.0\n\n# create a GitHub draft release with changelog as notes (and attach dist/*)\ngh release create v1.14.0 dist/* --notes-file CHANGELOG.md --draft\n```",
+    "answer_facts": [
+      "Update the release branch by checking out release/v1.14 and pulling with git pull --ff-only origin release/v1.14",
+      "Create an annotated tag for the release with git tag -a v1.14.0 -m \"Release v1.14.0 ...\"",
+      "GPG-sign the v1.14.0 tag locally with git tag -s v1.14.0 -m \"Release v1.14.0\"",
+      "Push the v1.14.0 tag to origin with git push origin v1.14.0",
+      "Create a draft GitHub release for v1.14.0 using the gh CLI with gh release create v1.14.0 dist/* --notes-file CHANGELOG.md --draft"
+    ]
+  },
+  {
+    "question_id": "qst_0434",
+    "question_type": "completeness",
+    "source_types": [
+      "confluence",
+      "google_drive"
+    ],
+    "question": "In Q4 2025, which customer industry segment was featured in the most published customer stories (case studies + one-page success stories)?",
+    "expected_doc_ids": [
+      "dsid_1f781623f5c14b3686b1129d19b73884",
+      "dsid_8f6063b780784a139de5c4d5afa49eb2",
+      "dsid_d04ead3e1e2d4c9f9cd34c73dca30b5d",
+      "dsid_81f6e00a9f474941ab5c123a64b0b80e",
+      "dsid_3986d90d7a5348048d989c17fe8dfd83",
+      "dsid_9d923c50817b4989b96dad5c7ad7c8a8"
+    ],
+    "gold_answer": "Fintech was featured most often in Q4 2025, appearing in 3 published customer stories (2 case studies and 1 one-page success story).",
+    "answer_facts": [
+      "In Q4 2025, the Fintech customer industry segment was featured in the most published customer stories.",
+      "In Q4 2025, Fintech appeared in 3 published customer stories.",
+      "The 3 Q4 2025 Fintech customer stories consisted of 2 case studies and 1 one-page success story."
+    ]
+  },
+  {
+    "question_id": "qst_0395",
+    "question_type": "constrained",
+    "source_types": [
+      "jira"
+    ],
+    "question": "What was the root cause and planned server-side fix for the March 2026 incident where function-call webhook callbacks were retried after a timeout and the JSON payload stayed the same, but the HMAC signature header changed between the first delivery and the retry due to gzip/encoding differences?",
+    "expected_doc_ids": [
+      "dsid_5410b45665284cfcb01f72410fff33c4"
+    ],
+    "gold_answer": "Root cause: the gateway generated the HMAC signature over the post-transport encoded body (after gzip/compression), and the retry path re-encoded the same JSON with different gzip/encoding details (e.g., gzip envelope metadata/CRLF normalization), so the raw bytes changed and the signature header differed even though the JSON payload was unchanged. Planned server-side fix: move signing to the canonical logical payload before compression/encoding so all retries verify regardless of gzip/transport differences (and expose a canonicalization/version indicator header).",
+    "answer_facts": [
+      "The gateway computed the HMAC signature over the post-transport encoded request body (after gzip or other compression/encoding).",
+      "On retry, the same JSON payload was re-encoded with different gzip/encoding details (for example gzip envelope metadata or CRLF normalization), changing the raw bytes and therefore changing the HMAC signature header even though the JSON was unchanged.",
+      "Planned server-side fix was to sign a canonical representation of the logical payload before any compression/encoding so retries verify regardless of gzip or transport differences, and to expose a canonicalization or version-indicator header.",
+      "Do not attribute this incident to idempotency or trace-id header normalization by an ALB/proxy (e.g., '+' vs space or base64 variants) causing duplicate executions; that is a different issue.",
+      "Do not claim the root cause was missing a stable tool invocation ID in the webhook payload/headers; that relates to deduplication guidance for retries, not signature mismatch due to gzip encoding.",
+      "Do not say the signature changed because of OAuth token refresh or because base64 vs base64url encoding/padding differences were used for the signature header; that is a separate SDK/auth-related incident.",
+      "Do not describe this as an API gateway saturation / retry storm / runtime OOM incident with elevated 5xx rates; that outage is unrelated to HMAC signatures changing between first delivery and retry.",
+      "Do not answer using the general webhook contract document as if it described the specific March 2026 gzip-related signature mismatch incident; it provides generic guidelines, not the incident's root cause and fix."
+    ]
+  },
+  {
+    "question_id": "qst_0489",
+    "question_type": "info_not_found",
+    "source_types": [],
+    "question": "In the `observability-pack` status page component registry, what Slack channel is listed as the ownership contact for the **Hosted API - Streaming (us-east)** component?",
+    "expected_doc_ids": [],
+    "gold_answer": "The answer must state at some point that the query is not fully answerable from available documents or caveat the provided information with why it does not fully address the query. The answer may present relevant and related information to be helpful to the user however it must clearly also mention that at least some aspects are not found or answered. The answer may also simply state that the query is not answerable from the documents, this is perfectly acceptable.",
+    "answer_facts": [
+      "The answer must state at some point that the query is not fully answerable from available documents or caveat the provided information with why it does not fully address the query. The answer may present relevant and related information to be helpful to the user however it must clearly also mention that at least some aspects are not found or answered. The answer may also simply state that the query is not answerable from the documents, this is perfectly acceptable."
+    ]
+  },
+  {
+    "question_id": "qst_0354",
+    "question_type": "project_related",
+    "source_types": [
+      "confluence",
+      "github",
+      "google_drive",
+      "jira"
+    ],
+    "question": "How should we explain and remediate a case where a customers invoice token total is higher than their Usage API export because streaming retries were double-counted, and what approvals are required before issuing a credit or changing the ledger?",
+    "expected_doc_ids": [
+      "dsid_37befab212ae4ed9be7ebe612d942658",
+      "dsid_602422b841b94f5c8089555015df0ed8",
+      "dsid_d04dea2d736445c3af6934b900a12ef9",
+      "dsid_c52c609c0cdf4211a7e8c57bb1da72e4",
+      "dsid_dc8da53aae4c4a81be13ae8e519cd42d",
+      "dsid_4587f467ecf646b7926dbd6b886f9f23",
+      "dsid_38e7aac0d2ed4545b7a92c2c441825a1",
+      "dsid_2f1f0358b85148f19d38f619891bfb15"
+    ],
+    "gold_answer": "Explain that invoices are generated from the billing ledger (the invoicing source of truth), and here a subset of streaming chat requests went through a server-side retry or fallback path where multiple attempt-level usage records were treated as billable. The ledger aggregation summed billed_tokens from both the initial (aborted/superseded) attempt and the retried successful attempt, so the invoice ended up higher. The customer Usage API/export totals are based on deduped usage events and therefore show only one logical billed record per dedupe or idempotency key, so their export is lower. Per the Hosted API meter spec, expected behavior is idempotent billing: for streaming retries or fallback routing, bill exactly once per logical request (per stable billing_dedupe_key or equivalent), and do not bill superseded attempts; streaming disconnects bill only tokens actually generated and sent (and prompt tokens only if execution_started).\n\nRemediate by (1) reconciling ledger vs deduped usage events for the same UTC window and the same grain (account x day x region x model x endpoint/route x plan), quantifying the overbilled billed_tokens and dollar impact; (2) drilling into samples by request_id/idempotency presence and attempt_id/attempt_seq to confirm duplicate billable rows and the retry or fallback terminal reasons; (3) shipping/validating the fix so streaming retry or fallback attempts share a stable request-scoped dedupe key and only the final SUCCESS attempt is eligible for billing (mark prior attempts as SUPERSEDED/RETRY_ABORTED or billable=false), with regression tests and a shadow billing compare before full rollout; and (4) correcting the customer financially via a credit memo/service credit applied to the next invoice (preferred over re-issuing) with an audit trail (queries, sample request IDs, PR links, effective date). Do not retroactively rewrite closed-period ledger totals unless explicitly approved.\n\nApprovals: customer credit or refund due to metering error greater than $10k or greater than 2% of the invoice requires Laura Bennett and Michael Grant. Any retroactive change to ledger totals for a closed or issued invoice requires Laura Bennett, Emily Stone, and Michael Grant. Any change to metering definitions affecting billed quantities requires Emily Stone, Logan Wright, Nadia Rahman, and Michael Grant if customer-facing definitions change. Backfills that could change prior-period customer exports require Emily Stone, Logan Wright, and the Product owner (Nikhil Sharma for Hosted API).",
+    "answer_facts": [
+      "Invoices are generated from the billing ledger, which is the invoicing source of truth.",
+      "In this case, some streaming chat requests went through a server-side retry or fallback path where multiple attempt-level usage records were treated as billable.",
+      "The ledger aggregation summed billed_tokens from both the initial aborted or superseded attempt and the retried successful attempt, making the invoice total higher.",
+      "Customer Usage API or export totals are based on deduped usage events and therefore include only one logical billed record per dedupe or idempotency key, so their export is lower.",
+      "Expected behavior for streaming retries or fallback routing is idempotent billing: bill exactly once per logical request using a stable billing dedupe key (or equivalent) and do not bill superseded attempts.",
+      "Remediation should include reconciling ledger totals versus deduped usage events for the same time window to quantify the overbilled tokens and dollar impact.",
+      "Remediation should include validating with request and attempt details (for example request_id and attempt_id) that duplicate billable rows were created due to retry or fallback behavior.",
+      "Remediation should include fixing metering so retry or fallback attempts share a stable request-scoped dedupe key and only the final successful attempt is eligible for billing (prior attempts marked non-billable).",
+      "Remediation should include issuing a customer credit via a credit memo or service credit applied to the next invoice, with an audit trail.",
+      "Closed-period ledger totals should not be retroactively rewritten unless explicitly approved.",
+      "A customer credit or refund due to a metering error greater than 10k dollars or greater than 2 percent of the invoice requires approval from Laura Bennett and Michael Grant.",
+      "Any retroactive change to ledger totals for a closed or issued invoice requires approval from Laura Bennett, Emily Stone, and Michael Grant."
+    ]
+  },
+  {
+    "question_id": "qst_0350",
+    "question_type": "project_related",
+    "source_types": [
+      "github",
+      "google_drive",
+      "jira"
+    ],
+    "question": "Why did Northpeak Search see their Dedicated Burst Usage billed higher than expected, and how do we prevent retry attempts from double-counting burst GPU-seconds now?",
+    "expected_doc_ids": [
+      "dsid_f3e6edec6f4947a5bd5aa7fd557d7d2b",
+      "dsid_939eea1a52f84393b0f87492b9aba8c2",
+      "dsid_95c7aa5238f94570a8e0a8684736b666"
+    ],
+    "gold_answer": "Northpeak Search saw Dedicated Burst Usage come in higher than expected because the burst metering path was double-counting retries: when the client (and sometimes the gateway) retried on 429/overload or transient failures, the metering emitter produced a burst increment per attempt, and in some retry paths the request_id was regenerated per attempt while idempotency_key was missing/empty. Since downstream de-dupe was keyed mainly on (tenant_id, request_id), those attempts did not collapse, inflating daily burst GPU-seconds (notably 2025-06-15 to 2025-06-18).\n\nTo prevent this now, burst usage is made idempotent across retries by carrying a stable request-scoped idempotency key end-to-end: the gateway accepts X-Redwood-Idempotency-Key, and if absent generates a ULID once per incoming request and reuses it across internal retry attempts; the metering event includes idempotency_key, and the central burst_usage_aggregator dedupes on (tenant_id, region, hw_class, pool_id, idempotency_key) with a bounded TTL (storing only a hash of the key). We also added export-time reconciliation/guardrails (metrics for dropped duplicates and a batch check that alerts/blocks export if duplicate keys exceed a small threshold) and backfilled the affected dates with a billing adjustment/credit.",
+    "answer_facts": [
+      "Dedicated Burst Usage was higher than expected because the burst metering path was double-counting retry attempts.",
+      "When the client or gateway retried requests due to 429 overload responses or transient failures, the metering emitter produced a separate burst increment for each attempt.",
+      "In some retry paths the request_id was regenerated per attempt and the idempotency_key was missing or empty, preventing retries from being recognized as the same logical request.",
+      "Downstream deduplication was keyed mainly on (tenant_id, request_id), so retry attempts with different request_id values did not collapse and inflated billed burst GPU-seconds.",
+      "To prevent double-counting now, burst usage is made idempotent across retries by using a stable request-scoped idempotency key end-to-end.",
+      "The gateway accepts X-Redwood-Idempotency-Key and, if absent, generates a ULID once per incoming request and reuses it across internal retry attempts.",
+      "Metering events now include idempotency_key so retries can be deduplicated.",
+      "The central burst_usage_aggregator now dedupes on (tenant_id, region, hw_class, pool_id, idempotency_key) with a bounded TTL and stores only a hash of the idempotency key.",
+      "Export-time guardrails were added, including metrics for dropped duplicates and a batch check that alerts or blocks export if duplicate keys exceed a small threshold."
+    ]
+  },
+  {
+    "question_id": "qst_0197",
+    "question_type": "semantic",
+    "source_types": [
+      "confluence"
+    ],
+    "question": "During a major production outage, what is the prescribed sequence of actions for the first 60 to 90 minutes, from opening the live coordination call through confirming the service is healthy again?",
+    "expected_doc_ids": [
+      "dsid_25b0de9bfa854d3c9acfa961555c9d45"
+    ],
+    "gold_answer": "Follow the Ten-Step Restoration Sprint: (1) Acknowledge the alert and open the incident bridge (Zoom/Meet), create the incident channel (#inc-xxxx), and post initial status (0-5m). (2) Perform quick impact triage by confirming affected services via dashboards and classifying scope (regional/global; data/control plane), then produce a short impact statement (5-10m). (3) Stabilize traffic using graduated controls (rate limits, routing/traffic division to healthy regions) and, where available, fall back to lighter model variants or reduced sequence-length modes (10-20m). (4) Execute a hotfix window by applying validated, small, reversible mitigations from the relevant service runbooks and document all changes in the incident channel (20-40m). (5) Validate restoration by running synthetic probes and verifying p95/p99 latency and error rates are returning to baseline, capturing pre/post metrics and commands used (30-50m).",
+    "answer_facts": [
+      "The prescribed sequence is called the Ten-Step Restoration Sprint.",
+      "Within 0 to 5 minutes, acknowledge the alert, open the incident bridge call (Zoom or Meet), create the incident channel (for example, #inc-xxxx), and post an initial status update.",
+      "Within 5 to 10 minutes, perform quick impact triage by confirming affected services via dashboards, classifying scope (regional vs global and data plane vs control plane), and producing a short impact statement.",
+      "Within 10 to 20 minutes, stabilize traffic using graduated controls such as rate limits and routing or dividing traffic to healthy regions, and where available fall back to lighter model variants or reduced sequence-length modes.",
+      "Within 20 to 40 minutes, execute a hotfix window by applying validated, small, reversible mitigations from the relevant service runbooks and document all changes in the incident channel.",
+      "Within 30 to 50 minutes, validate restoration by running synthetic probes, verifying p95 and p99 latency and error rates are returning to baseline, and capturing pre and post metrics and the commands used."
+    ]
+  }
+]
