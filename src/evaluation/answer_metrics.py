@@ -78,62 +78,21 @@ def parse_judge_scores(judge_response: dict) -> AnswerScores:
         reasons=reasons,
     )
 
-JUDGE_PROMPT = """
-You are an independent evaluator of a question-answering system.
+PROMPT_DIR = (
+    Path(__file__).resolve().parents[2]
+    / "docs"
+    / "evaluation_prompts"
+)
 
-Evaluate the generated answer using:
-1. The original question
-2. The reference answer
-3. The supporting evidence
+DEFAULT_PROMPT_FILE = PROMPT_DIR / "answer_grading_v2.md"
 
-Score each dimension from 0 to 2.
 
-CORRECTNESS:
-0 = Central claim is wrong.
-1 = Main answer is right, but a substantive detail is wrong or unverifiable.
-2 = All substantive claims are correct.
+def load_judge_prompt(prompt_file=None):
+    path = Path(prompt_file) if prompt_file else DEFAULT_PROMPT_FILE
+    return path.read_text(encoding="utf-8")
 
-COMPLETENESS:
-0 = Main information is missing.
-1 = Some required details are missing.
-2 = All required facts, constraints, and conflicts are covered.
 
-CITATION SUPPORT:
-0 = Central claims are unsupported.
-1 = Some claims are unsupported or ambiguously cited.
-2 = Every factual claim is supported by its citation.
-
-ABSTENTION/LIMITS:
-0 = Unsupported answer or unjustified refusal.
-1 = Uncertainty is noted, but a key limitation is missed.
-2 = Answers when justified; explains missing or conflicting evidence otherwise.
-
-Return only a valid JSON object with these fields:
-- correctness: integer 0-2
-- completeness: integer 0-2 or null
-- citation_support: integer 0-2 or null
-- abstention_limits: integer 0-2
-- reasons: an object containing a brief explanation for each score
-
-Do not include Markdown formatting around the JSON.
-Use null for completeness when there are no reference answer facts,
-and for citation_support when there are no factual claims.
-
-Question:
-{question}
-
-Reference answer:
-{reference_answer}
-
-Generated answer:
-{generated_answer}
-
-Generated answer citation IDs:
-{citation_ids}
-
-Supporting evidence:
-{evidence}
-"""
+JUDGE_PROMPT = load_judge_prompt()
 
 def evaluate_answer(case: AnswerEvaluationInput, provider) -> AnswerScores:
     """Evaluate an answer and return its validated scores."""
@@ -202,10 +161,17 @@ class JudgeResult:
 def evaluate_answer_with_usage(
     case: AnswerEvaluationInput,
     provider,
+    prompt_template: str | None = None,
 ) -> JudgeResult:
     """Evaluate an answer and record the judge's token usage."""
 
-    prompt = JUDGE_PROMPT.format(
+    template = (
+        prompt_template
+        if prompt_template is not None
+        else JUDGE_PROMPT
+    )
+
+    prompt = template.format(
         question=case.question,
         reference_answer=case.reference_answer,
         generated_answer=case.generated_answer,
