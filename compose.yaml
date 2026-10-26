@@ -15,10 +15,10 @@ services:
     environment:
       RAG_MODE: ${RAG_MODE:-fixture}
       RAG_DEMO_ACCESS: ${RAG_DEMO_ACCESS:-true}
-      RAG_RETRIEVAL: ${RAG_RETRIEVAL:-bm25}
+      RAG_RETRIEVAL: ${RAG_RETRIEVAL:-hybrid}
       RAG_CORPUS: ${RAG_CORPUS:-/data/documents.parquet}
       RAG_BM25_INDEX: ${RAG_BM25_INDEX:-/data/indexes/bm25}
-      RAG_DENSE_INDEX: ${RAG_DENSE_INDEX:-/data/indexes/dense}
+      RAG_DENSE_INDEX: ${RAG_DENSE_INDEX:-/data/indexes/dense-bge-base}
       RAG_DEVICE: cpu
       RAG_FP16: ${RAG_FP16:-}
       RAG_BM25_WEIGHT: ${RAG_BM25_WEIGHT:-0.7}
@@ -41,7 +41,7 @@ services:
       RAG_MAX_ROUNDS: ${RAG_MAX_ROUNDS:-2}
       RAG_TOP_K: ${RAG_TOP_K:-5}
     volumes:
-      - "${ARTIFACTS_DIR:-./.cache/corpus}:/data:ro"
+      - "${ARTIFACTS_DIR:-./.cache/hybrid-artifacts}:/data:ro"
       - model-cache:/app/.cache/models
 
 volumes:

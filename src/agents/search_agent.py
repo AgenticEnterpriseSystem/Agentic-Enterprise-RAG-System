@@ -197,7 +197,6 @@ class SearchAgent:
                 context = context.model_copy(update={"evidence": tuple(selected)})
                 if not single_pass:
                     active_tool, began = "critic", self.clock()
-                    critic_context = context
                     if round_number == config.max_rounds:
                         usage_so_far = combined_usage(usages)
                         remaining = config.max_tokens - usage_so_far.input_tokens - usage_so_far.output_tokens
@@ -205,12 +204,16 @@ class SearchAgent:
                         # than spending nearly all of it assessing more evidence.
                         critic_limit = min(config.max_context_chars, max(1, (remaining // 2 - 1500) * 2))
                         critic_pool = GenerationRequest(question=request.query, user=request.user, evidence=tuple(evidence.values()))
-                        critic_context = critic_pool.model_copy(update={"evidence": tuple(select_agent_context(critic_pool, critic_limit, initial_ids))})
-                    feedback, usage = model_call(self.critic.assess, critic_context)
-                    record(active_tool, began, hits=critic_context.evidence, decision=feedback, usage=usage)
+                        context = critic_pool.model_copy(update={"evidence": tuple(select_agent_context(critic_pool, critic_limit, initial_ids))})
+                    # An approval applies only to this exact evidence set. Use it
+                    # for generation too, including the reduced final-round pool.
+                    feedback, usage = model_call(self.critic.assess, context)
+                    record(active_tool, began, hits=context.evidence, decision=feedback, usage=usage)
                 if exhausted():
                     return finish("budget", "Search budget reached.")
-                if single_pass or (feedback.sufficient and not feedback.missing_facts and feedback.confidence >= config.confidence_threshold):
+                if single_pass or (feedback is not None and feedback.sufficient
+                                   and not feedback.missing_facts
+                                   and feedback.confidence >= config.confidence_threshold):
                     active_tool, began = "generate", self.clock()
                     answer, usage = model_call(self.generator.generate, context)
                     record(active_tool, began, hits=context.evidence, usage=usage)

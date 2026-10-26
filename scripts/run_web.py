@@ -1,17 +1,19 @@
 """Run the web app natively using local .env and the assembled hybrid bundle.
 
 Use this on macOS when Docker has insufficient RAM for the full hybrid index.
-Existing shell settings override .env; Docker /data paths map to ARTIFACTS_DIR.
+Hybrid is the default. BM25 requires --retrieval bm25 explicitly.
+Other shell settings override .env; Docker /data paths map to ARTIFACTS_DIR.
 """
+import argparse
+import json
 import os
 import shlex
 import sys
 from pathlib import Path
 
 
-def main():
-    root = Path(__file__).resolve().parents[1]
-    env = dict(os.environ)
+def build_environment(root, inherited, retrieval=None):
+    env = dict(inherited)
     settings = root / '.env'
     if settings.exists():
         for line in settings.read_text().splitlines():
@@ -21,7 +23,12 @@ def main():
                 continue
             tokens = shlex.split(value, comments=True)
             env.setdefault(key, ' '.join(tokens))
-    artifacts = Path(env.get('ARTIFACTS_DIR', './.cache/corpus'))
+    if retrieval is None and env.get('RAG_RETRIEVAL', '').strip() not in ('', 'hybrid'):
+        raise ValueError('Hybrid startup refused a conflicting RAG_RETRIEVAL setting. '
+                         'Set RAG_RETRIEVAL=hybrid in .env and unset stale shell overrides. '
+                         'For an intentional baseline, use --retrieval bm25.')
+    env['RAG_RETRIEVAL'] = retrieval or 'hybrid'
+    artifacts = Path(env.get('ARTIFACTS_DIR', './.cache/hybrid-artifacts'))
     if not artifacts.is_absolute():
         artifacts = root / artifacts
     for key, default in (
@@ -44,6 +51,26 @@ def main():
         if library.is_dir():
             env['DYLD_LIBRARY_PATH'] = str(library) + (
                 ':' + env['DYLD_LIBRARY_PATH'] if env.get('DYLD_LIBRARY_PATH') else '')
+    return env
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--retrieval', choices=('hybrid', 'bm25'),
+                        help='Explicit retrieval override; otherwise require hybrid')
+    parser.add_argument('--check', action='store_true', help='Show effective non-secret settings without starting')
+    args = parser.parse_args()
+    root = Path(__file__).resolve().parents[1]
+    try:
+        env = build_environment(root, os.environ, args.retrieval)
+    except ValueError as error:
+        parser.error(str(error))
+    print(json.dumps({'mode': env.get('RAG_MODE', 'retrieval'),
+                      'retrieval': env['RAG_RETRIEVAL'], 'device': env['RAG_DEVICE'],
+                      'corpus': env['RAG_CORPUS'], 'dense_index': env['RAG_DENSE_INDEX'],
+                      'port': env.get('WEB_PORT', '8000')}), flush=True)
+    if args.check:
+        return
     os.chdir(root)
     os.execve(sys.executable, [sys.executable, '-m', 'uvicorn', 'src.api.main:app',
               '--host', '127.0.0.1', '--port', env.get('WEB_PORT', '8000'), '--workers', '1'], env)

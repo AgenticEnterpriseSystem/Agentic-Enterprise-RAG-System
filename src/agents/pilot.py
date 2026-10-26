@@ -11,7 +11,7 @@ from pathlib import Path
 
 from src.agents.search_agent import AgentConfig, SearchAgent
 from src.agents.search_critic import EvidenceCritic, SYSTEM_PROMPT as CRITIC_PROMPT
-from src.config import CORPUS_DIR, ROOT, runtime_versions
+from src.config import CORPUS_DIR, ROOT, RetrievalSettings, runtime_versions
 from src.contracts import Answer, QueryResponse, Trace, TraceStep, Usage, UserContext, SearchRequest, validate_evidence
 from src.agents.budget import RunBudgetExceeded
 from src.evaluation.run_retrieval import git_state, load_questions
@@ -315,7 +315,7 @@ def parser():
     p.add_argument('--splits', type=Path, default=ROOT / 'evaluation/splits.json')
     from src.retrieval.factory import add_retrieval_arguments
     add_retrieval_arguments(p, index_flag='--index')
-    p.add_argument('--retrieval', choices=('bm25', 'hybrid'), default='bm25')
+    p.add_argument('--retrieval', choices=('bm25', 'hybrid'), default=RetrievalSettings().retrieval)
     p.add_argument('--output', type=Path)
     p.add_argument('--live', action='store_true', help='Allow paid model calls')
     p.add_argument('--interactive', action='store_true', help='Enter custom questions; retrieval only unless --live')

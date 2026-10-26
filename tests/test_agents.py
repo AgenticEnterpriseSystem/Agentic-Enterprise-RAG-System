@@ -524,13 +524,13 @@ def test_preflight_uses_real_small_index_without_model_calls(tmp_path, monkeypat
     qpath, splits = tmp_path/'questions.jsonl', tmp_path/'splits.json'
     qpath.write_text(json.dumps(questions()[0]) + '\n')
     splits.write_text(json.dumps({'splits': {'development': ['q0'], 'final': ['q3']}}))
-    monkeypatch.setattr('sys.argv', ['pilot', '--count', '1', '--corpus', str(corpus),
+    monkeypatch.setattr('sys.argv', ['pilot', '--retrieval', 'bm25', '--count', '1', '--corpus', str(corpus),
                                    '--index', str(index), '--questions', str(qpath), '--splits', str(splits)])
     monkeypatch.delenv('ANTHROPIC_API_KEY', raising=False)
     main()
     assert '"paid_calls": false' in capsys.readouterr().out
     output = tmp_path/'prepared'
-    monkeypatch.setattr('sys.argv', ['pilot', '--prepare', '--question-ids', 'q0',
+    monkeypatch.setattr('sys.argv', ['pilot', '--retrieval', 'bm25', '--prepare', '--question-ids', 'q0',
         '--corpus', str(corpus), '--index', str(index), '--questions', str(qpath),
         '--splits', str(splits), '--output', str(output)])
     main()
@@ -846,6 +846,53 @@ def test_last_critic_leaves_context_room_for_answer():
     assert sum(len(e.chunk.text) for e in critic.requests[-1].evidence) == 4000
     assert result.answer.status == 'insufficient_evidence'
     assert generator.requests
+
+
+def test_final_round_approval_and_generation_use_identical_evidence():
+    first = evidence(text='A' * 6000)
+    second = evidence('b', text='B' * 6000)
+    critic = Critic([decision(suggested_queries=('followup',)), decision(True)],
+                    Usage(input_tokens=3000, estimated_cost_usd=0))
+    generator = Generator()
+    result = SearchAgent(Search([(first,), (second,)]), critic, generator,
+        config=AgentConfig(max_rounds=2, max_tokens=10000)).run(request())
+    approved = critic.requests[-1].evidence
+    assert sum(len(e.chunk.text) for e in approved) == 4000
+    assert result.trace.stop_reason == 'sufficient'
+    assert generator.requests[0].evidence == approved == result.sources
+    assessment, generation = result.trace.steps[-2:]
+    assert assessment.tool == 'critic' and generation.tool == 'generate'
+    assert assessment.evidence_ids == generation.evidence_ids
+
+
+def test_critic_and_generator_receive_thread_context_and_exact_citations():
+    # Scripted responses verify evidence delivery, not model judgment accuracy.
+    parts = ('Acme requests an artifact audit proxy.',
+             'Proposed default retention: 60 days.')
+    hits = []
+    offset = 0
+    for text in parts:
+        chunk = Chunk(chunk_id=f'a:{offset}:{offset + len(text)}', doc_id='a',
+                      source_type='gmail', title='Artifact escrow proposal', text=text,
+                      start_char=offset, end_char=offset + len(text))
+        hits.append(Evidence(citation_id=chunk.chunk_id, chunk=chunk,
+                             score=1, retrieval_method='hybrid'))
+        offset += len(text)
+    provider = FakeProvider([
+        Completion(decision(True).model_dump_json(), ZERO),
+        Completion(Answer(status='answered', text='The proposal specifies 60 days.',
+                          citation_ids=(hits[1].citation_id,)).model_dump_json(), ZERO),
+    ])
+    result = SearchAgent(Search([tuple(hits)]), EvidenceCritic(provider),
+        GroundedGenerator(provider), config=AgentConfig(max_rounds=1)).run(request())
+    assessed = json.loads(provider.calls[0][1])['evidence']
+    generated = json.loads(provider.calls[1][1])['evidence']
+    assert assessed == generated
+    assert [item['doc_id'] for item in assessed] == ['a', 'a']
+    assert [item['title'] for item in assessed] == [hit.chunk.title for hit in hits]
+    assert [item['text'] for item in assessed] == list(parts)
+    assert result.answer.citation_ids == (hits[1].citation_id,)
+    assert result.sources == tuple(hits)
 
 
 def test_sufficient_followup_generation_preserves_initial_and_followup_passages():

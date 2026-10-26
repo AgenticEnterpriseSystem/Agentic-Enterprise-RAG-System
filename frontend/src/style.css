@@ -1,4 +1,6 @@
 :root {
+  --page-gutter: clamp(16px, 2.5vw, 48px);
+  font-size: 112.5%;
   font-family:
     Inter,
     -apple-system,
@@ -43,12 +45,12 @@ button {
   transition: background 0.15s;
 }
 header {
-  height: 88px;
+  height: 96px;
   border-bottom: 1px solid #dde2db;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 max(5%, calc((100vw - 1280px) / 2));
+  padding: 0 var(--page-gutter);
 }
 .brand {
   display: flex;
@@ -56,29 +58,29 @@ header {
   gap: 12px;
   text-decoration: none;
   color: inherit;
-  font-size: 20px;
+  font-size: 1.5rem;
   font-weight: 650;
   letter-spacing: -0.5px;
 }
 .brand-mark {
   background: #254e40;
   color: white;
-  width: 34px;
-  height: 37px;
+  width: 42px;
+  height: 46px;
   display: grid;
   place-items: center;
   border-radius: 9px 9px 9px 0;
   font-family: Georgia, serif;
 }
 .brand-sub {
-  font-size: 14px;
+  font-size: 1rem;
   color: #6a7870;
   font-weight: 400;
   letter-spacing: 0;
   margin-left: 8px;
 }
 .connection {
-  font-size: 12px;
+  font-size: 0.875rem;
   display: flex;
   align-items: center;
   gap: 7px;
@@ -94,9 +96,7 @@ header {
   background: #478260;
 }
 main {
-  max-width: 1280px;
-  padding: 48px 24px 64px;
-  margin: auto;
+  padding: 48px var(--page-gutter) 64px;
 }
 .intro {
   display: flex;
@@ -108,14 +108,14 @@ main {
 .eyebrow {
   text-transform: uppercase;
   letter-spacing: 2px;
-  font-size: 11px;
+  font-size: 0.8125rem;
   font-weight: 700;
   color: #597362;
   margin: 0 0 16px;
 }
 h1 {
   font-family: Georgia, "Times New Roman", serif;
-  font-size: 44px;
+  font-size: clamp(2.25rem, 3.5vw, 3.125rem);
   letter-spacing: -1.7px;
   line-height: 1.13;
   font-weight: 400;
@@ -126,10 +126,10 @@ h1 span {
 }
 .intro p:not(.eyebrow) {
   color: #6c786f;
-  font-size: 14px;
+  font-size: 1rem;
 }
 .mode-note {
-  width: 264px;
+  width: 320px;
   flex-shrink: 0;
   border-left: 1px solid #d9dfd6;
   padding: 8px 0 8px 24px;
@@ -143,7 +143,7 @@ h1 span {
   border-radius: 5px;
   padding: 3px 8px;
   background: #f6f3e7;
-  font-size: 11px;
+  font-size: 0.8125rem;
   color: #78673a;
   white-space: nowrap;
 }
@@ -154,12 +154,13 @@ h1 span {
 }
 .scope {
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   background: #edf1ea;
   border: 1px solid #dce4d7;
   border-radius: 7px;
   padding: 10px 14px;
-  font-size: 12px;
+  font-size: 0.875rem;
   margin-bottom: 20px;
   color: #64715e;
 }
@@ -175,7 +176,7 @@ h1 span {
   box-shadow: 0 4px 12px #233a2910;
 }
 .question-card > label {
-  font-size: 14px;
+  font-size: 1rem;
   font-weight: 650;
 }
 textarea {
@@ -185,12 +186,12 @@ textarea {
   min-width: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  min-height: 100px;
+  min-height: 130px;
   border: 0;
   border-bottom: 1px solid #edf0ea;
   padding: 16px;
   color: #223530;
-  font-size: 16px;
+  font-size: 1.125rem;
   outline-offset: 0 !important;
 }
 textarea::placeholder {
@@ -198,6 +199,7 @@ textarea::placeholder {
 }
 .form-controls {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 16px;
   padding: 16px 0;
@@ -212,8 +214,8 @@ fieldset {
   gap: 2px;
 }
 fieldset label {
-  font-size: 12px;
-  padding: 7px 13px;
+  font-size: 0.9375rem;
+  padding: 10px 16px;
   color: #7a857b;
   border-radius: 4px;
 }
@@ -236,9 +238,9 @@ fieldset label {
   border: 0;
   background: white;
   color: #6d796f;
-  font-size: 12px;
-  max-width: 220px;
-  padding: 8px;
+  font-size: 0.9375rem;
+  max-width: 280px;
+  padding: 12px;
 }
 .primary {
   margin-left: auto;
@@ -246,17 +248,17 @@ fieldset label {
   border-radius: 6px;
   background: #254e40;
   color: white;
-  padding: 11px 19px;
+  padding: 14px 24px;
   display: flex;
   gap: 28px;
-  font-size: 13px;
+  font-size: 1rem;
 }
 .primary:hover:enabled {
   background: #376650;
 }
 .primary span {
-  font-size: 18px;
-  line-height: 20px;
+  font-size: 1.333rem;
+  line-height: 1.2;
 }
 .form-help {
   border-top: 1px solid #edf0ea;
@@ -265,7 +267,7 @@ fieldset label {
   gap: 12px;
   padding: 12px 0;
   color: #8a958b;
-  font-size: 11px;
+  font-size: 0.8125rem;
 }
 .text-button {
   background: none;
@@ -283,7 +285,7 @@ fieldset label {
   padding: 14px 18px;
   border-radius: 7px;
   margin: 16px 0;
-  font-size: 14px;
+  font-size: 1rem;
 }
 .notice.error {
   background: #fcf0e9;
@@ -305,22 +307,23 @@ fieldset label {
 }
 .section-top {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 12px;
   align-items: center;
 }
 h2 {
-  font-size: 15px;
+  font-size: 1.125rem;
   margin: 0;
   font-weight: 650;
 }
 .section-top > span:not(.tag) {
-  font-size: 12px;
+  font-size: 0.875rem;
   color: #879283;
 }
 .answer-text {
   white-space: pre-wrap;
-  font-size: 15px;
+  font-size: 1.125rem;
   line-height: 1.85;
   margin: 20px 0 24px;
   overflow-wrap: anywhere;
@@ -339,7 +342,7 @@ h2 {
   gap: 8px;
   align-items: center;
   flex-wrap: wrap;
-  font-size: 11px;
+  font-size: 0.8125rem;
   color: #7a887a;
 }
 .citations > span {
@@ -351,7 +354,7 @@ h2 {
   border-radius: 4px;
   background: #f1f6ef;
   padding: 5px 10px;
-  font-size: 12px;
+  font-size: 0.875rem;
   color: #45683e;
 }
 .citations button:hover {
@@ -359,6 +362,7 @@ h2 {
 }
 .metrics {
   display: flex;
+  flex-wrap: wrap;
   gap: 35px;
   border-top: 1px solid #e8ece4;
   margin-top: 24px;
@@ -369,18 +373,18 @@ h2 {
   flex-direction: column;
 }
 .metrics span {
-  font-size: 10px;
+  font-size: 0.8125rem;
   text-transform: uppercase;
   letter-spacing: 0.8px;
   color: #8b9689;
 }
 .metrics strong {
-  font-size: 14px;
+  font-size: 1.125rem;
   font-weight: 500;
   margin-top: 4px;
 }
 .fine-print {
-  font-size: 11px;
+  font-size: 0.8125rem;
   color: #879180;
   line-height: 1.7;
 }
@@ -390,10 +394,10 @@ h2 {
   border: 1px solid #dde3d6;
   border-radius: 8px;
   padding: 16px 20px;
-  font-size: 12px;
+  font-size: 0.9375rem;
 }
 .steps > summary {
-  font-size: 13px;
+  font-size: 1rem;
   font-weight: 600;
 }
 .steps > summary > span {
@@ -406,7 +410,7 @@ h2 {
   padding: 10px;
   background: #e5eadd;
   border-radius: 4px;
-  font-size: 12px;
+  font-size: 0.875rem;
 }
 .steps ol {
   list-style: none;
@@ -425,7 +429,7 @@ h2 {
 }
 .steps li > div > span,
 .steps small {
-  font-size: 10px;
+  font-size: 0.8125rem;
   color: #829079;
 }
 .steps p {
@@ -456,8 +460,10 @@ h2 {
 }
 .source-meta {
   display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
   justify-content: space-between;
-  font-size: 10px;
+  font-size: 0.8125rem;
   color: #7b8b74;
   text-transform: uppercase;
   letter-spacing: 0.7px;
@@ -469,13 +475,13 @@ h2 {
   border-radius: 3px;
 }
 .source-card h3 {
-  font-size: 13px;
+  font-size: 1rem;
   font-weight: 600;
   line-height: 1.5;
   margin: 12px 0;
 }
 .source-card blockquote {
-  font-size: 12px;
+  font-size: 1rem;
   line-height: 1.85;
   color: #63705f;
   border-left: 2px solid #d8e2d0;
@@ -486,7 +492,7 @@ h2 {
   overflow: auto;
 }
 .source-id {
-  font-size: 10px;
+  font-size: 0.8125rem;
   color: #8c9686;
   border-top: 1px solid #eef1e9;
   padding-top: 10px;
@@ -500,27 +506,27 @@ h2 {
   padding: 56px 20px 24px;
 }
 .empty-state > span {
-  font-size: 36px;
+  font-size: 2.5rem;
   color: #b1bba8;
 }
 .empty-state h2 {
-  font-size: 14px;
+  font-size: 1.125rem;
   color: #7c8973;
   margin: 10px 0;
 }
 .empty-state p {
-  font-size: 12px;
+  font-size: 1rem;
 }
 .loading {
   padding: 36px;
   text-align: center;
-  font-size: 14px;
+  font-size: 1rem;
   color: #56734c;
 }
 .loading small {
   display: block;
   margin-top: 8px;
-  font-size: 12px;
+  font-size: 0.875rem;
   color: #8a9781;
 }
 .spinner {
@@ -540,11 +546,10 @@ h2 {
   }
 }
 footer {
-  max-width: 1232px;
-  margin: auto;
+  margin: 0 var(--page-gutter);
   padding: 20px 0;
   border-top: 1px solid #dde2d7;
-  font-size: 11px;
+  font-size: 0.8125rem;
   color: #8d9883;
   display: flex;
   justify-content: space-between;
@@ -561,7 +566,7 @@ footer {
   border: 0;
 }
 .empty {
-  font-size: 13px;
+  font-size: 0.9375rem;
   color: #879180;
 }
 @media (max-width: 760px) {
@@ -584,7 +589,7 @@ footer {
     padding: 8px 0;
   }
   .intro h1 {
-    font-size: 36px;
+    font-size: 2.25rem;
   }
   .scope {
     display: block;
