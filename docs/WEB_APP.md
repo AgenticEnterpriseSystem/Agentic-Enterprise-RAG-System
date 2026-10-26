@@ -26,11 +26,53 @@ If `.venv` already exists, skip creating it.
 
 ## 2. Add the search data
 
-The corpus and indexes are distributed separately, not included in Git. Obtain
-the matching full-corpus BGE-base bundle from the project maintainers. No download
-URL is currently published in this repository.
+The corpus and indexes are too large for Git (about 4 GB). Download them from the
+team's shared Google Drive folder:
+<https://drive.google.com/drive/folders/1ltfTpNLGdl_S9dBnozACJj3Eo1_Cc8i7?usp=sharing>
 
-Place the prepared bundle here:
+1. Open the link, then open the folder **`files_web_app`**. If Drive asks for
+   permission, request access from the team.
+2. Download all of its content:
+
+   | Item | What it is |
+   | --- | --- |
+   | `documents.parquet` | All 511,958 documents |
+   | `bm25_indexes/` | BM25+ keyword index (8 files) |
+   | `bge_base_indexes/` | BGE-base meaning-search index (54 files: `manifest.json`, `doc_ids.json`, and `shard_00000` to `shard_00025` as `.npy` and `.parquet`) |
+   | `questions.jsonl` | The 500 benchmark questions (evaluation scripts only) |
+
+   Select all four items, then right-click and choose **Download**. Drive zips large
+   downloads and may split them into several zip files.
+3. Unzip every zip file into one folder outside the repository, for example
+   `~/Downloads/files_web_app`. If unzipping creates a second copy of a folder
+   (such as `bge_base_indexes 2`), move its files into the first one:
+
+   ```sh
+   mv -n ~/Downloads/files_web_app/"bge_base_indexes 2"/* ~/Downloads/files_web_app/bge_base_indexes/
+   ```
+
+4. From the repository root, move the files into the layout the app expects. The
+   two index folders are renamed as they move:
+
+   ```sh
+   SRC=~/Downloads/files_web_app
+   mkdir -p .cache/hybrid-artifacts/indexes .cache/corpus
+   mv "$SRC/documents.parquet" .cache/hybrid-artifacts/
+   mv "$SRC/bm25_indexes" .cache/hybrid-artifacts/indexes/bm25
+   mv "$SRC/bge_base_indexes" .cache/hybrid-artifacts/indexes/dense-bge-base
+   mv "$SRC/questions.jsonl" .cache/corpus/
+   ```
+
+   Change `SRC` if you unzipped elsewhere.
+
+5. Check the result. The two counts should be `8` and `54`:
+
+   ```sh
+   ls .cache/hybrid-artifacts/indexes/bm25 | wc -l
+   ls .cache/hybrid-artifacts/indexes/dense-bge-base | wc -l
+   ```
+
+The finished layout:
 
 ```text
 .cache/hybrid-artifacts/
@@ -38,21 +80,24 @@ Place the prepared bundle here:
   indexes/
     bm25/
     dense-bge-base/
+.cache/corpus/
+  questions.jsonl
 ```
 
-Keep all index files and manifests together and unchanged. Evaluation result
-files cannot replace the indexes.
+Keep all index files and manifests together and unchanged: at startup the app
+checks that both indexes were built from this exact `documents.parquet` and refuses
+to start otherwise. Evaluation result files cannot replace the indexes. Git ignores
+`.cache/`, so these files are never committed. Keep the repository out of iCloud
+Drive or other synced folders, which can replace large files with placeholders.
 
-If the download is split across five `rag-dense` folders, place them in the
-repository root and assemble once:
+If you instead received the older split download (five `rag-dense` folders), place
+them in the repository root and assemble once:
 
 ```sh
 python -m src.data.assemble_artifacts \
   --roots rag-dense "rag-dense 2" "rag-dense 3" "rag-dense 4" "rag-dense 5" \
   --output .cache/hybrid-artifacts
 ```
-
-Skip this command if the prepared output already exists.
 
 ## 3. Configure
 

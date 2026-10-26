@@ -22,7 +22,8 @@ python -m src.evaluation.run_hybrid \
   --output-dir .cache/evaluation/hybrid-development
 ```
 
-Use a fresh output directory. The questions file is separate from the assembled
+Use a fresh output directory. The questions file (`questions.jsonl` in the team Drive's `files_web_app` folder; see
+[Setup](WEB_APP.md#get-the-artifacts)) is separate from the assembled
 web bundle. Web `RAG_CANDIDATE_K`, `RAG_RERANK_K`, `RAG_RRF_K` and `RAG_FP16`
 correspond to `--candidate-k`, `--rerank-k`, `--rrf-k` and `--fp16/--no-fp16`.
 For hybrid evaluation, `--bm25-weights` accepts a comma-separated sweep; rerankers
