@@ -11,7 +11,7 @@ obtain the corpus/index bundle, and configure your local `.env`.
 
 The corpus and indexes are not in Git. Download everything in the **`files_web_app`**
 folder of the [team Google Drive folder](https://drive.google.com/drive/folders/1ltfTpNLGdl_S9dBnozACJj3Eo1_Cc8i7?usp=sharing): `documents.parquet`,
-`bm25_indexes/`, `bge_base_indexes/` and `questions.jsonl`. [Setup, step 2](docs/WEB_APP.md#get-the-artifacts)
+`indexes/bm25/`, `indexes/dense-bge-base/` and `questions.jsonl`. [Setup, step 2](docs/WEB_APP.md#get-the-artifacts)
 shows where each one goes.
 Then, from the repository root:
 

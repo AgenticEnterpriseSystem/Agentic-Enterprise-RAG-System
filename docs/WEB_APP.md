@@ -30,40 +30,36 @@ The corpus and indexes are too large for Git (about 4 GB). Download them from th
 team's shared Google Drive folder:
 <https://drive.google.com/drive/folders/1ltfTpNLGdl_S9dBnozACJj3Eo1_Cc8i7?usp=sharing>
 
-1. Open the link, then open the folder **`files_web_app`**. If Drive asks for
-   permission, request access from the team.
-2. Download all of its content:
+1. Open the link and find the folder **`files_web_app`**. If Drive asks for
+   permission, request access from the team. It contains:
 
    | Item | What it is |
    | --- | --- |
    | `documents.parquet` | All 511,958 documents |
-   | `bm25_indexes/` | BM25+ keyword index (8 files) |
-   | `bge_base_indexes/` | BGE-base meaning-search index (54 files: `manifest.json`, `doc_ids.json`, and `shard_00000` to `shard_00025` as `.npy` and `.parquet`) |
+   | `indexes/bm25/` | BM25+ keyword index (8 files) |
+   | `indexes/dense-bge-base/` | BGE-base meaning-search index (54 files: `manifest.json`, `doc_ids.json`, and `shard_00000` to `shard_00025` as `.npy` and `.parquet`) |
    | `questions.jsonl` | The 500 benchmark questions (evaluation scripts only) |
 
-   Select all four items, then right-click and choose **Download**. Drive zips large
-   downloads and may split them into several zip files.
-3. Unzip every zip file into one folder outside the repository, for example
-   `~/Downloads/files_web_app`. If unzipping creates a second copy of a folder
-   (such as `bge_base_indexes 2`), move its files into the first one:
+2. Right-click `files_web_app` and choose **Download**. Drive zips the folder and may
+   split it into several zip files.
+3. Unzip every zip file into the same place, for example `~/Downloads`. If unzipping
+   creates a second copy (such as `files_web_app 2`), merge it into the first:
 
    ```sh
-   mv -n ~/Downloads/files_web_app/"bge_base_indexes 2"/* ~/Downloads/files_web_app/bge_base_indexes/
+   cp -R ~/Downloads/"files_web_app 2"/. ~/Downloads/files_web_app/
    ```
 
-4. From the repository root, move the files into the layout the app expects. The
-   two index folders are renamed as they move:
+4. From the repository root, move the folder into the project as
+   `.cache/hybrid-artifacts`, and copy the questions file where the evaluation
+   scripts look for it:
 
    ```sh
-   SRC=~/Downloads/files_web_app
-   mkdir -p .cache/hybrid-artifacts/indexes .cache/corpus
-   mv "$SRC/documents.parquet" .cache/hybrid-artifacts/
-   mv "$SRC/bm25_indexes" .cache/hybrid-artifacts/indexes/bm25
-   mv "$SRC/bge_base_indexes" .cache/hybrid-artifacts/indexes/dense-bge-base
-   mv "$SRC/questions.jsonl" .cache/corpus/
+   mkdir -p .cache/corpus
+   mv ~/Downloads/files_web_app .cache/hybrid-artifacts
+   cp .cache/hybrid-artifacts/questions.jsonl .cache/corpus/
    ```
 
-   Change `SRC` if you unzipped elsewhere.
+   Change `~/Downloads` if you unzipped elsewhere.
 
 5. Check the result. The two counts should be `8` and `54`:
 
@@ -77,6 +73,7 @@ The finished layout:
 ```text
 .cache/hybrid-artifacts/
   documents.parquet
+  questions.jsonl
   indexes/
     bm25/
     dense-bge-base/
