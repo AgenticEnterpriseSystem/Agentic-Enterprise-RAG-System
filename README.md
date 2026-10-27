@@ -48,6 +48,33 @@ The corpus and indexes are downloaded from the `files_web_app` folder of the
 [team Google Drive folder](https://drive.google.com/drive/folders/1ltfTpNLGdl_S9dBnozACJj3Eo1_Cc8i7?usp=sharing).
 Never commit `.env` or API keys.
 
+## Updates since Milestone 2
+
+Milestone 2 delivered two retrieval baselines on the full 511,958-document corpus:
+BM25+ (Recall@10 0.692) and BGE-small + FAISS (0.468). Since then:
+
+- **Model testing:** Added document titles to every dense passage, tested four more
+  dense embedding models, cross-encoder rerankers, and various fusion weights.
+  Replaced BGE-small with BGE-base.
+- **Hybrid search:** BM25+ and BGE-base (title on every passage) combined with
+  weighted rank fusion, BM25+ weight 0.7. Recall@10 is 0.722 on development and
+  0.767 on calibration.
+- **Adaptive agent:** an LLM evidence critic that checks whether the evidence answers
+  the question, up to one round of follow-up searches, then a cited answer. A
+  one-search "Fixed RAG" path is kept as the comparison baseline.
+- **Grounded answers:** answers may cite only the passages they were given, and
+  invalid citations or out-of-scope evidence are rejected.
+- **Web app:** FastAPI + React with clickable citations, source excerpts and search
+  steps, in demo, search-only or live (Claude) mode, with spending caps. The data
+  downloads from the team Drive ([Setup](docs/WEB_APP.md#get-the-artifacts)).
+  Optional Docker setup included.
+- **Answer evaluation:** a 0–2 rubric (correctness, completeness, citation support,
+  abstention) graded by an LLM judge. First baseline, 20 questions with GPT-OSS
+  answers from BM25 evidence: mean correctness 1.30 and citation support 1.55
+  ([Answer evaluation](docs/ANSWER_EVALUATION.md)).
+- **Docs and tests:** a [model card](docs/model_card_hybrid_retriever.md), a
+  [system card](docs/system_card.md), and 206 automated tests in CI.
+
 ## How it works
 
 ```text
