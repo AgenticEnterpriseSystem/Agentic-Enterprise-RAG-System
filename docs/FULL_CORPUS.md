@@ -394,3 +394,39 @@ unknown, and exit 137 alone does not establish OOM.
 Machine-specific measurements and acceptance decisions belong in ignored
 `docs/local/`, with raw attempts under ignored `.cache/`. A resource profile is
 not an answer-quality score or full-stack Docker acceptance.
+
+
+## Bounded dense candidate search
+
+`src/retrieval/sharded_dense.py` adds a model-free exact scanner for existing
+version-1 dense artifacts. `ShardedDense.load(directory, snapshot=..., catalog=...,
+block_rows=8192)` binds a trusted snapshot and ordered metadata-only catalog to
+`doc_ids.json` and every declared `.npy`/`.parquet` pair. It never loads canonical
+bodies or builds an accumulating FAISS index. The existing `CorpusDense` remains
+the reference implementation; application/factory wiring is a later integration
+step, so adding this component alone does not change the running web app.
+
+`candidates_vector(vector, top_k, scope=..., filters=...)` returns frozen
+`RankedCandidate` spans after snapshot-aligned permission and source/date filters.
+Unknown dates fail date bounds. `rank_vector(vector, top_k, mask=None)` is a
+trusted offline parity interface returning document IDs/scores; its optional
+mask is not an HTTP permission resolver. Query encoding belongs to the adapter.
+An empty permitted selection does not scan vectors.
+
+Stored fp16/fp32 rows are copied into bounded float32 blocks and L2-normalized
+with the same primitive as the reference loader. Query vectors are used as
+supplied, matching the reference vector API. Every document retains its best
+passage across all blocks/shards before document top-k. Exact equal scores use
+document-ID ordering and then earliest `(start_char, end_char)` passage; floating
+point differences between BLAS and FAISS are assessed with a numerical tolerance,
+not collapsed into artificial tie groups.
+
+Memory includes document metadata, per-document best scores/spans, the vector
+block, Arrow batches, mappings and filesystem cache. For 8,192×768 float32 values,
+the vector payload is 24MiB; this is a calculation, not process/cgroup peak.
+The original manifest has no cryptographic per-shard digests or catalog revision
+identity. Structural/order/span checks and an externally verified snapshot do
+not prove that vectors were computed from the claimed text. Full-corpus parity,
+combined app/database memory and the accepted120s startup/30s first/10s warm
+search targets still require measured acceptance in the later integration gates.
+Historical retrieval/answer quality results above are unchanged.
