@@ -361,7 +361,9 @@ python scripts/profile_retrieval.py --mode hybrid \
 ```
 
 Modes `inventory`, `corpus`, `model` and `bm25` isolate verification, Arrow loading,
-query-encoder loading/encoding, and lexical retrieval. Inventory checks every
+query-encoder loading/encoding, and lexical retrieval. Mode `dense` measures the
+existing model/FAISS component without corpus text; any completed queries are
+rank-only timings, not evidence materialization or hybrid serving. Inventory checks every
 declared shard and hashes the complete artifact files; it does not load vector
 payloads into a search index. Hybrid uses the real factory, shared corpus,
 manifest-selected model and every dense shard. Searches call the retriever
@@ -376,7 +378,8 @@ use an independently enforced container memory/swap ceiling for full-corpus
 experiments. These limits terminate this attempt's worker only. Offline model
 flags are set before imports; the pinned model must already be cached at the
 source checkout's `.cache/models`. Record the exact container image, source SHA,
-mounts, limits and any excluded dependencies with the experiment.
+mounts, limits and any excluded dependencies with the experiment. Disable an
+inherited HTTP healthcheck when the container runs this non-HTTP profiler.
 
 First-query timings are process-first measurements. Hash verification reads
 corpus files, and existing filesystem caches are not cleared, so these runs do

@@ -205,17 +205,23 @@ def _signal_group(pid, signum):
 
 def _cleanup_worker(worker):
     """Also bound child lifetime if logging/sampling or the caller is interrupted."""
-    if worker.poll() is not None:
-        return
+    code = worker.poll()
+    if code is not None:
+        # The leader may have exited before a descendant that ignored TERM.
+        # This is only the new process group created for this owned worker.
+        _signal_group(worker.pid, signal.SIGKILL)
+        return code
     _signal_group(worker.pid, signal.SIGTERM)
     try:
         worker.wait(timeout=1)
     except subprocess.TimeoutExpired:
         _signal_group(worker.pid, signal.SIGKILL)
         try:
-            worker.wait(timeout=.2)
+            worker.wait(timeout=5)
         except subprocess.TimeoutExpired:
             pass
+    _signal_group(worker.pid, signal.SIGKILL)
+    return worker.poll()
 
 
 def _reject_constant(value):
@@ -264,7 +270,13 @@ def supervise(command, output: Path, *, max_rss_bytes: int, max_cgroup_bytes: in
         streams = {name: files.enter_context(path.open("x", encoding="utf-8")) for name, path in paths.items()}
         worker = subprocess.Popen(list(command), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", bufsize=1, start_new_session=True, env=env)
-        files.callback(_cleanup_worker, worker)
+        cleanup_required = True
+
+        def cleanup_on_error():
+            if cleanup_required:
+                _cleanup_worker(worker)
+
+        files.callback(cleanup_on_error)
 
         def reader(label, pipe):
             try:
@@ -284,9 +296,9 @@ def supervise(command, output: Path, *, max_rss_bytes: int, max_cgroup_bytes: in
             streams[name].write(json.dumps(record, allow_nan=False) + "\n")
             streams[name].flush()
 
-        next_sample = 0.
-        while True:
-            # Bound each drain pass so a noisy worker cannot starve supervision.
+        def drain_messages():
+            nonlocal last_phase, complete, events_count, invalid_events
+            # Bound each pass so a noisy worker cannot starve supervision.
             for _ in range(1000):
                 try:
                     label, line = messages.get_nowait()
@@ -318,6 +330,10 @@ def supervise(command, output: Path, *, max_rss_bytes: int, max_cgroup_bytes: in
                         del phase_stack[len(phase_stack) - reverse_index - 1:]
                 if event.get("event") == "complete":
                     complete = True
+
+        next_sample = 0.
+        while True:
+            drain_messages()
             now = time.monotonic()
             code = worker.poll()
             if now >= next_sample and code is None:
@@ -362,12 +378,20 @@ def supervise(command, output: Path, *, max_rss_bytes: int, max_cgroup_bytes: in
             if stop_at is not None and time.monotonic() - stop_at >= 3:
                 break
             time.sleep(min(.01, sample_seconds))
+        # Complete bounded cleanup BEFORE recording final status/counters. The
+        # emergency ExitStack callback must not perform a later hidden reap that
+        # leaves a stale exit_code=None in an otherwise finalized report.
+        _cleanup_worker(worker)
+        cleanup_required = False
+        drain_deadline = time.monotonic() + 2
+        while time.monotonic() < drain_deadline:
+            drain_messages()
+            if len(ended_readers) == 2 and messages.empty():
+                break
+            time.sleep(.01)
         for thread in readers:
             thread.join(timeout=.1)
-        try:
-            worker.wait(timeout=.2)
-        except subprocess.TimeoutExpired:
-            pass
+        drain_messages()
         code = worker.poll()
         drained = len(ended_readers) == 2 and messages.empty()
         for pipe in (worker.stdout, worker.stderr):
@@ -387,7 +411,7 @@ def supervise(command, output: Path, *, max_rss_bytes: int, max_cgroup_bytes: in
         status = "worker_error"
     else:
         status = "incomplete"
-    return {"status": status, "exit_code": code, "pid": worker.pid,
+    return {"status": status, "exit_code": code, "worker_reaped": code is not None, "pid": worker.pid,
             "duration_seconds": time.monotonic() - started,
             "last_phase": phase_stack[-1] if phase_stack else last_phase,
             "sampled_peaks": sample_peaks, "peak_rss_bytes": process_peak,

@@ -285,6 +285,35 @@ def query_workloads(retriever, *, repeats=3, top_k=5, narrow_size=32):
                             raise ValueError("Source filtering widened scope")
 
 
+def rank_workloads(retriever, *, repeats=3, top_k=5):
+    """Dense component ranking only; never claim canonical-text materialization."""
+    import numpy as np
+    from scripts.benchmark_web import WORKLOADS
+
+    ids = retriever.doc_ids
+    narrow = frozenset(sorted(ids)[:32])
+    masks = (("broad", np.ones(len(ids), dtype=bool)),
+             ("narrow", np.asarray([doc in narrow for doc in ids], dtype=bool)),
+             ("denied", np.zeros(len(ids), dtype=bool)))
+    for scope, mask in masks:
+        with phase(f"rank_scope.{scope}.construct"):
+            allowed = frozenset(doc for doc, permit in zip(ids, mask) if permit)
+            emit("scope", name=scope, document_count=len(allowed),
+                 sha256=hashlib.sha256("\n".join(sorted(allowed)).encode()).hexdigest(),
+                 purpose="dense_component_ranking_without_text")
+        for repeat in range(repeats):
+            for name, question in WORKLOADS:
+                with phase(f"rank.{scope}.{name}.{repeat}"):
+                    began = time.monotonic()
+                    hits = retriever.rank(question, top_k, mask=mask)
+                    elapsed = time.monotonic() - began
+                    if len(hits) > top_k or any(doc not in allowed for doc, _ in hits):
+                        raise ValueError("Dense ranking escaped its scope or result bound")
+                    emit("rank_result", scope=scope, workload=name, repeat=repeat,
+                         elapsed_seconds=elapsed, text_materialized=False,
+                         hits=[{"doc_id": doc, "score": score} for doc, score in hits])
+
+
 def worker(args):
     from src.config import RetrievalSettings, runtime_versions
 
@@ -313,22 +342,29 @@ def worker(args):
                     vectors = model.encode([question], query=True)
                     emit("encoding_result", workload=name, repeat=repeat, shape=list(vectors.shape))
     else:
-        settings = RetrievalSettings(retrieval=args.mode, corpus=args.corpus,
+        settings = RetrievalSettings(retrieval="hybrid" if args.mode == "dense" else args.mode, corpus=args.corpus,
             bm25_index=args.bm25_index, dense_index=args.dense_index, device="cpu")
         with instrument_loaders(settings) as factory:
-            with phase("retriever.startup"):
-                retriever = factory.load_retriever(settings)
-                dense = getattr(retriever, "dense", None)
-                emit("ready", documents=len(retriever.doc_ids),
-                     passages=int(dense.index.ntotal) if dense is not None else None,
-                     shared_corpus=(retriever.bm25.corpus is dense.corpus) if dense is not None else None)
-            query_workloads(retriever, repeats=args.repeats, top_k=args.top_k)
+            if args.mode == "dense":
+                with phase("dense.component_startup", text_materialized=False):
+                    retriever = factory.load_dense(settings)
+                    emit("ready", documents=len(retriever.doc_ids),
+                         passages=int(retriever.index.ntotal), text_materialized=False)
+                rank_workloads(retriever, repeats=args.repeats, top_k=args.top_k)
+            else:
+                with phase("retriever.startup"):
+                    retriever = factory.load_retriever(settings)
+                    dense = getattr(retriever, "dense", None)
+                    emit("ready", documents=len(retriever.doc_ids),
+                         passages=int(dense.index.ntotal) if dense is not None else None,
+                         shared_corpus=(retriever.bm25.corpus is dense.corpus) if dense is not None else None)
+                query_workloads(retriever, repeats=args.repeats, top_k=args.top_k)
     emit("complete", mode=args.mode)
 
 
 def parser():
     result = argparse.ArgumentParser(description=__doc__)
-    result.add_argument("--mode", choices=("inventory", "corpus", "model", "bm25", "hybrid"), required=True)
+    result.add_argument("--mode", choices=("inventory", "corpus", "model", "bm25", "dense", "hybrid"), required=True)
     result.add_argument("--corpus", type=Path, required=True)
     result.add_argument("--bm25-index", type=Path, required=True)
     result.add_argument("--dense-index", type=Path, required=True)

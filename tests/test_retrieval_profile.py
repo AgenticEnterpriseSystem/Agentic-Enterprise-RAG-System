@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pyarrow as pa
@@ -281,6 +282,114 @@ def test_query_workloads_stops_on_source_filter_scope_and_result_bound_failure(o
             return super().search(request)
     with pytest.raises(ValueError):
         profile.query_workloads(BadFilter(), repeats=1, top_k=1, narrow_size=1)
+
+
+class MaskedRanker:
+    # More than the 32-document narrow scope, in a deliberately different order.
+    doc_ids = tuple(f"d{i:02}" for i in reversed(range(40)))
+
+    def __init__(self):
+        self.calls = []
+        self.index = SimpleNamespace(ntotal=48)
+
+    def rank(self, query, top_k, mask=None):
+        assert mask is not None and mask.dtype == np.dtype(bool)
+        assert mask.shape == (len(self.doc_ids),)
+        self.calls.append((query, top_k, tuple(bool(value) for value in mask)))
+        return [(doc, 1.0 / (i + 1)) for i, (doc, permit) in enumerate(zip(self.doc_ids, mask))
+                if permit][:top_k]
+
+
+def test_rank_workloads_preserves_index_aligned_scopes_without_materializing_text(observation):
+    from scripts.benchmark_web import WORKLOADS
+    ranker = MaskedRanker()
+    profile.rank_workloads(ranker, repeats=2, top_k=3)
+    results = [event for event in observation if event["event"] == "rank_result"]
+    assert {event["scope"] for event in results} == {"broad", "narrow", "denied"}
+    for scope in ("broad", "narrow", "denied"):
+        rows = [event for event in results if event["scope"] == scope]
+        assert {(event["workload"], event["repeat"]) for event in rows} == {
+            (name, repeat) for name, _ in WORKLOADS for repeat in range(2)}
+        for event in rows:
+            assert event["text_materialized"] is False
+            assert len(event["hits"]) <= 3
+            returned = [item["doc_id"] for item in event["hits"]]
+            expected = (list(ranker.doc_ids[:3]) if scope == "broad" else
+                        ["d31", "d30", "d29"] if scope == "narrow" else [])
+            assert returned == expected
+    masks = {mask for _, _, mask in ranker.calls}
+    assert {sum(mask) for mask in masks} == {0, 32, 40}
+
+
+@pytest.mark.parametrize("scope", ["broad", "narrow", "denied"])
+def test_rank_workloads_stops_on_mask_leak_for_each_scope(observation, scope):
+    class LeakingRanker(MaskedRanker):
+        def rank(self, query, top_k, mask=None):
+            target = "broad" if mask.all() else "narrow" if mask.any() else "denied"
+            if target == scope:
+                return [("unknown-document" if scope == "broad" else "d39", 1.0)]
+            return super().rank(query, top_k, mask=mask)
+    with pytest.raises(ValueError, match="scope or result bound"):
+        profile.rank_workloads(LeakingRanker(), repeats=1, top_k=2)
+    assert any(event["event"] == "end" and event["success"] is False for event in observation)
+
+
+def test_rank_workloads_stops_on_result_bound_even_when_every_id_is_allowed(observation):
+    class OversizedRanker(MaskedRanker):
+        def rank(self, query, top_k, mask=None):
+            return [(doc, 1.0) for doc, permit in zip(self.doc_ids, mask) if permit][:top_k + 1]
+    with pytest.raises(ValueError, match="scope or result bound"):
+        profile.rank_workloads(OversizedRanker(), repeats=1, top_k=2)
+
+
+@pytest.mark.parametrize("load_fails", [False, True])
+def test_dense_worker_uses_unmaterialized_factory_rank_interface_only_after_complete_load(
+        artifacts, observation, monkeypatch, load_fails):
+    from src import config
+    ranker = MaskedRanker()
+    loaded = []
+    corpus, bm25, dense = artifacts
+    args = SimpleNamespace(mode="dense", threads=2, repeats=1, top_k=2,
+                           corpus=corpus, bm25_index=bm25, dense_index=dense)
+
+    class DenseFactory:
+        # No corpus/corpus_path keyword accepted: the component-only measurement
+        # must use factory.load_dense(settings), unlike a full hybrid startup.
+        def load_dense(self, settings):
+            loaded.append(settings)
+            assert settings.device == "cpu"
+            assert settings.dense_index == dense
+            if load_fails:
+                raise RuntimeError("injected incomplete dense load")
+            return ranker
+
+        def load_retriever(self, *args, **kwargs):
+            pytest.fail("Dense component mode called the corpus/hybrid loader")
+
+    @contextmanager
+    def instrument(settings):
+        assert settings.corpus == corpus and settings.bm25_index == bm25
+        yield DenseFactory()
+
+    monkeypatch.setattr(profile, "instrument_loaders", instrument)
+    monkeypatch.setattr(config, "runtime_versions", lambda: {"fixture": True})
+    monkeypatch.setattr(pq, "read_table", lambda *args, **kwargs: pytest.fail("Dense worker materialized corpus text"))
+    if load_fails:
+        with pytest.raises(RuntimeError, match="incomplete dense load"):
+            profile.worker(args)
+        assert ranker.calls == []
+        assert not any(event["event"] in {"ready", "rank_result", "complete"} for event in observation)
+    else:
+        profile.worker(args)
+        ready = [event for event in observation if event["event"] == "ready"]
+        assert len(ready) == 1
+        assert ready[0]["text_materialized"] is False and ready[0]["passages"] == 48
+        assert ready[0]["documents"] == 40
+        assert ranker.calls
+        assert all(event["text_materialized"] is False for event in observation
+                   if event["event"] == "rank_result")
+        assert any(event["event"] == "complete" and event["mode"] == "dense" for event in observation)
+    assert len(loaded) == 1
 
 
 @pytest.mark.parametrize("flag,value", [

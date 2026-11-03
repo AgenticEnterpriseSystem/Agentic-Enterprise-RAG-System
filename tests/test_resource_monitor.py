@@ -152,6 +152,65 @@ def test_ignoring_term_escalates_to_kill_with_bounded_wait(tmp_path):
     assert result["duration_seconds"] < 4
 
 
+def test_guard_report_uses_post_cleanup_reap_and_preserves_final_pipe_events(tmp_path, monkeypatch):
+    real_popen = monitor.subprocess.Popen
+    workers = []
+    ready = tmp_path / "worker-ready"
+
+    class DeferredReap:
+        """Real child; simulate one unavailable initial reap, not a fake exit."""
+        def __init__(self, worker):
+            self.worker = worker
+            self.wait_calls = 0
+            self.reaped = False
+
+        def __getattr__(self, name):
+            return getattr(self.worker, name)
+
+        def poll(self):
+            self.worker.poll()
+            return self.worker.returncode if self.reaped else None
+
+        def wait(self, timeout):
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                raise monitor.subprocess.TimeoutExpired("synthetic delayed reap", timeout)
+            code = self.worker.wait(timeout=timeout)
+            self.reaped = True
+            return code
+
+    def delayed_reap(*args, **kwargs):
+        worker = DeferredReap(real_popen(*args, **kwargs))
+        workers.append(worker)
+        return worker
+
+    group = {"version": 2, "path": str(tmp_path), "raw": {}, "peak_bytes": None,
+             "current_bytes": 0, "events": {"oom": 0, "oom_kill": 0}}
+    monkeypatch.setattr(monitor.subprocess, "Popen", delayed_reap)
+    monkeypatch.setattr(monitor, "read_cgroup", lambda root=None: dict(group))
+    monkeypatch.setattr(monitor, "sample_memory", lambda pid: {
+        "process": {"rss_bytes": 20 if ready.exists() else 0, "peak_rss_bytes": 20},
+        "cgroup": dict(group), "vm": {}, "io": None})
+    code = f"""import pathlib,signal,sys,time
+def finish(signum, frame):
+    print('PROFILE_EVENT {{"event":"end","phase":"waiting"}}',flush=True)
+    print('final diagnostic',file=sys.stderr,flush=True)
+    sys.exit(7)
+signal.signal(signal.SIGTERM,finish)
+print('PROFILE_EVENT {{"event":"start","phase":"waiting"}}',flush=True)
+pathlib.Path({str(ready)!r}).write_text('ready')
+time.sleep(30)
+"""
+    result = supervise(tmp_path, code, max_rss_bytes=10, max_seconds=5)
+    assert result["status"] == "memory_guard" and result["exit_code"] == 7
+    assert result["worker_reaped"] and result["output_drained"]
+    assert result["oom_event_deltas"] == {"oom": 0, "oom_kill": 0}
+    assert workers[0].wait_calls >= 2 and workers[0].worker.poll() == 7
+    assert '"event": "end"' in (tmp_path / "events.jsonl").read_text()
+    assert "final diagnostic" in (tmp_path / "worker.stderr.log").read_text()
+    assert result["duration_seconds"] < 8
+
+
 @pytest.mark.parametrize("kind,expected", [("rss", "memory_guard"), ("cgroup", "cgroup_guard"), ("vm", "vm_guard")])
 def test_memory_guards_stop_real_tiny_child_without_calling_it_oom(tmp_path, monkeypatch, kind, expected):
     # Synthetic counters make the threshold deterministic even where sandboxed
