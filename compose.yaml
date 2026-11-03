@@ -92,6 +92,37 @@ services:
       RAG_DB_USER: rag_migrator
       RAG_DB_PASSWORD: ${RAG_DB_MIGRATOR_PASSWORD:-}
 
+
+  import-corpus:
+    profiles: [imports]
+    build:
+      context: .
+      args:
+        INSTALL_HYBRID: "false"
+    # Run the migration profile first. Import credentials never reach the app.
+    command: [python, -m, src.data.import_catalog, --corpus, /data/documents.parquet,
+              --dense-directory, /data/indexes/dense-bge-base,
+              --snapshot-id, "${RAG_SNAPSHOT_ID:-enterprise-bge-base-canonical}"]
+    healthcheck:
+      disable: true
+    restart: "no"
+    mem_limit: 768m
+    memswap_limit: 768m
+    cpus: 2
+    pids_limit: 128
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      RAG_DB_HOST: db
+      RAG_DB_NAME: rag
+      RAG_DB_USER: rag_migrator
+      RAG_DB_PASSWORD: ${RAG_DB_MIGRATOR_PASSWORD:-}
+      OPENBLAS_NUM_THREADS: 2
+      OMP_NUM_THREADS: 2
+    volumes:
+      - "${ARTIFACTS_DIR:-./.cache/hybrid-artifacts}:/data:ro"
+
 volumes:
   model-cache:
   postgres-data:

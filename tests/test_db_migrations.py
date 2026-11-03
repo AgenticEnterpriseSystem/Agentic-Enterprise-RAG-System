@@ -20,7 +20,7 @@ from tests.db_support import (
 EXPECTED_TABLES = {
     "users", "sessions", "groups", "group_memberships", "dataset_snapshots", "documents",
     "document_revisions", "chunks", "document_grants", "policy_state", "tickets",
-    "query_runs", "run_steps", "aggregate_results",
+    "query_runs", "run_steps", "aggregate_results", "catalog_imports",
 }
 
 
@@ -51,7 +51,7 @@ def test_database_helper_normalizes_only_an_explicit_test_target():
 
 def test_migration_history_has_one_expected_head():
     from src.db.migrate import migration_heads
-    assert migration_heads() == ("0001_foundation",)
+    assert migration_heads() == ("0002_catalog_import",)
 
 
 def test_fresh_database_upgrade_and_repeat_upgrade_preserve_schema_and_seed(pg_urls):
@@ -59,14 +59,14 @@ def test_fresh_database_upgrade_and_repeat_upgrade_preserve_schema_and_seed(pg_u
     with disposable_database(pg_urls) as fresh:
         assert current_revision(url_string(fresh.migration)) is None
         upgrade_database(url_string(fresh.migration))
-        assert current_revision(url_string(fresh.migration)) == "0001_foundation"
+        assert current_revision(url_string(fresh.migration)) == "0002_catalog_import"
         engine = engine_for(fresh.migration)
         try:
             with engine.begin() as connection:
                 from src.db import schema
                 data = seed_catalog(connection)
             upgrade_database(url_string(fresh.migration))
-            assert current_revision(url_string(fresh.migration)) == "0001_foundation"
+            assert current_revision(url_string(fresh.migration)) == "0002_catalog_import"
             with engine.connect() as connection:
                 assert set(sa.inspect(connection).get_table_names(schema="rag")) == EXPECTED_TABLES | {"alembic_version"}
                 assert connection.execute(sa.select(schema.document_revisions.c.canonical_text).where(
@@ -79,7 +79,7 @@ def test_fresh_runtime_can_read_migration_revision_but_cannot_change_version_tab
     from src.db.migrate import current_revision, upgrade_database
     with disposable_database(pg_urls) as fresh:
         upgrade_database(url_string(fresh.migration))
-        assert current_revision(url_string(fresh.runtime)) == "0001_foundation"
+        assert current_revision(url_string(fresh.runtime)) == "0002_catalog_import"
         runtime = engine_for(fresh.runtime)
         try:
             with runtime.connect() as connection, connection.begin():
@@ -90,7 +90,7 @@ def test_fresh_runtime_can_read_migration_revision_but_cannot_change_version_tab
                 # remove version state even if an incorrect grant slips through.
                 with rejected(connection, sqlstate="42501"):
                     connection.execute(sa.text("DELETE FROM rag.alembic_version WHERE false"))
-            assert current_revision(url_string(fresh.runtime)) == "0001_foundation"
+            assert current_revision(url_string(fresh.runtime)) == "0002_catalog_import"
         finally:
             runtime.dispose()
 

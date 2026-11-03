@@ -238,3 +238,56 @@ refuse ordinary database names. CI starts its own loopback-only server. The
 snapshot-restore check additionally uses `RAG_TEST_PG_CONTAINER`, labeled
 `rag.task=DB-01`; its dump/restore commands run inside that disposable container.
 These tiny fixtures do not establish full-corpus import or recovery performance.
+
+
+### Canonical document import
+
+The optional import job stores the full corpus and every matching dense passage
+span in PostgreSQL. It uses the dedicated migration login and a separate bounded
+connection, never elevated runtime credentials. It does not connect the web
+application to this store yet. With the database passwords configured as above
+and the complete unchanged artifacts in `.cache/hybrid-artifacts`, run:
+
+```sh
+docker compose --profile database --profile migrations run --build --rm migrate
+docker compose --profile database --profile imports run --build --rm import-corpus
+```
+
+The importer requires the current single migration head `0002_catalog_import`.
+`RAG_SNAPSHOT_ID` names its immutable snapshot. Rerunning with identical files
+verifies/resumes the same import; changed source files reject. Each transaction
+commits its rows and checkpoint together, and incomplete imports stay unavailable.
+A published snapshot is never overwritten. Correct a bad source and use a new
+snapshot ID rather than deleting existing data.
+
+For a read-only verification of the actual source files, canonical bodies,
+ordered catalog and all indexed spans:
+
+```sh
+docker compose --profile database --profile imports run --rm import-corpus \
+  python -m src.data.import_catalog \
+  --corpus /data/documents.parquet \
+  --dense-directory /data/indexes/dense-bge-base \
+  --snapshot-id enterprise-bge-base-canonical --verify-only
+```
+
+Change that ID if you configured another. Reports go to standard output; the
+library/CLI also supports an exclusive `--report` file. No credential CLI flags
+or model calls are used. Default batches target500 rows and8MiB of canonical
+UTF-8 payload, with at most128 Arrow rows prefetched; one oversized document is
+preserved and reported. These limits are not process RSS. The import container
+has a768MiB ceiling and the database384MiB; full-stack serving fit is a separate
+gate. The named database volume persists across container restarts.
+
+The source contains37 documents with null characters. They use an exclusive
+bounded `canonical_utf8` binary representation; other documents retain TEXT.
+The original bytes, SHA256 revisions, Unicode lengths and citation coordinates
+are preserved. No row or character is dropped. Binary payloads are capped at1MiB
+and strictly UTF-8 validated; current source documents are at most42,339 UTF-8
+bytes. Normal excerpts use SQL Unicode substrings. Rare binary excerpts fetch
+and validate the bounded binary body before returning the exact requested span.
+
+The lazy `PostgresDocumentStore` implements the accepted metadata/excerpt/
+read-more interface with the nonowner runtime pool. Protected body reads still
+default-deny until reviewed ACL policies land. A checked import is not actual
+login, permission policy, web integration, or a completed Docker deployment.

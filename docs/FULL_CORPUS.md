@@ -430,3 +430,31 @@ not prove that vectors were computed from the claimed text. Full-corpus parity,
 combined app/database memory and the accepted120s startup/30s first/10s warm
 search targets still require measured acceptance in the later integration gates.
 Historical retrieval/answer quality results above are unchanged.
+
+
+## Full-corpus PostgreSQL import validation
+
+A local LinuxARM64 Docker import on2026-11-03 stored and verified all511,958
+canonical documents and1,746,899 indexed passage spans from26 dense shards.
+All37 null-containing bodies were preserved byte-for-byte. Ordered catalog
+fingerprint: `5b27411a79bb1f04e6b67c5f86039864ac45aaf8ad312598f24f1c7bd8b6fa03`.
+
+The operator job used a768MiB memory/swap ceiling and2 CPUs; PostgreSQL used384MiB
+and1 CPU with32MiB shared buffers. Initial migration, file verification, import
+and full canonical/span verification took1,334.76seconds. Linux process high-water
+RSS was352,040KiB; true cgroup peak was unavailable. The job exited0 with
+DockerOOMKilled=false. Its8MiB canonical-payload batch target observed8,388,490
+bytes maximum; largest document42,339bytes. These are import measurements, not
+combined retrieval/model serving measurements or startup-latency acceptance.
+
+A persistent-volume restart retained every count and the complete checkpoint.
+The built minimal image also verified the entire catalog through the nonowner
+runtime pool; protected body count remained0 and a synthetic permitted-context
+read was rejected by RLS. No production allow policy or real login was inferred
+from that check. The database occupied3,527,521,971bytes after import, excluding
+separate WAL/volume overhead. Cache was warmed by source verification, and other
+unit checks ran during the import. No cold-disk performance claim is made.
+
+Local evidence is ignored under `.cache/platform-validation/doc-01-20261103/`;
+reproduction/import commands are in [setup](WEB_APP.md#canonical-document-import).
+The web runtime still needs the later authentication/policy/integration gates.

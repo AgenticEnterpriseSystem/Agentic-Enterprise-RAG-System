@@ -141,3 +141,7 @@ Full results by question type: [docs/FULL_CORPUS.md](docs/FULL_CORPUS.md).
 - [System card](docs/system_card.md)
 
 Team: Hira Mian, Jane Choi, Alexander Xykis. [MIT License](LICENSE).
+
+The optional PostgreSQL import and exact Unicode/null-preserving document store
+are documented in [setup](docs/WEB_APP.md#canonical-document-import). The web
+runtime is connected in the later integration work.
