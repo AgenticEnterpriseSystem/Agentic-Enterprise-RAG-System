@@ -1,4 +1,4 @@
-"""Measure three development workloads against an already running web app.
+"""Measure development workloads against an already running web app.
 
 Uses live model calls and the server's existing spending limits. No automatic
 retries or answer-quality claims. Raw responses remain in the chosen run folder.
@@ -6,6 +6,7 @@ retries or answer-quality claims. Raw responses remain in the chosen run folder.
 import argparse
 import hashlib
 import json
+import re
 import statistics
 import subprocess
 import time
@@ -41,9 +42,29 @@ def save(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2) + '\n')
 
 
-def summarize(records: list[JsonObject]) -> list[JsonObject]:
+def load_workloads(path: Path | None):
+    if path is None:
+        return WORKLOADS
+    rows = json.loads(path.read_text())
+    if not isinstance(rows, list) or not rows:
+        raise ValueError('Cases must be a nonempty JSON list of name/question objects')
+    result = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError('Each workload must be a name/question object')
+        name, question = row.get('name'), row.get('question')
+        if (not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', name)
+                or not isinstance(question, str) or not question.strip() or len(question) > 8000):
+            raise ValueError('Invalid workload name or question')
+        result.append((name, question))  # Never forward reference answers or labels.
+    if len({name for name, _ in result}) != len(result):
+        raise ValueError('Workload names must be unique')
+    return tuple(result)
+
+
+def summarize(records: list[JsonObject], workloads=WORKLOADS) -> list[JsonObject]:
     result: list[JsonObject] = []
-    for name, question in WORKLOADS:
+    for name, question in workloads:
         runs = [r for r in records if r['workload'] == name]
         measured = [r for r in runs if r['http_status'] == 200]
         costs = [r['estimated_cost_usd'] for r in measured if r['estimated_cost_usd'] is not None]
@@ -66,6 +87,7 @@ def main():
     parser.add_argument('--url', default='http://127.0.0.1:8000')
     parser.add_argument('--retrieval', choices=('bm25', 'hybrid'), default='hybrid')
     parser.add_argument('--repeats', type=int, default=3)
+    parser.add_argument('--cases', type=Path, help='JSON list of name/question objects; labels are never sent')
     parser.add_argument('--timeout', type=float, default=150)
     parser.add_argument('--minimum-remaining-budget', type=float, default=.1)
     parser.add_argument('--output', type=Path, required=True)
@@ -73,6 +95,10 @@ def main():
     args = parser.parse_args()
     if args.repeats < 1:
         parser.error('--repeats must be positive')
+    try:
+        workloads = load_workloads(args.cases)
+    except (ValueError, OSError) as error:
+        parser.error(str(error))
     status, info = request_json(args.url + '/api/ready')
     if status != 200 or info.get('mode') != 'live' or info.get('retrieval') != args.retrieval or info.get('busy'):
         parser.error('App must be ready, idle, live, and using the requested retriever')
@@ -81,8 +107,9 @@ def main():
     if args.resume:
         manifest = json.loads((args.output / 'manifest.json').read_text())
         records = json.loads((args.output / 'runs.json').read_text())
-        if args.repeats != manifest['repeats'] or any(info.get(k) != manifest['readiness'].get(k)
-                for k in ('mode', 'retrieval', 'model', 'documents', 'retrieval_config', 'embedding_model')):
+        if (list(map(list, workloads)) != manifest.get('workloads', list(map(list, WORKLOADS)))
+                or args.repeats != manifest['repeats'] or any(info.get(k) != manifest['readiness'].get(k)
+                for k in ('mode', 'retrieval', 'model', 'documents', 'retrieval_config', 'embedding_model'))):
             parser.error('Resume requires the original repeat count and server configuration')
         manifest.setdefault('interruptions', []).append(dict(
             previous_stop_reason=manifest.get('stop_reason'), resumed_at=datetime.now(timezone.utc).isoformat()))
@@ -90,7 +117,8 @@ def main():
         args.output.mkdir(parents=True, exist_ok=False)
         manifest = dict(started_at=datetime.now(timezone.utc).isoformat(), checkout_commit=subprocess.check_output(
             ['git', 'rev-parse', 'HEAD'], text=True).strip(), readiness=info,
-            protocol='Three workloads, sequential requests; order rotated per repeat; no retries or paid warm-up.',
+            protocol='Sequential requests; order rotated per repeat; no retries or paid warm-up.',
+            workloads=workloads, working_tree_sha256=hashlib.sha256(subprocess.check_output(['git', 'diff', 'HEAD'])).hexdigest(),
             repeats=args.repeats, mode='agentic', timeout_seconds=args.timeout,
             timing='Client HTTP wall time, excludes server/index startup; first request retained.',
             cost='Server-reported token-based API estimate; excludes local compute and judge costs.',
@@ -100,13 +128,14 @@ def main():
     save(args.output / 'manifest.json', manifest)
     stop = None
     for repeat in range(args.repeats):
-        ordered = WORKLOADS[repeat % len(WORKLOADS):] + WORKLOADS[:repeat % len(WORKLOADS)]
+        ordered = workloads[repeat % len(workloads):] + workloads[:repeat % len(workloads)]
         for name, question in ordered:
             if any(r['repeat'] == repeat + 1 and r['workload'] == name for r in records):
                 continue
             status, ready = request_json(args.url + '/api/ready')
             if (status != 200 or ready.get('busy') or ready.get('mode') != 'live'
-                    or ready.get('retrieval') != args.retrieval or ready.get('model') != info.get('model')):
+                    or any(ready.get(k) != info.get(k) for k in (
+                        'retrieval', 'model', 'documents', 'retrieval_config', 'embedding_model'))):
                 stop = 'Server unavailable, busy, or configuration changed'
                 break
             if ready.get('budget_remaining_usd', 0) < args.minimum_remaining_budget:
@@ -126,6 +155,7 @@ def main():
                 latency_seconds=elapsed, server_latency_seconds=trace.get('total_latency_ms', 0) / 1000,
                 answer_status=answer.get('status'), stop_reason=trace.get('stop_reason'),
                 searches=sum(s['tool'] == 'text_search' for s in steps),
+                document_reads=sum(s['tool'] == 'read_more' for s in steps),
                 rounds=max((s['round_number'] for s in steps), default=0),
                 model_completions=sum(s['tool'] in ('critic', 'generate') for s in steps),
                 sources=len(body.get('sources', [])), citations=len(answer.get('citation_ids', [])),
@@ -133,7 +163,7 @@ def main():
                 api_calls=usage.get('api_calls'), estimated_cost_usd=usage.get('estimated_cost_usd'))
             records.append(record)
             save(args.output / 'runs.json', records)
-            save(args.output / 'summary.json', summarize(records))
+            save(args.output / 'summary.json', summarize(records, workloads))
             print(json.dumps(record), flush=True)
             if status != 200:
                 stop = 'Request failed; stopped without retrying or dropping the failure'
@@ -143,7 +173,7 @@ def main():
     manifest['stop_reason'] = stop or ('completed_with_errors' if any(r['http_status'] != 200 for r in records) else 'completed')
     manifest['finished_at'] = datetime.now(timezone.utc).isoformat()
     save(args.output / 'manifest.json', manifest)
-    print(json.dumps({'stop_reason': manifest['stop_reason'], 'summary': summarize(records)}), flush=True)
+    print(json.dumps({'stop_reason': manifest['stop_reason'], 'summary': summarize(records, workloads)}), flush=True)
 
 
 if __name__ == '__main__':

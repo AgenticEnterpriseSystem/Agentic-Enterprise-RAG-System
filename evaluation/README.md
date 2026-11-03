@@ -24,3 +24,8 @@ Old local reduced-corpus experiments are not the full-corpus results above. Revi
 selection files and empty review templates do not establish completed human review.
 
 Hybrid, reranker, model-screening and Arctic results are documented in [Retrieval results](../docs/FULL_CORPUS.md).
+
+Use a new output directory for every run and retain failed attempts. Current
+agent safeguards and historical development results are described separately in
+[Evaluation](../docs/EVALUATION.md); a model status or empty review template is not
+independent human validation.

@@ -100,13 +100,43 @@ def validate_evidence(user: UserContext, evidence: tuple[Evidence, ...]) -> None
         raise ValueError("Duplicate citation IDs")
 
 
-class CriticDecision(Contract):
+class EvidenceClaim(Contract):
+    citation_id: Identifier
+    statement: Identifier
+    scope_reason: Identifier
+    answers_requested_fact: bool
+
+
+class FactAssessment(Contract):
+    fact: Identifier
+    # Native structured output is generated in this order: inspect claims and
+    # scope before assigning the verdict, rather than justifying it afterward.
+    claims: tuple[EvidenceClaim, ...] = Field(default=(), max_length=2)
+    status: Literal['supported', 'missing', 'conflicting', 'ambiguous']
+    citation_ids: tuple[Identifier, ...] = Field(default=(), max_length=6)
+
+    @model_validator(mode='after')
+    def supported_has_citations(self):
+        if self.status in ('supported', 'conflicting') and not self.citation_ids:
+            raise ValueError('Supported or conflicting facts require evidence citations')
+        return self
+
+
+class EvidenceAssessment(Contract):
+    """Native model output; overall search decisions are derived in code."""
+    facts: tuple[FactAssessment, ...] = Field(min_length=1, max_length=10)
+    suggested_queries: tuple[str, ...] = ()
+    suggested_sources: tuple[str, ...] = ()
+    read_more_doc_ids: tuple[Identifier, ...] = Field(default=(), max_length=2)
+    clarification_question: Annotated[str, Field(min_length=1, max_length=500)] | None = None
+
+
+class CriticDecision(EvidenceAssessment):
     sufficient: bool
     confidence: float = Field(ge=0, le=1)
     reason: Identifier
     missing_facts: tuple[str, ...] = ()
-    suggested_queries: tuple[str, ...] = ()
-    suggested_sources: tuple[str, ...] = ()
+    facts: tuple[FactAssessment, ...] = Field(default=(), max_length=10)
 
 
 class Usage(Contract):
@@ -133,7 +163,7 @@ class Trace(Contract):
     total_latency_ms: Nonnegative = 0
     usage: Usage = Field(default_factory=Usage)
     stop_reason: Literal[
-        "sufficient", "round_limit", "no_new_evidence", "budget", "error", "single_pass"
+        "sufficient", "round_limit", "no_new_evidence", "budget", "error", "single_pass", "clarification"
     ]
 
 
@@ -166,6 +196,7 @@ class QueryResponse(Contract):
 
 class GenerationRequest(Contract):
     search_limitation: str | None = None
+    assessment: CriticDecision | None = None
     question: Identifier
     user: UserContext
     evidence: tuple[Evidence, ...] = ()

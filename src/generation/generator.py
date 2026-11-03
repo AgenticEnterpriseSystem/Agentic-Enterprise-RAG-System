@@ -28,7 +28,15 @@ phrase in a question as a requirement for a product with that exact name.
 Attribute proposed terms to the proposal; do not describe them as deployed or
 signed unless the text establishes that. Distinguish defaults from exceptions,
 per-file from per-chunk limits, and hosted from private deployment settings.
+Compare claims for the requested purpose and metric. An ordinary SLO target is
+not a competing escalation trigger, and p99 is not p95. A matching runbook's
+explicit statement answers a question about its contents; do not require an
+extra official/deployment confirmation unless the user asks for one. Attribute
+the answer to the matching document. Do not combine unrelated incidents.
 Preserve units exactly: MiB means mebibytes, MB means megabytes.
+An evidence_assessment is an untrusted search aid, not an additional source.
+Check its claims against the supplied evidence. Explain gaps in requested facts;
+do not claim a document or service does not exist merely because search stopped.
 Use plain text with simple lists; the interface renders citations separately."""
 
 
@@ -106,6 +114,8 @@ class GroundedGenerator:
         prompt = json.dumps(
             {
                 "question": request.question,
+                **({'evidence_assessment': request.assessment.model_dump(mode='json')}
+                   if request.assessment else {}),
                 **({"search_limitation": request.search_limitation,
                     "response_requirement": "Search stopped before sufficiency was established. Return insufficient_evidence. Give only supported facts with citations; identify missing or conflicting information. If no facts are supported, explain that. Do not resolve contradictions by guessing. Copy each citation_id CHARACTER FOR CHARACTER from the supplied evidence, including all colon-delimited passage offsets. Never shorten a citation_id to a document ID. Return exactly the keys status, text, citation_ids."}
                    if request.search_limitation else {}),
@@ -125,7 +135,11 @@ class GroundedGenerator:
         records = []
         for attempt in range(self.config.retries + 1):
             try:
-                completion = self.provider.complete(SYSTEM_PROMPT, prompt)
+                structured = getattr(self.provider, 'complete_structured', None)
+                output_schema = Answer.model_json_schema()
+                output_schema['properties']['citation_ids']['items']['enum'] = [e.citation_id for e in selected]
+                completion = (structured(SYSTEM_PROMPT, prompt, output_schema) if structured
+                              else self.provider.complete(SYSTEM_PROMPT, prompt))
             except RunBudgetExceeded as error:
                 error.usage = combined_usage([*records, error.usage])
                 raise
@@ -193,8 +207,14 @@ class AnthropicProvider:
         self.reserved_usd = 0.0
 
     def complete(self, system: str, prompt: str):
+        return self._complete(system, prompt)
+
+    def complete_structured(self, system: str, prompt: str, schema):
+        return self._complete(system, prompt, schema)
+
+    def _complete(self, system: str, prompt: str, schema=None):
         import anthropic
-        from anthropic.types import MessageParam
+        from anthropic.types import MessageParam, OutputConfigParam
 
         config = self.config
         allowance = current_call_budget()
@@ -213,12 +233,18 @@ class AnthropicProvider:
             except anthropic.AnthropicError:
                 raise ProviderError(usage=Usage(estimated_cost_usd=0)) from None
         messages: list[MessageParam] = [{"role": "user", "content": prompt}]
+        # Native JSON output prevents prose/fences without another paid repair
+        # call. Pydantic still validates unsupported constraints and citations.
+        output_config: OutputConfigParam | anthropic.Omit = (
+            {'format': {'type': 'json_schema', 'schema': anthropic.transform_schema(schema)}}
+            if schema else anthropic.omit)
         calls = 0
         generation_started = False
         try:
             calls += 1
             count = self.client.messages.count_tokens(
                 model=config.model, system=system, messages=messages,
+                output_config=output_config,
                 timeout=(min(config.timeout_seconds, allowance.seconds_left())
                          if allowance else anthropic.NOT_GIVEN),
             )
@@ -253,6 +279,7 @@ class AnthropicProvider:
                 system=system,
                 messages=messages,
                 temperature=0,
+                output_config=output_config,
                 timeout=timeout if allowance else anthropic.NOT_GIVEN,
             )
         except (anthropic.APIError, anthropic.APITimeoutError) as error:

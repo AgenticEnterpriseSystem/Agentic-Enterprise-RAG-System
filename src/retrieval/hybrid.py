@@ -26,14 +26,27 @@ class HybridRetriever:
         self.bm25, self.dense = bm25, dense
         self.config = config or HybridConfig()
         self.reranker = reranker
-        if hasattr(bm25, "doc_ids") and hasattr(dense, "doc_ids"):
-            if set(bm25.doc_ids) != set(dense.doc_ids):
+        bm25_ids, dense_ids = getattr(bm25, 'doc_ids', None), getattr(dense, 'doc_ids', None)
+        if bm25_ids is not None and dense_ids is not None:
+            if set(bm25_ids) != set(dense_ids):
                 raise ValueError("Hybrid indexes must cover the same documents")
-            self.doc_ids = list(bm25.doc_ids)
+            self.doc_ids = list(bm25_ids)
         self.manifest = {"method": "hybrid-rrf", "config": self.config.model_dump(),
                          "bm25": getattr(bm25, "manifest", {}),
                          "dense": getattr(dense, "manifest", {}),
                          "reranker": getattr(reranker, "identity", None)}
+
+    def read_more(self, request: SearchRequest, anchors, *, max_chars=3000):
+        validate_evidence(request.user, anchors)
+        operation = getattr(self.bm25, 'read_more', None)
+        if operation is None:
+            return ()
+        result = tuple(operation(request, anchors, max_chars=max_chars))
+        matched_ids = {e.chunk.doc_id for e in anchors}
+        if any(e.chunk.doc_id not in matched_ids or not matches_filters(e, request) for e in result):
+            raise ValueError("Expansion returned evidence outside the matched document scope")
+        validate_evidence(request.user, result)
+        return result
 
     def search(self, request: SearchRequest):
         if request.user.user_id is None or not request.user.allowed_doc_ids:

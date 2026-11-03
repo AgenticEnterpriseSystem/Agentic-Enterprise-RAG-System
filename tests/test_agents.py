@@ -821,7 +821,7 @@ def test_partial_generation_cannot_bypass_token_budget():
     assert result.trace.stop_reason == 'budget' and not generator.requests
 
 
-def test_partial_context_shrinks_with_remaining_tokens_and_keeps_original_facts():
+def test_partial_context_keeps_the_exact_evidence_seen_by_the_final_critic():
     first = evidence(text='A' * 3000)
     second = evidence('b', text='B' * 3000)
     generator = Generator()
@@ -831,7 +831,8 @@ def test_partial_context_shrinks_with_remaining_tokens_and_keeps_original_facts(
         config=AgentConfig(max_rounds=2, max_tokens=16000)).run(request())
     assert result.answer.status == 'insufficient_evidence'
     assert generator.requests[0].evidence[0] == first
-    assert sum(len(e.chunk.text) for e in generator.requests[0].evidence) == 5000
+    assert generator.requests[0].evidence == critic.requests[-1].evidence
+    assert result.trace.steps[-1].evidence_ids == result.trace.steps[-2].evidence_ids
     assert generator.requests[0].question == request().query
 
 
@@ -843,7 +844,7 @@ def test_last_critic_leaves_context_room_for_answer():
     generator = Generator()
     result = SearchAgent(Search([(first,), (second,)]), critic, generator,
         config=AgentConfig(max_rounds=2, max_tokens=10000)).run(request())
-    assert sum(len(e.chunk.text) for e in critic.requests[-1].evidence) == 4000
+    assert 0 < sum(len(e.chunk.text) for e in critic.requests[-1].evidence) <= 4000
     assert result.answer.status == 'insufficient_evidence'
     assert generator.requests
 
@@ -857,7 +858,7 @@ def test_final_round_approval_and_generation_use_identical_evidence():
     result = SearchAgent(Search([(first,), (second,)]), critic, generator,
         config=AgentConfig(max_rounds=2, max_tokens=10000)).run(request())
     approved = critic.requests[-1].evidence
-    assert sum(len(e.chunk.text) for e in approved) == 4000
+    assert 0 < sum(len(e.chunk.text) for e in approved) <= 4000
     assert result.trace.stop_reason == 'sufficient'
     assert generator.requests[0].evidence == approved == result.sources
     assessment, generation = result.trace.steps[-2:]

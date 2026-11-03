@@ -4,6 +4,7 @@ import "./style.css";
 
 const stops = {
   single_pass: "One search completed",
+  clarification: "More detail needed",
   sufficient: "Evidence judged sufficient",
   round_limit: "Search round limit reached",
   no_new_evidence: "No new evidence found",
@@ -305,6 +306,8 @@ function App() {
                       ? "Retrieved evidence"
                       : result.answer.status === "error"
                         ? "Unable to answer"
+                        : result.trace.stop_reason === "clarification"
+                          ? "Clarification needed"
                         : result.answer.status === "insufficient_evidence"
                           ? "Partial answer / missing information"
                           : "Answer"}
@@ -383,6 +386,8 @@ function App() {
                         <strong>
                           {step.tool === "text_search"
                             ? "Search"
+                            : step.tool === "read_more"
+                              ? "Read more from source"
                             : step.tool === "critic"
                               ? "Evidence check"
                               : step.tool === "generate"
@@ -408,6 +413,13 @@ function App() {
                       {step.critic && (
                         <>
                           <p>{step.critic.reason}</p>
+                          {step.critic.facts?.map((fact, index) => (
+                            <p key={index}>
+                              {fact.status === "supported" ? "Supported" : fact.status === "ambiguous"
+                                ? "Needs clarification" : fact.status === "conflicting" ? "Conflicting" : "Missing"}
+                              : {fact.fact}
+                            </p>
+                          ))}
                           {!!step.critic.missing_facts.length && (
                             <p className="missing">
                               <strong>Missing:</strong>{" "}

@@ -105,8 +105,9 @@ model/settings, question IDs, source/prompt hashes, runtime versions, usage and
 per-case outcomes. These runs used **BM25 and Haiku 4.5**, not GPT-OSS or BGE-base
 hybrid. They were recorded in an isolated integration checkout before changes
 were ported; hashes identify the measured snapshots. The critic and generator
-prompts have changed since (commit `c1a5ea5`), so these runs describe the
-earlier prompts.
+prompts have changed since these runs, including hybrid-context improvements
+and the later fact-checklist and scoped-claim updates. These runs describe the
+earlier prompts, not the current agent.
 
 - Ten development pairs: follow-ups found additional reference documents in two
   cases, but their useful passages were initially dropped before generation.
@@ -120,14 +121,17 @@ earlier prompts.
   before revision. These were prompt-development examples, not human judgments
   or an independent accuracy estimate. The fixture set now has 14 examples;
   the historical score applies only to the original eight and recorded hashes.
-- A later scope/verbosity prompt experiment was reverted. The current default
-  matches the [saved pre-experiment prompt](../evaluation/agent_development/critic_before_scope.txt).
-  No latency or accuracy improvement was established for that experiment.
+- A later scope/verbosity prompt experiment was reverted. At the time, the default
+  matched the [saved pre-experiment prompt](../evaluation/agent_development/critic_before_scope.txt).
+  No latency or accuracy improvement was established for that historical experiment.
+  The current fact-checklist prompt has since changed; the saved prompt is a
+  historical comparison artifact, not a copy of the current default.
 
 Known issues include incomplete answers at round limits, ambiguous policy scope,
 missed passage details and occasional invalid model-generated citations. The
-critic can continue searching after identifying ambiguity; clarification dialogue
-is not implemented. More searches or valid citation IDs alone are not quality gains.
+current agent can stop with a focused clarification question. Conversation state
+is not retained, so the user must submit a new complete question. More searches
+or valid citation IDs alone are not quality gains.
 
 Full traces and unfilled review packets remain in local ignored storage, including
 `.cache/integration-audit-20261021/` and `.cache/critic-scope-development/`.
@@ -273,6 +277,17 @@ model wrote and graded the answers, which can inflate scores. Human scores for
 comparison are in `outputs/alex_evaluation/rag_evaluation_results.xlsx`; agreement
 statistics are not yet reproducible from committed code. A comparable run on the
 hybrid retriever and the deployed generator is the next step.
+
+## Current agent evidence flow
+
+The current agent retains exact passages supporting requested facts across search
+rounds and passes the assessed evidence unchanged to complete or partial answer
+generation. The critic derives sufficiency from a fact checklist and validates
+claim scope and citation IDs. Bounded `read_more` operations inspect adjacent text
+from already-matched, authorized documents. Native structured providers constrain
+JSON and supplied citations; plain providers, including Ollama, retain their
+existing JSON-validation fallback. These safeguards do not establish answer
+accuracy or an overall quality improvement.
 
 ## Application verification
 

@@ -567,7 +567,25 @@ def test_title_on_every_passage_keeps_exact_spans(corpus, tmp_path):
         assert text[item.chunk.start_char:item.chunk.end_char] == item.chunk.text
 
 
-def test_embedding_models_use_pinned_revisions_prefixes_and_manifest(tmp_path, monkeypatch):
+@pytest.fixture
+def embedding_torch(monkeypatch):
+    """Model-contract tests use no native tensor kernels or GPU runtime."""
+    import sys
+    import types
+
+    class OutOfMemoryError(RuntimeError):
+        pass
+
+    runtime = types.SimpleNamespace(
+        bfloat16=object(),
+        OutOfMemoryError=OutOfMemoryError,
+        cuda=types.SimpleNamespace(empty_cache=lambda: None),
+    )
+    monkeypatch.setitem(sys.modules, "torch", runtime)
+    return runtime
+
+
+def test_embedding_models_use_pinned_revisions_prefixes_and_manifest(tmp_path, monkeypatch, embedding_torch):
     import sys
     import types
     from src.config import EMBEDDING_MODELS, EMBEDDING_REVISION
@@ -625,10 +643,10 @@ def test_embedding_models_use_pinned_revisions_prefixes_and_manifest(tmp_path, m
         EmbeddingModel(model="gte-modernbert-base").encode(["x"])
 
 
-def test_embedding_retries_smaller_batches_after_gpu_out_of_memory(monkeypatch):
+def test_embedding_retries_smaller_batches_after_gpu_out_of_memory(monkeypatch, embedding_torch):
     import sys
     import types
-    import torch
+    torch = embedding_torch
     from src.retrieval.corpus_dense import EmbeddingModel
 
     class TightGPU:
