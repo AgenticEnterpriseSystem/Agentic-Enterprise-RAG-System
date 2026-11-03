@@ -345,3 +345,49 @@ steps that read the candidates.
 Results: `evaluation/results/dense_arctic-embed-l-v2.0_titled_full_development/`,
 `hybrid_arctic-embed-l-v2.0_*_full_development/`, `hybrid_arctic-embed-l-v2.0_w0.7_full_calibration/`
 and `dense_arctic-embed-l-v2.0_full_calibration/`.
+
+## Measure the existing loader
+
+`scripts/profile_retrieval.py` observes the current loader without changing its
+ranking, corpus, model revision or precision. Run one attempt at a time, using
+explicit artifact paths and a new output directory:
+
+```sh
+python scripts/profile_retrieval.py --mode hybrid \
+  --corpus /data/documents.parquet \
+  --bm25-index /data/indexes/bm25 \
+  --dense-index /data/indexes/dense-bge-base \
+  --output .cache/resource-profile/hybrid-attempt
+```
+
+Modes `inventory`, `corpus`, `model` and `bm25` isolate verification, Arrow loading,
+query-encoder loading/encoding, and lexical retrieval. Inventory checks every
+declared shard and hashes the complete artifact files; it does not load vector
+payloads into a search index. Hybrid uses the real factory, shared corpus,
+manifest-selected model and every dense shard. Searches call the retriever
+directly using three existing question-only development workloads, broad/narrow/
+denied benchmark scopes, repeated queries, source filters and bounded expansion.
+No generator, critic, judge or login is invoked.
+
+Outputs preserve source fingerprints, settings, phase events, raw memory samples,
+worker logs and a summary, including failed attempts. Existing output directories
+are rejected. A watchdog bounds RSS, cgroup usage, VM headroom and wall time;
+use an independently enforced container memory/swap ceiling for full-corpus
+experiments. These limits terminate this attempt's worker only. Offline model
+flags are set before imports; the pinned model must already be cached at the
+source checkout's `.cache/models`. Record the exact container image, source SHA,
+mounts, limits and any excluded dependencies with the experiment.
+
+First-query timings are process-first measurements. Hash verification reads
+corpus files, and existing filesystem caches are not cleared, so these runs do
+not establish cold-disk latency. Raw cgroup totals include file cache; the Docker
+CLI's memory display subtracts some cache. Keep process RSS, sampled cgroup
+maxima and available kernel high-water counters separate. Missing counters remain
+unknown, and exit 137 alone does not establish OOM.
+[Docker memory reporting](https://docs.docker.com/reference/cli/docker/container/stats/),
+[container limits](https://docs.docker.com/engine/containers/resource_constraints/),
+[cgroup counters](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html).
+
+Machine-specific measurements and acceptance decisions belong in ignored
+`docs/local/`, with raw attempts under ignored `.cache/`. A resource profile is
+not an answer-quality score or full-stack Docker acceptance.
