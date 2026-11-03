@@ -228,9 +228,10 @@ full-corpus loader is part of this ticket.
 
 `ExperimentManifest` records an immutable arm/repetition, full source commit and
 dirty-tree digest when relevant, explicit split/question IDs, snapshot/scope,
-model/prompt/index/config identities and generation/evidence limits. Provenance
-hashes are declarations; EXPORT-01 must verify the actual files and runtime
-configuration. The contract itself performs no source-file or database I/O.
+model/prompt/index/config identities and generation/evidence limits. The DTO
+provenance hashes are declarations. The offline exporter now verifies actual
+files, source checkout and a supplied effective runtime configuration;
+the contract itself performs no source-file or database I/O.
 
 `RuntimeCaseExport` records exact generated outcomes, trace/usage, generation
 inputs and retained sanitized errors. Unknown cost remains null. A clarification
@@ -240,7 +241,9 @@ reference/gold fields.
 
 `ScoringReference` and `ScoringInput` are a separate scoring-only join. They bind
 reference data to question identity and the canonical runtime-case digest after
-generation; they are not runtime requests. No judge or export runner is added.
+generation; they are not runtime requests. The offline export library and CLI
+are documented in [evaluation](EVALUATION.md#reproducible-offline-experiment-records).
+They add persistence and scoring handoff, without a judge or live generation runner.
 
 `validate_runtime_exports` distinguishes partial resumable output from a complete
 declared arm. `validate_resume_compatibility` rejects changed scientific settings.
@@ -281,9 +284,11 @@ exact text spans, snapshot mismatches, canonical aggregate provenance, export
 separation and V1 compatibility. They do not prove a database import, real login,
 full-corpus memory fit or answer-quality improvement.
 
-P completes CONTRACT-01 independently of R/MEM-01 in wave 1. Wave 2 remains closed
-until MEM-01 is actually accepted; these interfaces do not substitute for its
-measured resource report.
+The private Lane P implementation has accepted CONTRACT-01 and the explicitly
+authorized MEM-01 profiling takeover. Wave 2 remains open until database, export
+and Lane R dense work pass together; interfaces and offline fixtures do not
+establish full-corpus memory fit. The ignored local plans hold actual revision
+and gate evidence.
 
 
 ## Relational foundation
