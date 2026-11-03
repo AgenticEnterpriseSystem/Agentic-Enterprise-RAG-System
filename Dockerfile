@@ -30,6 +30,8 @@ RUN if [ "$INSTALL_HYBRID" = true ]; then \
 RUN useradd --create-home --uid 10001 app && \
     mkdir -p /app/.cache/models && chown -R app:app /app/.cache
 COPY src ./src
+COPY alembic.ini ./
+COPY migrations ./migrations
 COPY --from=frontend /web/dist ./frontend/dist
 USER app
 EXPOSE 8000

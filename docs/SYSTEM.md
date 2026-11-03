@@ -18,6 +18,7 @@ The backend loads one retriever at startup and shares it across requests.
 | Location | Responsibility |
 | --- | --- |
 | `src/contracts.py` | Validated requests, evidence, answers and traces |
+| `src/db/`, `migrations/` | PostgreSQL foundation, immutable records, bounded runtime connections and forward migrations; application adoption remains pending |
 | `src/api/main.py`, `runtime.py` | HTTP lifecycle, demo scope, retriever/provider construction |
 | `src/agents/` | Search loop, evidence critic, routing and per-run budgets |
 | `src/generation/generator.py` | Provider calls, evidence-only generation and citation validation |
@@ -283,3 +284,29 @@ full-corpus memory fit or answer-quality improvement.
 P completes CONTRACT-01 independently of R/MEM-01 in wave 1. Wave 2 remains closed
 until MEM-01 is actually accepted; these interfaces do not substitute for its
 measured resource report.
+
+
+## Relational foundation
+
+The optional database profile and migration job are documented in
+[Setup](WEB_APP.md#database-foundation). One Alembic head, `0001_foundation`, owns
+14 application tables in schema `rag`. The initial migration is self-contained;
+future metadata changes do not rewrite historical revisions. Destructive
+downgrade is refused. Runtime can read migration version metadata for compatible
+readiness checks, but cannot change it.
+
+Catalog metadata contains no document bodies or titles and is internal to the
+server. Text/revisions, chunks, tickets, runs/steps and aggregates have default
+deny RLS. Later ACL work supplies the explicit policies; a role label does not
+grant access. Database service roles are separate from application accounts.
+Published snapshot identity/content and stored aggregate provenance are immutable.
+Derived chunks may append against a fixed revision within canonical bounds.
+
+`Database.transaction(context)` accepts a server-resolved request context or an
+empty authority, binds identity locally, and commits/rolls back before returning
+the connection. A single bounded SQLAlchemy pool performs full session reset.
+Do not hold a transaction across retrieval or a model call. Authentication, scope
+freshness and grant decisions remain explicit AUTH/ACL responsibilities.
+[SQLAlchemy connection reset](https://docs.sqlalchemy.org/en/21/core/pooling.html#custom-reset-on-return-schemes),
+[PostgreSQL identities](https://www.postgresql.org/docs/17/functions-info.html),
+[Psycopg connection information](https://www.psycopg.org/psycopg3/docs/api/objects.html).

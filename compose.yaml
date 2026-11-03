@@ -44,5 +44,54 @@ services:
       - "${ARTIFACTS_DIR:-./.cache/hybrid-artifacts}:/data:ro"
       - model-cache:/app/.cache/models
 
+  db:
+    profiles: [database]
+    image: postgres:17.11-bookworm@sha256:839fbb5a4942a7758dd93e18b42ea5649807491a0545b5eeeb8f0b8bb11857a5
+    # Internal-only: no host port, no real application accounts are seeded.
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: rag
+      POSTGRES_PASSWORD: ${RAG_DB_BOOTSTRAP_PASSWORD:-}
+      RAG_DB_MIGRATOR_PASSWORD: ${RAG_DB_MIGRATOR_PASSWORD:-}
+      RAG_DB_RUNTIME_PASSWORD: ${RAG_DB_RUNTIME_PASSWORD:-}
+    command: [postgres, -c, shared_buffers=32MB, -c, work_mem=4MB, -c, maintenance_work_mem=32MB, -c, max_connections=20]
+    mem_limit: 384m
+    memswap_limit: 384m
+    cpus: 1
+    pids_limit: 128
+    restart: "no"
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -h 127.0.0.1 -U postgres -d rag"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sh:/docker-entrypoint-initdb.d/10-roles.sh:ro
+
+  migrate:
+    profiles: [migrations]
+    build:
+      context: .
+      args:
+        INSTALL_HYBRID: "false"
+    command: [python, -m, src.db.migrate]
+    healthcheck:
+      disable: true
+    restart: "no"
+    mem_limit: 192m
+    memswap_limit: 192m
+    cpus: 1
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      RAG_DB_HOST: db
+      RAG_DB_NAME: rag
+      RAG_DB_USER: rag_migrator
+      RAG_DB_PASSWORD: ${RAG_DB_MIGRATOR_PASSWORD:-}
+
 volumes:
   model-cache:
+  postgres-data:
