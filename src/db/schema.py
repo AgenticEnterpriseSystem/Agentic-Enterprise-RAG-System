@@ -114,6 +114,37 @@ def _build_metadata() -> sa.MetaData:
         *_nonblank("dataset_snapshots", "snapshot_id"),
         *_nonnegative("dataset_snapshots", "document_count"),
     )
+    sa.Table("catalog_imports", catalog,
+        sa.Column("snapshot_id", sa.Text(), nullable=False),
+        sa.Column("source_set_sha256", sa.Text(), nullable=False),
+        sa.Column("artifact_hashes", pg.JSONB(), nullable=False),
+        sa.Column("expected_document_count", sa.BigInteger(), nullable=False),
+        sa.Column("expected_passage_count", sa.BigInteger(), nullable=False),
+        sa.Column("expected_shards", sa.BigInteger(), nullable=False),
+        sa.Column("document_cursor", sa.BigInteger(), nullable=False, server_default=sa.text("0")),
+        sa.Column("span_shard", sa.BigInteger(), nullable=False, server_default=sa.text("0")),
+        sa.Column("span_cursor", sa.BigInteger(), nullable=False, server_default=sa.text("0")),
+        sa.Column("passage_cursor", sa.BigInteger(), nullable=False, server_default=sa.text("0")),
+        sa.Column("unique_chunk_count", sa.BigInteger(), nullable=False, server_default=sa.text("0")),
+        sa.Column("phase", sa.Text(), nullable=False, server_default=sa.text("'documents'")),
+        sa.Column("max_document_bytes", sa.BigInteger(), nullable=False, server_default=sa.text("0")),
+        sa.Column("max_batch_bytes_observed", sa.BigInteger(), nullable=False, server_default=sa.text("0")),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False,
+                  server_default=sa.text("CURRENT_TIMESTAMP")),
+        sa.PrimaryKeyConstraint("snapshot_id", name="pk_catalog_imports"),
+        sa.ForeignKeyConstraint(["snapshot_id"], ["rag.dataset_snapshots.snapshot_id"],
+                                name="fk_catalog_imports_snapshot"),
+        _sha("catalog_imports", "source_set_sha256"),
+        sa.CheckConstraint("jsonb_typeof(artifact_hashes) = 'object'", name="ck_catalog_imports_artifact_object"),
+        sa.CheckConstraint("phase IN ('documents', 'spans', 'complete')", name="ck_catalog_imports_phase"),
+        sa.CheckConstraint("expected_shards > 0", name="ck_catalog_imports_shards_positive"),
+        sa.CheckConstraint("document_cursor <= expected_document_count AND passage_cursor <= expected_passage_count "
+                           "AND unique_chunk_count <= passage_cursor AND span_shard <= expected_shards",
+                           name="ck_catalog_imports_cursor_bounds"),
+        *_nonnegative("catalog_imports", "expected_document_count", "expected_passage_count",
+                      "document_cursor", "span_shard", "span_cursor", "passage_cursor",
+                      "unique_chunk_count", "max_document_bytes", "max_batch_bytes_observed"),
+    )
     documents = sa.Table("documents", catalog,
         sa.Column("snapshot_id", sa.Text(), nullable=False),
         sa.Column("doc_id", sa.Text(), nullable=False),
@@ -143,12 +174,17 @@ def _build_metadata() -> sa.MetaData:
         sa.Column("doc_id", sa.Text(), nullable=False),
         sa.Column("revision_id", sa.Text(), nullable=False),
         sa.Column("title", sa.Text(), nullable=False),
-        sa.Column("canonical_text", sa.Text(), nullable=False),
+        sa.Column("canonical_text", sa.Text()),
+        sa.Column("canonical_utf8", sa.LargeBinary()),
         sa.PrimaryKeyConstraint("snapshot_id", "doc_id", "revision_id", name="pk_document_revisions"),
         sa.ForeignKeyConstraint(["snapshot_id", "doc_id", "revision_id"],
             ["rag.documents.snapshot_id", "rag.documents.doc_id", "rag.documents.revision_id"],
             name="fk_document_revisions_document"),
-        sa.CheckConstraint("revision_id = encode(sha256(convert_to(canonical_text, 'UTF8')), 'hex')",
+        sa.CheckConstraint("(canonical_text IS NULL) <> (canonical_utf8 IS NULL)",
+                           name="ck_document_revisions_one_body"),
+        sa.CheckConstraint("canonical_utf8 IS NULL OR octet_length(canonical_utf8) <= 1048576",
+                           name="ck_document_revisions_binary_bound"),
+        sa.CheckConstraint("revision_id = encode(sha256(COALESCE(convert_to(canonical_text, 'UTF8'), canonical_utf8)), 'hex')",
                            name="ck_document_revisions_content_hash"),
     )
     chunks = sa.Table("chunks", catalog,
@@ -318,6 +354,7 @@ sessions = metadata.tables["rag.sessions"]
 groups = metadata.tables["rag.groups"]
 group_memberships = metadata.tables["rag.group_memberships"]
 dataset_snapshots = metadata.tables["rag.dataset_snapshots"]
+catalog_imports = metadata.tables["rag.catalog_imports"]
 documents = metadata.tables["rag.documents"]
 document_revisions = metadata.tables["rag.document_revisions"]
 chunks = metadata.tables["rag.chunks"]

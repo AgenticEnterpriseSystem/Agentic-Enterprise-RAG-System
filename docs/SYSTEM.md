@@ -294,8 +294,9 @@ and gate evidence.
 ## Relational foundation
 
 The optional database profile and migration job are documented in
-[Setup](WEB_APP.md#database-foundation). One Alembic head, `0001_foundation`, owns
-14 application tables in schema `rag`. The initial migration is self-contained;
+[Setup](WEB_APP.md#database-foundation). The current Alembic head, `0002_catalog_import`, owns15 application tables in
+schema `rag`; the original14-table foundation remains frozen in
+`0001_foundation`. The initial migration is self-contained;
 future metadata changes do not rewrite historical revisions. Destructive
 downgrade is refused. Runtime can read migration version metadata for compatible
 readiness checks, but cannot change it.
@@ -315,3 +316,20 @@ freshness and grant decisions remain explicit AUTH/ACL responsibilities.
 [SQLAlchemy connection reset](https://docs.sqlalchemy.org/en/21/core/pooling.html#custom-reset-on-return-schemes),
 [PostgreSQL identities](https://www.postgresql.org/docs/17/functions-info.html),
 [Psycopg connection information](https://www.psycopg.org/psycopg3/docs/api/objects.html).
+
+
+### Canonical storage and import lifecycle
+
+The current head `0002_catalog_import` adds immutable-source checkpoints to the
+14-table foundation and supports exact null-containing canonical bodies. Operator
+import verifies every source hash, document order/revision and indexed span in
+bounded transactions. `PostgresDocumentStore` exposes lazy metadata and exact
+Unicode excerpts through the bounded nonowner pool; current policy/context is
+checked before and after body access, including all anchors before expansion.
+
+Exactly one canonical body representation is present: ordinary TEXT or original
+UTF-8 BYTEA for null-containing documents. Original hashes/offsets remain exact;
+binary data is validated and capped at1MiB. See [import setup](WEB_APP.md#canonical-document-import)
+for batch limits, rare binary physical reads and restart/verification commands.
+Default-deny RLS still applies. This ticket does not add login or activate the new
+store-backed web runtime.
