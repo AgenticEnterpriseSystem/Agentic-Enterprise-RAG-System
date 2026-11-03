@@ -430,3 +430,38 @@ not prove that vectors were computed from the claimed text. Full-corpus parity,
 combined app/database memory and the accepted120s startup/30s first/10s warm
 search targets still require measured acceptance in the later integration gates.
 Historical retrieval/answer quality results above are unchanged.
+
+
+## Store-backed retrieval adapters
+
+`src/retrieval/store.py` provides `StoreBM25Retriever`, `StoreDenseRetriever` and
+`StoreHybridRetriever` over the frozen `DocumentStore` contract. Each operation
+accepts an explicit server `RequestContext` and `FreshnessGuard`; browser role
+labels and legacy allowed-ID sets are not converted into authority. Source/date
+filters and snapshot-aligned scope masks apply before ranking. Current context
+is checked around encoding, scoring, each body read and final output.
+
+BM25 retains its mmap score/ranking behavior and adds a metadata-only candidate
+helper. Hybrid fusion applies the existing weighted RRF arithmetic to metadata
+before materializing final winners (or explicit reranker candidates), retaining
+document deduplication, dense-passage preference and deterministic ties. An
+optional shared catalog avoids retaining duplicate dense catalog objects.
+
+Materialization streams exact overlapping3000-character windows with the existing
+query-match/tie heuristic, retaining only the current/best window. This preserves
+legacy hybrid output without requiring a full Arrow body table. It can perform
+many bounded reads for a long winning document; bounded requests do not imply
+constant I/O or a particular backend's physical-read size. `read_more` stays in
+matched authorized documents and preserves snapshot/revision identity.
+
+Standalone dense candidates retain the full winning embedding span and ranking.
+Standalone returned excerpts are now capped at3000characters, whereas the legacy
+standalone dense retriever emitted its full selected span. This declared excerpt
+change is separate from document-ranking parity; the hybrid selector already had
+that bound. Existing legacy retrievers remain available for comparison.
+
+Fixture checks use real tiny BM25/NumPy/Parquet indexes and compare existing
+fusion/window/hybrid/expansion behavior, including revocation boundaries and
+embedded null Unicode text. These checks do not establish a live PostgreSQL,
+HTTP factory, full-corpus memory/latency or answer-quality result. APP-01/PARITY-01
+still perform the concrete integration and measurement.

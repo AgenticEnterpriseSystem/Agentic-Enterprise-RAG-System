@@ -158,6 +158,37 @@ class CorpusBM25:
         ranked = sorted(candidates, key=lambda i: (-matched[i], self.doc_ids[i]))
         return [(self.doc_ids[i], float(matched[i]) + offset) for i in ranked]
 
+    def rank_candidates(self, query, top_k, *, snapshot, catalog, mask):
+        """Trusted metadata-only scoring over an already validated catalogue.
+
+        The store adapter supplies a snapshot-bound, scope/source/date mask and
+        checks freshness. This primitive grants no authority and reads no text.
+        Empty canonical documents cannot produce a nonempty passage candidate.
+        """
+        from src.storage.contracts import RankedCandidate
+
+        if len(catalog) != len(self.doc_ids):
+            raise ValueError("BM25 catalogue differs from its document index")
+        provenance = "corpus-bm25-v1:" + sha256(json.dumps(
+            self.manifest, sort_keys=True, separators=(",", ":"),
+            allow_nan=False,
+        ).encode()).hexdigest()
+        result = []
+        for doc_id, score in self.rank(query, top_k, mask):
+            position = self.position[doc_id]
+            entry = catalog[position]
+            if entry.position != position or entry.doc_id != doc_id:
+                raise ValueError("BM25 catalogue order differs from its document index")
+            if not entry.text_length:
+                continue
+            candidate = RankedCandidate(snapshot=snapshot, doc_id=doc_id,
+                revision_id=entry.revision_id, source_type=entry.source_type,
+                start_char=0, end_char=entry.text_length, score=float(score),
+                retrieval_method="bm25", scoring_provenance=provenance)
+            candidate.validate_catalog(snapshot, entry)
+            result.append(candidate)
+        return tuple(result)
+
     def search(self, request: SearchRequest):
         """Contract-compatible search returning bounded query-relevant evidence."""
         if self.corpus is None:
