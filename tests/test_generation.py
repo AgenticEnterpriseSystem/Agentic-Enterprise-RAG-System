@@ -1,3 +1,4 @@
+import copy
 import json
 import pytest
 from pathlib import Path
@@ -6,6 +7,10 @@ from src.config import Settings
 from src.contracts import Answer, Chunk, GenerationRequest, QueryRequest, QueryResponse, UserContext, Evidence, Usage
 from types import SimpleNamespace
 from src.generation.generator import AnthropicConfig, AnthropicProvider, Completion, GenerationConfig, GroundedGenerator, ProviderError
+from src.auth.contracts import (
+    ACCESS_ERROR_STATUS, AccessErrorDetail, CurrentUser, LoginRequest, SessionResponse,
+)
+from src.contracts import AggregateEvidence, BoundFilter, PassageEvidence, ScopeBinding, SnapshotRef, Trace
 from tests.fakes import FakeProvider
 
 
@@ -372,3 +377,160 @@ def test_json_wrapper_rejects_extra_content(text):
     from src.generation.generator import json_response_text
     with pytest.raises(ValidationError):
         Answer.model_validate_json(json_response_text(text))
+
+
+# Snapshot provenance and public authentication contracts
+
+GROUNDED_FIXTURE = FIXTURE["grounded_response"]
+
+
+def grounded_payload():
+    return copy.deepcopy(GROUNDED_FIXTURE)
+
+
+def test_mixed_passage_and_zero_count_round_trip_without_fake_document():
+    result = QueryResponse.model_validate(GROUNDED_FIXTURE)
+    passage, aggregate = result.sources
+    assert isinstance(passage, PassageEvidence)
+    assert isinstance(aggregate, AggregateEvidence) and aggregate.count == 0
+    assert not hasattr(aggregate, "chunk")
+    assert QueryResponse.model_validate_json(result.model_dump_json()) == result
+    wire = result.model_dump(mode="json")
+    assert wire["sources"][1]["coverage"] == "synthetic_fixture"
+    assert "chunk" not in wire["sources"][1]
+
+
+def test_snapshot_passage_preserves_legacy_evidence_fields_and_offsets():
+    source = QueryResponse.model_validate(GROUNDED_FIXTURE).sources[0]
+    legacy_fields = source.model_dump(exclude={"kind", "snapshot_id", "revision_id"})
+    legacy = Evidence.model_validate(legacy_fields)
+    assert legacy.citation_id == source.citation_id
+    assert legacy.chunk == source.chunk
+    assert source.chunk.end_char - source.chunk.start_char == len(source.chunk.text)
+
+
+@pytest.mark.parametrize("change", ["citation", "duplicate", "passage_snapshot", "aggregate_snapshot", "kind"])
+def test_response_rejects_inconsistent_provenance(change):
+    data = grounded_payload()
+    if change == "citation":
+        data["answer"]["citation_ids"] = ["not-supplied"]
+    elif change == "duplicate":
+        data["sources"].append(data["sources"][0])
+    elif change == "passage_snapshot":
+        data["sources"][0]["snapshot_id"] = "another"
+    elif change == "aggregate_snapshot":
+        data["sources"][1]["scope"]["snapshot"]["catalog_sha256"] = "d" * 64
+    else:
+        data["sources"][1]["kind"] = "passage"
+    with pytest.raises(ValidationError):
+        QueryResponse.model_validate(data)
+
+
+@pytest.mark.parametrize("count", [-1, True, 1.0, "1"])
+def test_aggregate_count_is_a_strict_nonnegative_integer(count):
+    data = grounded_payload()["sources"][1]
+    data["count"] = count
+    with pytest.raises(ValidationError):
+        AggregateEvidence.model_validate(data)
+
+
+def test_aggregate_rejects_duplicate_or_untyped_filters_and_unknown_coverage():
+    data = grounded_payload()["sources"][1]
+    data["filters"] *= 2
+    with pytest.raises(ValidationError, match="Duplicate"):
+        AggregateEvidence.model_validate(data)
+    with pytest.raises(ValidationError):
+        BoundFilter(field="status", value=["open"])
+    with pytest.raises(ValidationError):
+        BoundFilter(field="count", value=1.5)
+    data = grounded_payload()["sources"][1]
+    data["coverage"] = "all_company_tickets"
+    with pytest.raises(ValidationError):
+        AggregateEvidence.model_validate(data)
+
+
+def test_epoch_hash_and_timezone_fields_reject_ambiguous_values():
+    data = grounded_payload()["sources"][1]
+    data["created_at"] = "2026-11-02T12:00:00"
+    with pytest.raises(ValidationError):
+        AggregateEvidence.model_validate(data)
+    binding = grounded_payload()["sources"][1]["scope"]
+    binding["policy_revision"] = True
+    with pytest.raises(ValidationError):
+        ScopeBinding.model_validate(binding)
+    snapshot = grounded_payload()["snapshot"]
+    snapshot["catalog_sha256"] = "not-a-hash"
+    with pytest.raises(ValidationError):
+        SnapshotRef.model_validate(snapshot)
+
+
+def test_nested_contracts_are_immutable():
+    aggregate = QueryResponse.model_validate(GROUNDED_FIXTURE).sources[1]
+    with pytest.raises(ValidationError):
+        aggregate.scope.policy_revision = 2
+    with pytest.raises(ValidationError):
+        aggregate.filters[0].value = "closed"
+    with pytest.raises(TypeError):
+        aggregate.filters[0] = BoundFilter(field="status", value="closed")
+
+
+def test_snapshot_schema_is_explicitly_opt_in_and_legacy_wire_shape_is_preserved():
+    schema = QueryResponse.model_json_schema()
+    alternatives = schema["properties"]["sources"]["items"]["anyOf"]
+    assert any(item.get("discriminator", {}).get("propertyName") == "kind" for item in alternatives)
+    legacy = QueryResponse.model_validate(FIXTURE["response"])
+    assert legacy.model_dump(mode="json") == {
+        "answer": Answer.model_validate(FIXTURE["response"]["answer"]).model_dump(mode="json"),
+        "sources": [Evidence.model_validate(item).model_dump(mode="json") for item in FIXTURE["response"]["sources"]],
+        "trace": Trace.model_validate(FIXTURE["response"]["trace"]).model_dump(mode="json"),
+    }
+    assert QueryResponse.model_validate(GROUNDED_FIXTURE).snapshot is not None
+    without_version = grounded_payload()
+    without_version.pop("contract_version")
+    assert QueryResponse.model_validate(without_version).contract_version == "2"
+    for field in ("user_id", "role", "allowed_doc_ids", "scope"):
+        with pytest.raises(ValidationError):
+            QueryRequest.model_validate({"question": "policy?", field: "executive"})
+
+
+@pytest.mark.parametrize("change", ["snapshot_missing", "version_without_snapshot", "untagged_source"])
+def test_response_rejects_partial_snapshot_adoption(change):
+    if change == "version_without_snapshot":
+        data = copy.deepcopy(FIXTURE["response"])
+        data["contract_version"] = "2"
+    else:
+        data = grounded_payload()
+        if change == "snapshot_missing":
+            data.pop("snapshot")
+            data.pop("contract_version")
+        else:
+            data["sources"][0] = Evidence.model_validate(
+                {key: value for key, value in data["sources"][0].items() if key not in {"kind", "snapshot_id", "revision_id"}}
+            )
+    with pytest.raises(ValidationError):
+        QueryResponse.model_validate(data)
+
+
+def test_auth_input_cannot_grant_roles_and_passwords_are_redacted():
+    request = LoginRequest(login="intern", password="synthetic-secret")
+    assert request.password.get_secret_value() == "synthetic-secret"
+    assert "synthetic-secret" not in request.model_dump_json()
+    assert "synthetic-secret" not in repr(request)
+    for bad in ({"role": "executive"}, {"user_id": "ceo"}, {"allowed_doc_ids": ["exec"]}):
+        with pytest.raises(ValidationError):
+            LoginRequest(login="intern", password="synthetic-secret", **bad)
+    with pytest.raises(ValidationError):
+        LoginRequest(login="intern", password="")
+    with pytest.raises(ValidationError):
+        LoginRequest(login=" two users ", password="synthetic-secret")
+
+
+def test_public_session_does_not_expose_token_digest_or_document_grants():
+    user = CurrentUser(user_id="intern", display_name="Intern", project_ids=("atlas",))
+    response = SessionResponse(user=user, csrf_token="csrf-for-js-memory", expires_at="2026-11-02T13:00:00Z")
+    assert set(response.model_dump()) == {"user", "csrf_token", "expires_at"}
+    with pytest.raises(ValidationError):
+        CurrentUser(user_id="intern", display_name="Intern", allowed_doc_ids=("exec",))
+    assert ACCESS_ERROR_STATUS["stale_context"] == 409
+    assert ACCESS_ERROR_STATUS["policy_unavailable"] == 503
+    assert AccessErrorDetail(code="scope_denied", message="Access denied").code == "scope_denied"

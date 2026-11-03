@@ -12,7 +12,7 @@ from pydantic import AwareDatetime, Field, model_validator
 
 from src.access.contracts import FreshnessGuard, RequestContext
 from src.contracts import Contract, Identifier
-from src.contracts_v2 import PassageEvidence, SnapshotRef
+from src.contracts import PassageEvidence, SnapshotRef
 
 MAX_CATALOG_BATCH = 1000
 MAX_READ_MORE_ANCHORS = 2

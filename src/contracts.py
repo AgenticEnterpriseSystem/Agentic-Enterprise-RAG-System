@@ -1,12 +1,12 @@
-"""V1 runtime schemas; versioned V2 schemas live in ``src.contracts_v2``.
+"""Shared application contracts; authorization is enforced by server adapters.
 
-Authorization must also be enforced by adapters. V2 is opt-in until APP/WIRE-01;
-adding its contracts must not silently change the running V1 API.
+Snapshot-bound evidence is explicitly enabled by supplying a response snapshot.
+Existing requests and responses keep their wire representation until adoption.
 """
 
 from typing import Annotated, Literal, Protocol
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, model_validator
 
 Identifier = Annotated[str, Field(min_length=1, pattern=r"\S")]
 Nonnegative = Annotated[float, Field(ge=0)]
@@ -185,9 +185,84 @@ class Answer(Contract):
         return self
 
 
+CONTRACT_VERSION = "2"
+Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+Revision = Annotated[int, Field(strict=True, ge=0)]
+
+
+class SnapshotRef(Contract):
+    snapshot_id: Identifier
+    corpus_sha256: Sha256
+    catalog_sha256: Sha256
+    document_count: Annotated[int, Field(strict=True, ge=0)]
+
+
+class ScopeBinding(Contract):
+    """Internal binding, never accepted as authority from the browser/model."""
+
+    scope_id: Identifier
+    user_id: Identifier
+    snapshot: SnapshotRef
+    policy_revision: Revision
+    session_version: Revision
+
+
+class BoundFilter(Contract):
+    field: Identifier
+    value: StrictStr | StrictInt | StrictBool
+
+
+class PassageEvidence(Evidence):
+    kind: Literal["passage"] = "passage"
+    snapshot_id: Identifier
+    revision_id: Identifier
+
+
+class AggregateEvidence(Contract):
+    """A computed result, not a fabricated document or sampled-text quotation.
+
+    Metadata alone does not prove authorization: the access contract requires an
+    exact match with a trusted, owner/scope-bound stored artifact. The producing
+    adapter must count the full authorized relation and record its lineage.
+    """
+
+    kind: Literal["aggregate"] = "aggregate"
+    citation_id: Identifier
+    artifact_id: Identifier
+    scope: ScopeBinding
+    template_id: Identifier
+    template_version: Identifier
+    filters: tuple[BoundFilter, ...] = Field(default=(), max_length=32)
+    operation: Literal["count"] = "count"
+    count: Annotated[int, Field(strict=True, ge=0)]
+    lineage_sha256: Sha256
+    coverage: Literal["verified_records", "synthetic_fixture"]
+    created_at: AwareDatetime
+
+    @model_validator(mode="after")
+    def unique_filters(self):
+        names = [item.field for item in self.filters]
+        if len(names) != len(set(names)):
+            raise ValueError("Duplicate aggregate filter fields")
+        return self
+
+
+GroundedEvidence = Annotated[
+    PassageEvidence | AggregateEvidence, Field(discriminator="kind")
+]
+
+
 class QueryResponse(Contract):
+    """Shared response; snapshot-bound evidence requires explicit provenance.
+
+    Model validation checks structure, not session authorization. Adapters must
+    run the access boundary before releasing snapshot-bound responses.
+    """
+
+    contract_version: Literal["2"] | None = Field(default=None, exclude_if=lambda value: value is None)
+    snapshot: SnapshotRef | None = Field(default=None, exclude_if=lambda value: value is None)
     answer: Answer
-    sources: tuple[Evidence, ...] = ()
+    sources: tuple[GroundedEvidence | Evidence, ...] = ()
     trace: Trace
 
     @model_validator(mode="after")
@@ -195,6 +270,22 @@ class QueryResponse(Contract):
         ids = [item.citation_id for item in self.sources]
         if len(ids) != len(set(ids)) or not set(self.answer.citation_ids) <= set(ids):
             raise ValueError("Citations must resolve to unique supplied sources")
+        if self.snapshot is None:
+            if self.contract_version is not None or any(
+                isinstance(source, (PassageEvidence, AggregateEvidence)) for source in self.sources
+            ):
+                raise ValueError("Snapshot-bound evidence requires a response snapshot")
+            return self
+        object.__setattr__(self, "contract_version", CONTRACT_VERSION)
+        for source in self.sources:
+            if isinstance(source, PassageEvidence):
+                if source.snapshot_id != self.snapshot.snapshot_id:
+                    raise ValueError("Passage belongs to another snapshot")
+            elif isinstance(source, AggregateEvidence):
+                if source.scope.snapshot != self.snapshot:
+                    raise ValueError("Aggregate belongs to another snapshot")
+            else:
+                raise ValueError("Snapshot-bound responses require tagged evidence")
         return self
 
 

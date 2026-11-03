@@ -11,9 +11,8 @@ from typing import Annotated, Literal
 
 from pydantic import AwareDatetime, Field, StrictBool, model_validator
 
-from src.contracts import Contract, Identifier
-from src.contracts_v2 import (
-    AggregateEvidence, GroundedEvidence, PassageEvidence, QueryResponseV2,
+from src.contracts import (
+    AggregateEvidence, Contract, GroundedEvidence, Identifier, PassageEvidence, QueryResponse,
     ScopeBinding, Sha256, SnapshotRef,
 )
 
@@ -126,12 +125,14 @@ class RuntimeCaseExport(Contract):
     question_id: Identifier
     question: QuestionText
     question_sha256: Sha256
-    response: QueryResponseV2
+    response: QueryResponse
     generation_evidence: tuple[GroundedEvidence, ...] = ()
     error: RuntimeFailure | None = None
 
     @model_validator(mode="after")
     def consistent_runtime_outcome(self):
+        if self.response.snapshot is None:
+            raise ValueError("Runtime exports require a snapshot-bound response")
         if self.run_id != self.response.trace.run_id:
             raise ValueError("Export run ID differs from its response trace")
         if self.question_sha256 != hashlib.sha256(self.question.encode("utf-8")).hexdigest():

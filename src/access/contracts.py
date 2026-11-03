@@ -11,7 +11,7 @@ from typing import Protocol, Sequence, runtime_checkable
 from pydantic import AwareDatetime, model_validator
 
 from src.contracts import Contract, Identifier
-from src.contracts_v2 import AggregateEvidence, PassageEvidence, Revision, ScopeBinding, SnapshotRef
+from src.contracts import AggregateEvidence, PassageEvidence, Revision, ScopeBinding, SnapshotRef
 
 
 class AccessError(ValueError):

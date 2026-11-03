@@ -12,8 +12,7 @@ from src.access.contracts import (
     StaleContext, validate_grounded_evidence,
 )
 from src.auth.contracts import ACCESS_ERROR_STATUS, AccessErrorDetail, AccessErrorResponse
-from src.contracts import Chunk
-from src.contracts_v2 import AggregateEvidence, BoundFilter, PassageEvidence, ScopeBinding, SnapshotRef
+from src.contracts import AggregateEvidence, BoundFilter, Chunk, PassageEvidence, ScopeBinding, SnapshotRef
 
 
 NOW = datetime(2026, 11, 2, 12, tzinfo=timezone.utc)

@@ -13,7 +13,7 @@ from src.access.contracts import (
     AccessDenied, EvidenceValidationError, FreshnessGuard, RequestContext, SnapshotMismatch,
 )
 from src.contracts import Chunk
-from src.contracts_v2 import PassageEvidence, SnapshotRef
+from src.contracts import PassageEvidence, SnapshotRef
 from src.storage.contracts import (
     CatalogEntry, DEFAULT_READ_MORE_CHARS, MAX_CATALOG_BATCH, RankedCandidate,
     ReadFilters, validate_catalog_batch_size, validate_read_more_bounds,
