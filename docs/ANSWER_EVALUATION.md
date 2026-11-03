@@ -42,7 +42,7 @@ The answer-generation baseline below uses only the **top five** document IDs for
 ## 3. Prepare the 20-question evidence batch
 
 ```powershell
-.\.venv\Scripts\python.exe -m src.evaluation.prepare_answer_batch
+.\.venv\Scripts\python.exe -m src.evaluation.prepare_answer_batch --output outputs/alex_evaluation/bm25_cases_20.json
 ```
 
 Reads:
@@ -53,7 +53,7 @@ Reads:
 Writes:
 - `outputs/alex_evaluation/bm25_cases_20.json`
 
-**Caution:** The current implementation opens the output with `"w"`, so it **overwrites an existing evidence batch**. Back up the existing file if you want to preserve it. Its source-document path handling is Windows-specific and should be made portable before using it on Linux/Colab.
+The saved evidence batch is already available; skip this step when using it. Preparation now requires an explicit output path and refuses an existing file. To regenerate the historical filename, first move its old copy to a separate backup as described in Step 6. A different output path is safe, but the historical generator in Step 4 still reads the named baseline file. Source paths are portable; the Windows long-path prefix is applied only on Windows. Use `--selected`, `--predictions`, `--benchmark`, `--expected-count`, and `--top-k` for explicit fixture or development inputs. This is legacy preparation, not a snapshot-bound runtime export.
 
 ## 4. Generate GPT-OSS answers
 
@@ -134,7 +134,10 @@ Commit the scripts, tests, this guide, and an approved **20-question selection f
 1. Pin dependency versions, Ollama model tag/version, corpus revision, and the Git commit used for the predictions.
 2. Document how the exact 20 questions were sampled and ensure the approved selection is available.
 3. Make output paths configurable or use timestamped run directories; don't mix old and new experiment outputs.
-4. Make the Windows-specific source-path handling portable.
+4. Use the portable, exclusive preparation helper above when regenerating a
+   development batch. The historical helper does not enforce frozen split
+   membership; reproducible split/final gating uses the new offline export path
+   in [evaluation](EVALUATION.md#reproducible-offline-experiment-records).
 5. Verify that the same evidence is passed into the judge as was actually passed into the generator; log hashes or IDs for auditing.
 6. Provide a tested command/script for the human-vs-judge comparison, including N/A handling and agreement statistics.
 7. If moving to hybrid retrieval, generate a **separate** comparable batch using the same questions, evidence budget, generator, rubric, and judge configuration.

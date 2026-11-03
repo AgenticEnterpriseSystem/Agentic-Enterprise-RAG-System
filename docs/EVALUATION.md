@@ -304,3 +304,93 @@ remain pending. Local records are `.cache/c5-verification/summary.json` and
 `.cache/docker-verification/summary.json`; neither is shipped in a fresh clone.
 CI is configured for Python tests, frontend build and a Docker fixture smoke test;
 configuration alone does not establish that a remote CI run passed.
+
+
+## Reproducible offline experiment records
+
+The existing 20-case BM25 pilot above remains development evidence. New
+snapshot-bound records use `src/evaluation/experiment_inputs.py` and
+`src/evaluation/experiment_io.py`; these modules do not generate answers, load
+indexes, resolve permissions, or invoke a judge. Application/runner integration
+must supply the actual effective configuration and exact evidence passed to the
+generator. Do not infer that evidence from the final displayed sources, or invent
+snapshot/revision identities for historical runs.
+
+Before recording a run, its producer supplies an `ExperimentManifest` and an
+`InputFiles` mapping. The mapping names `questions`, `splits`, `corpus`, `catalog`,
+`index_manifest`, `retrieval_config`, `comparison_config`, `scope`,
+`runtime_config`, `generator_prompt`, and `source_repo`; `critic_prompt`,
+`router_prompt`, and `final_freeze` are optional when the manifest allows them.
+CLI mapping paths are relative to the mapping JSON file. See the real tiny-file
+fixture in `tests/test_experiment_inputs.py` for a complete executable example;
+it does not represent a production dataset or accepted calibration.
+
+Input formats and fingerprints:
+
+- Questions are a JSON array or `.jsonl` records. Runtime selection exposes only
+  `question_id` and `question`; reference answers and source labels stay out of
+  the runtime ledger. Splits are a JSON object with `splits` containing exactly
+  `development`, `calibration`, and `final` ID lists, disjoint and covering all
+  source questions. Explicit manifest IDs preserve execution order; count-based
+  selection sorts IDs. The selected-set fingerprint hashes the canonical runtime
+  questions sorted by ID, independently of execution order.
+- Corpus, split, index-manifest and UTF-8 prompt fingerprints hash exact file
+  bytes. Catalog JSONL contains ordered `CatalogEntry` records and uses the
+  shared streaming catalog fingerprint with the declared document count.
+  Retrieval/comparison configs and the whole scope JSON use canonical JSON:
+  sorted keys, compact separators, UTF-8, finite values. The scope file contains
+  `binding` plus the producer's scope representation. The ledger also retains
+  raw file fingerprints so a reformatted file cannot silently change on resume.
+- Runtime config contains exactly `generation_model`, `retrieval`, `budgets`,
+  `temperature`, `workflow`, and `max_rounds`, matching the manifest. Git
+  provenance records HEAD and hashes staged/unstaged patches and ordinary
+  untracked, nonignored files; source contents and local input paths are not
+  written into the runtime ledger. Ignored assets need their own input hashes.
+  `source_repo` resolves to the whole Git root. Submodules are not recursively
+  fingerprinted; tracked symlinks identify the link, not external target contents.
+  This checkout has neither. Fingerprint any external dependencies explicitly.
+  Verify an unchanged checkout; capture is not a filesystem snapshot.
+
+Use offline checks after preparing actual manifest/input files:
+
+```bash
+python -m src.evaluation.experiment_io preflight --manifest /path/manifest.json --inputs /path/inputs.json
+python -m src.evaluation.experiment_io validate --run /path/fixed-run --require-complete
+python -m src.evaluation.experiment_io pair --fixed /path/fixed-run --adaptive /path/adaptive-run
+python -m src.evaluation.experiment_io export-scoring --run /path/fixed-run --references /path/references.jsonl --output /path/new-scoring-export
+```
+
+A trusted producer uses `verify_inputs(manifest, files)` and then
+`RunDirectory.create(path, manifest, verified_inputs)` as a context manager.
+It appends validated `RuntimeCaseExport` outcomes, including sanitized failures,
+budget stops, and clarifications. Run creation and resume recheck the actual
+files and Git state. Output must be external to the source checkout or ignored
+by Git. Creation is exclusive; immutable headers and ordinal case envelopes use
+fsynced atomic no-replace publication on local macOS/Linux filesystems.
+`RunDirectory.resume` rejects changed settings/inputs and only returns pending
+question IDs; a recorded failure is a completed attempt, not a missing row.
+After a crash, inspect the writer and records before explicitly removing a stale
+`.writer.lock`. No recovery path silently discards files. Stored checksums detect
+corruption/internal disagreement, not a malicious owner rewriting all records.
+Read-only validation checks stored integrity; it does not reverify absent input
+files or authenticate a scope.
+
+Final selection requires a freeze JSON file with `accepted: true`, a
+`settings_sha256` object mapping the workflow to
+`scientific_settings_sha256(manifest)`, a relative `calibration_artifact` contained
+under the freeze directory, and its exact `calibration_sha256`. Scientific
+settings include code, scope, models, prompts and budgets while excluding run
+identity, timestamp, split, question set and repetition. This is an explicit
+operator attestation with a checked artifact, not proof that CAL-01's human
+review gate passed. No final-run executor is added here. An optional freeze file
+on development/calibration is only fingerprinted; it grants no final acceptance.
+
+Scoring input is created in a separate, new directory only after a complete arm.
+Reference JSONL rows contain `question_id`, exact `question`, and one or more of
+`reference_answer`, `answer_facts`, `expected_doc_ids`. The exporter computes the
+reference-file hash itself and binds each join to the runtime-case digest;
+duplicate/missing IDs or different question text reject. Outputs are
+`scoring_inputs.jsonl` and a handoff manifest. Failed outcomes remain present.
+The optional legacy evaluator adapter accepts passage-only successful outcomes
+with an available reference; aggregates/failures/clarifications retain the native
+handoff instead. A valid export and a paired configuration are not quality scores.
