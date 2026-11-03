@@ -173,9 +173,10 @@ Use the same URL and readiness check. Apply settings changes with the same
 command. Stop with `docker compose down`; this preserves the search data and
 model cache. Inspect errors with `docker compose logs --tail=50 app`.
 
-An 8 GiB Docker allocation is insufficient for the full hybrid setup: dense vectors
-alone require about 5 GiB in addition to the corpus, BM25 and model. Full-corpus
-Docker operation is not yet verified; use native startup if memory is limited.
+The legacy hybrid loader accumulates roughly5GiB of float32 vectors alongside
+full corpus text, BM25 and the query model. It exceeded the measured profiling
+budget. Bounded dense and lazy storage components are being integrated; complete
+Docker serving fit and latency still require their explicit acceptance gate.
 
 ## Troubleshooting
 
@@ -193,9 +194,9 @@ See [System](SYSTEM.md) for architecture and limits, and
 ## Database foundation
 
 The optional PostgreSQL service provides schema and connection infrastructure.
-The current question API still uses its benchmark identity; real sign-in,
-permission-policy resolution, corpus import, and application database wiring are
-later integration work.
+The benchmark query profile retains its explicit demo identity. The local
+account API below provides real sign-in; document policy and authenticated query
+wiring remain gated integration work.
 
 Set three different local secrets in `.env`: `RAG_DB_BOOTSTRAP_PASSWORD`,
 `RAG_DB_MIGRATOR_PASSWORD`, and `RAG_DB_RUNTIME_PASSWORD`. Leave them out of Git.
@@ -238,3 +239,75 @@ refuse ordinary database names. CI starts its own loopback-only server. The
 snapshot-restore check additionally uses `RAG_TEST_PG_CONTAINER`, labeled
 `rag.task=DB-01`; its dump/restore commands run inside that disposable container.
 These tiny fixtures do not establish full-corpus import or recovery performance.
+
+
+### Local account API
+
+Set up the database and run migrations first. From an interactive terminal,
+provision an account with the separate migration job:
+
+```sh
+docker compose --profile database --profile migrations run --build --rm migrate \
+  python -m src.auth.accounts create jane --display-name "Jane" --role employee
+```
+
+Passwords are prompted twice, never accepted as command-line flags. Non-TTY
+password creation/reset refuses to read input. The same CLI has `reset-password`
+and `disable`; both invalidate existing sessions through the account version.
+Role/department/project labels describe identity and grant no document rights.
+There is no signup, email reset, SSO or default seeded login.
+
+For explicit loopback HTTP development, configure:
+
+```dotenv
+RAG_AUTH_MODE=local
+RAG_AUTH_SECURE_COOKIES=false
+RAG_AUTH_ALLOW_INSECURE_LOOPBACK=true
+RAG_AUTH_ALLOWED_ORIGINS=http://127.0.0.1:8000,http://localhost:8000
+```
+
+Start the already migrated database and app with
+`docker compose --profile database up --build`. The app receives only runtime
+credentials; account administration retains a separate owner login. HTTPS
+profiles keep secure cookies enabled and list explicit HTTPS origins.
+`RAG_AUTH_ALLOWED_ORIGINS` overrides the shared `RAG_ALLOWED_ORIGINS` fallback.
+The optional `RAG_AUTH_ENABLED=true` alias also enables protected local mode;
+invalid/conflicting mode flags fail startup, rather than silently serving demo
+queries. Explicit factory-injected settings take precedence over environment.
+
+| Endpoint | Behavior |
+| --- | --- |
+| `GET /api/auth/csrf` | Short-lived signed pre-login cookie and CSRF value |
+| `POST /api/auth/login` | JSON login/password plus matching bootstrap CSRF header and allowed Origin; renew session token |
+| `GET /api/auth/me` | Current public identity and session CSRF after authoritative checks; does not extend idle expiry |
+| `POST /api/auth/logout` | Session CSRF plus allowed Origin; revoke session and expire cookie |
+
+The CSRF header is `X-CSRF-Token`. Session cookies are host-only, HttpOnly and
+SameSite=Strict; raw session tokens stay out of response JSON and PostgreSQL.
+Mutations require an exact configured Origin. Authentication responses are
+no-store and credential errors never echo request inputs. The HTTP body limit is
+16KiB even for a misleading Content-Length.
+
+Passwords use the pinned Argon2id RFC9106 low-memory profile (64MiB,3 iterations,
+4 lanes); encoded parameters are checked before verification. A separate single
+auth worker has bounded waiting admission, global/per-login/per-IP throttles and
+bounded process-local counters. Timeouts/disconnects retain admission until the
+actual worker exits. These controls are for the documented single-process app;
+they are not a distributed rate limiter. [Argon2 parameter guidance](https://argon2-cffi.readthedocs.io/en/stable/parameters.html).
+
+Idle and absolute lifetimes are checked after row-lock waits and before release.
+They use the current server-configured policy; changing lifetime settings is an
+administrative policy change, not permanent token revocation. Before increasing
+limits where existing deadlines must remain fixed, invalidate the affected
+sessions with the account reset/disable operation. Ordinary unchanged-policy
+restarts preserve valid sessions.
+Logout cannot be undone by a racing session touch. Account disable/password reset
+is rechecked after password hashing without holding a database transaction across
+that work. Runtime users remain SELECT-only on accounts; PostgreSQL row-lock
+privileges are not broadened for authentication. [PostgreSQL locking privileges](https://www.postgresql.org/docs/17/sql-select.html).
+
+This ticket provides the backend account API. The account UI and per-user query
+integration come later. In local-auth mode, `/api/ready` stays503 without corpus
+metadata and even a valid session receives403 for queries until document policy
+is connected. No benchmark identity is used as a fallback; login remains
+responsive while a separate RAG initialization/worker is occupied.

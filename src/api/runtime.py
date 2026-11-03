@@ -23,6 +23,7 @@ class WebSettings(RetrievalSettings):
     model_config = ConfigDict(frozen=True, extra='forbid', allow_inf_nan=False)
     mode: Literal['retrieval', 'fixture', 'live'] = 'retrieval'
     demo_access: bool = False
+    auth_mode: Literal['benchmark', 'local'] = 'benchmark'
     allowed_doc_ids_file: Path | None = None
     allowed_sources: tuple[str, ...] = ()
     frontend_dist: Path = ROOT / 'frontend/dist'

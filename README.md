@@ -141,3 +141,7 @@ Full results by question type: [docs/FULL_CORPUS.md](docs/FULL_CORPUS.md).
 - [System card](docs/system_card.md)
 
 Team: Hira Mian, Jane Choi, Alexander Xykis. [MIT License](LICENSE).
+
+The explicit local-account profile and interactive provisioning commands are in
+[setup](docs/WEB_APP.md#local-account-api). Query access stays denied until the
+permission and application integration gates pass.

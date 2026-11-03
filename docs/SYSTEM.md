@@ -315,3 +315,18 @@ freshness and grant decisions remain explicit AUTH/ACL responsibilities.
 [SQLAlchemy connection reset](https://docs.sqlalchemy.org/en/21/core/pooling.html#custom-reset-on-return-schemes),
 [PostgreSQL identities](https://www.postgresql.org/docs/17/functions-info.html),
 [Psycopg connection information](https://www.psycopg.org/psycopg3/docs/api/objects.html).
+
+
+### Local account implementation
+
+`src/auth/accounts.py` provides interactive operator provisioning; sessions and
+bounded HTTP authentication are in `src/auth/sessions.py` and `src/api/auth.py`.
+The explicit local profile uses the nonowner runtime pool and a separate bounded
+auth executor, with server token digests, idle/absolute expiry, revocation,
+CSRF/origin checks and secure-cookie configuration. Account metadata never grants
+document access. The benchmark profile remains explicit and cannot satisfy a
+local-profile query as fallback. See [account setup](WEB_APP.md#local-account-api).
+
+These changes require no new migration or DOC schema dependency. Authenticated
+queries remain deny-all until ACL and application/store integration pass their
+own gates. This is actual local login, not enterprise SSO or completed user UI.
