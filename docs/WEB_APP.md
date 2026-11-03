@@ -189,3 +189,52 @@ Docker operation is not yet verified; use native startup if memory is limited.
 
 See [System](SYSTEM.md) for architecture and limits, and
 [Evaluation](EVALUATION.md) for tests and known quality limitations.
+
+## Database foundation
+
+The optional PostgreSQL service provides schema and connection infrastructure.
+The current question API still uses its benchmark identity; real sign-in,
+permission-policy resolution, corpus import, and application database wiring are
+later integration work.
+
+Set three different local secrets in `.env`: `RAG_DB_BOOTSTRAP_PASSWORD`,
+`RAG_DB_MIGRATOR_PASSWORD`, and `RAG_DB_RUNTIME_PASSWORD`. Leave them out of Git.
+Then initialize a **new, dedicated** database volume and run the migration job:
+
+```sh
+docker compose --profile database --profile migrations build migrate
+docker compose --profile database --profile migrations run --rm migrate
+```
+
+The database has no published host port. It persists in `postgres-data`; the
+migration job waits for database health and exits after upgrading. Repeating the
+migration is safe. The init hook runs only on a new volume and rejects preexisting
+application roles or a non-pristine database; changing environment secrets does
+not rotate passwords in an existing volume. The bootstrap role creates separate
+non-superuser migration and runtime roles. Application login accounts are not
+seeded by this infrastructure setup.
+
+The runtime pool defaults to two connections with no overflow. Server-resolved
+request identity is transaction-local, and rollback plus `DISCARD ALL` clears
+session state before reuse. Runtime credentials are checked against both the
+actual login principal and active SQL identity; owner, superuser, replication,
+role-creation, database-creation, and RLS-bypass authority are rejected. Passwords
+in DSN query parameters are rejected because URL representations can expose them;
+structured `RAG_DB_HOST/PORT/NAME/USER/PASSWORD` settings support special characters.
+Migration credentials are used only by the separate migration job.
+
+The schema covers accounts/sessions, groups/grants, immutable catalog/text,
+tickets, runs/steps, and aggregate provenance. Protected text, ticket, run, and
+aggregate tables start with RLS enabled and no allow policies. Published snapshot
+content cannot change; ready state requires a complete catalog and canonical
+bodies. Policy/session counters cannot decrease, and saved run bindings cannot
+be reassigned. Actual account and permission adapters must pass their later gates
+before authenticated queries are enabled.
+
+Real PostgreSQL tests use explicitly configured `RAG_TEST_ADMIN_URL`,
+`RAG_TEST_MIGRATION_URL`, and `RAG_TEST_RUNTIME_URL` on an isolated disposable
+server with a `rag_test_*` database. They skip when those settings are absent and
+refuse ordinary database names. CI starts its own loopback-only server. The
+snapshot-restore check additionally uses `RAG_TEST_PG_CONTAINER`, labeled
+`rag.task=DB-01`; its dump/restore commands run inside that disposable container.
+These tiny fixtures do not establish full-corpus import or recovery performance.

@@ -44,6 +44,10 @@ Answer quality of the web configuration (hybrid + Claude) and full-corpus Docker
 validation remain unfinished. Known issues are described in [Setup](docs/WEB_APP.md),
 [System](docs/SYSTEM.md) and the [system card](docs/system_card.md).
 
+An optional [PostgreSQL foundation](docs/WEB_APP.md#database-foundation) now
+provides migrations, constrained storage, and unprivileged connections. Real
+account login and permission-aware application integration remain pending.
+
 The corpus and indexes are downloaded from the `files_web_app` folder of the
 [team Google Drive folder](https://drive.google.com/drive/folders/1ltfTpNLGdl_S9dBnozACJj3Eo1_Cc8i7?usp=sharing).
 Never commit `.env` or API keys.
