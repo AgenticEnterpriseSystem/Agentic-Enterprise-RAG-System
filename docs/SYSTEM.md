@@ -333,3 +333,17 @@ binary data is validated and capped at1MiB. See [import setup](WEB_APP.md#canoni
 for batch limits, rare binary physical reads and restart/verification commands.
 Default-deny RLS still applies. This ticket does not add login or activate the new
 store-backed web runtime.
+
+### Local account implementation
+
+`src/auth/accounts.py` provides interactive operator provisioning; sessions and
+bounded HTTP authentication are in `src/auth/sessions.py` and `src/api/auth.py`.
+The explicit local profile uses the nonowner runtime pool and a separate bounded
+auth executor, with server token digests, idle/absolute expiry, revocation,
+CSRF/origin checks and secure-cookie configuration. Account metadata never grants
+document access. The benchmark profile remains explicit and cannot satisfy a
+local-profile query as fallback. See [account setup](WEB_APP.md#local-account-api).
+
+These changes require no new migration or DOC schema dependency. Authenticated
+queries remain deny-all until ACL and application/store integration pass their
+own gates. This is actual local login, not enterprise SSO or completed user UI.

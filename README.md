@@ -145,3 +145,7 @@ Team: Hira Mian, Jane Choi, Alexander Xykis. [MIT License](LICENSE).
 The optional PostgreSQL import and exact Unicode/null-preserving document store
 are documented in [setup](docs/WEB_APP.md#canonical-document-import). The web
 runtime is connected in the later integration work.
+
+The explicit local-account profile and interactive provisioning commands are in
+[setup](docs/WEB_APP.md#local-account-api). Query access stays denied until the
+permission and application integration gates pass.

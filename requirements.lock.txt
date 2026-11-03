@@ -86,3 +86,9 @@ alembic==1.20.1
 psycopg==3.3.7
 psycopg-binary==3.3.7
 Mako==1.4.3
+
+# Local account password hashing (AUTH-01).
+argon2-cffi==25.1.0
+argon2-cffi-bindings==26.1.0
+cffi==2.1.1
+pycparser==3.12
