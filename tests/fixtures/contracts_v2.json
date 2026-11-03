@@ -1,0 +1,58 @@
+{
+  "contract_version": "2",
+  "snapshot": {
+    "snapshot_id": "synthetic-v2",
+    "corpus_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "catalog_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "document_count": 2
+  },
+  "answer": {
+    "status": "answered",
+    "text": "The permitted policy says access is reviewed. No accessible open tickets match.",
+    "citation_ids": ["policy:3:9", "aggregate:empty"]
+  },
+  "sources": [
+    {
+      "kind": "passage",
+      "snapshot_id": "synthetic-v2",
+      "revision_id": "policy-revision-1",
+      "citation_id": "policy:3:9",
+      "chunk": {
+        "chunk_id": "policy:3:9",
+        "doc_id": "policy",
+        "source_type": "confluence",
+        "metadata_origin": "synthetic",
+        "text": "Review",
+        "start_char": 3,
+        "end_char": 9
+      },
+      "score": 1.0,
+      "retrieval_method": "bm25"
+    },
+    {
+      "kind": "aggregate",
+      "citation_id": "aggregate:empty",
+      "artifact_id": "empty-result",
+      "scope": {
+        "scope_id": "intern-policy-1",
+        "user_id": "intern",
+        "snapshot": {
+          "snapshot_id": "synthetic-v2",
+          "corpus_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "catalog_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "document_count": 2
+        },
+        "policy_revision": 1,
+        "session_version": 1
+      },
+      "template_id": "tickets.count",
+      "template_version": "1",
+      "filters": [{"field": "status", "value": "open"}],
+      "count": 0,
+      "lineage_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "coverage": "synthetic_fixture",
+      "created_at": "2026-11-02T12:00:00Z"
+    }
+  ],
+  "trace": {"run_id": "v2-fixture", "stop_reason": "sufficient"}
+}

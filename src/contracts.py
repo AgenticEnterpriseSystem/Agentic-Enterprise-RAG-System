@@ -1,4 +1,8 @@
-"""Version 1 boundary schemas; authorization must also be enforced by adapters."""
+"""V1 runtime schemas; versioned V2 schemas live in ``src.contracts_v2``.
+
+Authorization must also be enforced by adapters. V2 is opt-in until APP/WIRE-01;
+adding its contracts must not silently change the running V1 API.
+"""
 
 from typing import Annotated, Literal, Protocol
 
