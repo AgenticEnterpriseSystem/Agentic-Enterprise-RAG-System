@@ -490,7 +490,7 @@ class AuthenticatedRuntime:
             if not callable(getattr(router, 'export_attestation', None)):
                 raise RuntimeConfigurationError('A fixture router must explicitly attest its current behavior.')
         self._router_profile()
-        self.jira_tool = JiraTool(database, self.snapshot)
+        self.jira_tool = JiraTool(database, self.snapshot, catalog=self._catalog)
         self.runs = RunRepository(database, resolver)
         sources = getattr(retriever, 'source_types', ())
         sources = sources() if callable(sources) else sources

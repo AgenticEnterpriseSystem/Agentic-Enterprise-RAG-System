@@ -13,6 +13,7 @@ import json
 from uuid import uuid4
 
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import ARRAY
 from pydantic import ValidationError
 
 from src.access.contracts import (
@@ -26,6 +27,7 @@ from src.contracts import (
 from src.data.structured import FIELDS, canonical
 from src.db import schema
 from src.db.runtime import Database, DatabaseRoleError
+from src.storage.fingerprints import ValidatedCatalog
 
 TEMPLATE_ID = "jira-canonical-record-count"
 TEMPLATE_VERSION = "1"
@@ -36,11 +38,19 @@ _FEED_FIELDS = ("feed_id", "snapshot_id", "source_type", "coverage", "state", "e
 
 
 class JiraTool:
-    def __init__(self, database: Database, snapshot: SnapshotRef):
+    def __init__(self, database: Database, snapshot: SnapshotRef, *, catalog: ValidatedCatalog | None = None):
         if not isinstance(database, Database) or not isinstance(snapshot, SnapshotRef):
             raise TypeError("Jira tools require the runtime Database and canonical snapshot")
         self.database = database
         self.snapshot = SnapshotRef.model_validate(snapshot.model_dump(warnings=False))
+        self._catalog = None
+        self._jira_doc_ids = ()
+        if catalog is not None:
+            self._catalog = ValidatedCatalog.require(catalog, self.snapshot, issuer=database)
+            # Reuse frozen ID references. No fields, bodies, permissions or
+            # second full catalogue are materialized for this optimization.
+            self._jira_doc_ids = tuple(doc_id for doc_id, source in
+                zip(self._catalog.doc_ids, self._catalog.sources) if source == 'jira')
 
     def _current(self, context, guard):
         if not isinstance(context, RequestContext):
@@ -63,6 +73,32 @@ class JiraTool:
             raise ValueError("Jira lookup requires one canonical document ID or native key")
         return request
 
+    def _scope_predicate(self, context, guard):
+        """Only narrow the SQL relation; live RLS remains authoritative.
+
+        The optional issued catalogue supplies indexable native document IDs,
+        not permission. Every operation derives its subset from the current
+        bound scope, under guards before and after the mask computation.
+        """
+        self._current(context, guard)
+        if self._catalog is None:
+            return None
+        ValidatedCatalog.require(self._catalog, self.snapshot, issuer=self.database)
+        try:
+            mask = tuple(context.scope.mask_for(self.snapshot, self._jira_doc_ids))
+        except (ValueError, TypeError):
+            raise EvidenceValidationError('Native scope requires one boolean per canonical Jira document') from None
+        if len(mask) != len(self._jira_doc_ids) or any(type(value) is not bool for value in mask):
+            raise EvidenceValidationError('Native scope requires one boolean per canonical Jira document')
+        allowed = tuple(doc_id for doc_id, permitted in zip(self._jira_doc_ids, mask) if permitted)
+        self._current(context, guard)
+        if not allowed:
+            return sa.false()
+        # One bound array avoids a SQL-text/parameter explosion; built-in text
+        # equality is indexable before the unchanged document RLS function.
+        return schema.tickets.c.doc_id == sa.any_(sa.bindparam(
+            'authorized_jira_doc_ids', value=allowed, type_=ARRAY(sa.Text())))
+
     def _feed(self, connection):
         table = schema.ticket_feeds
         row = connection.execute(sa.select(*(table.c[name] for name in _FEED_FIELDS)).where(
@@ -74,23 +110,26 @@ class JiraTool:
         return row
 
     @staticmethod
-    def _base(feed):
+    def _base(feed, scope_predicate=None):
         table = schema.tickets
         return (table.c.snapshot_id == feed["snapshot_id"], table.c.feed_id == feed["feed_id"],
-                table.c.coverage == feed["coverage"])
+                table.c.coverage == feed["coverage"]) + (() if scope_predicate is None else (scope_predicate,))
 
-    def _predicates(self, feed, request):
-        return self._base(feed) + tuple(schema.tickets.c[key] == value for key, value in sorted(request.filters.items()))
+    def _predicates(self, feed, request, scope_predicate=None):
+        return self._base(feed, scope_predicate) + tuple(
+            schema.tickets.c[key] == value for key, value in sorted(request.filters.items()))
 
-    def _covered(self, connection, feed, request):
+    def _covered(self, connection, feed, request, scope_predicate=None):
         # Coverage is checked BEFORE filters and only over visible records. A
         # missing hidden field neither leaks metadata nor invalidates a complete
         # authorized relation; NULL must never silently become a zero match.
         fields = sorted(set(request.filters) & FIELDS.keys())
         if not fields:
             return True
-        columns = [sa.func.count().filter(schema.tickets.c[name].is_(None)) for name in fields]
-        return not any(connection.execute(sa.select(*columns).where(*self._base(feed))).one())
+        missing = sa.select(sa.literal(1)).select_from(schema.tickets).where(
+            *self._base(feed, scope_predicate),
+            sa.or_(*(schema.tickets.c[name].is_(None) for name in fields)))
+        return not connection.execute(sa.select(sa.exists(missing))).scalar_one()
 
     @staticmethod
     def _unavailable():
@@ -110,15 +149,16 @@ class JiraTool:
     def execute(self, request: ToolRequest, *, context: RequestContext, guard, run_id=None) -> ToolResult:
         self._current(context, guard)
         request = self._request(request)
+        scope_predicate = self._scope_predicate(context, guard)
         try:
             with self.database.transaction(context) as connection:
                 feed = self._feed(connection)
-                if feed is None or not self._covered(connection, feed, request):
+                if feed is None or not self._covered(connection, feed, request, scope_predicate):
                     result = self._unavailable()
                 elif request.operation == "count":
-                    result = self._count(connection, context, request, feed, run_id)
+                    result = self._count(connection, context, request, feed, run_id, scope_predicate)
                 else:
-                    rows = connection.execute(sa.select(schema.tickets).where(*self._predicates(feed, request))
+                    rows = connection.execute(sa.select(schema.tickets).where(*self._predicates(feed, request, scope_predicate))
                         .order_by(schema.tickets.c.ticket_id).limit(request.limit + 1)).mappings().all()
                     result = ToolResult(records=tuple(self._record(context, row, feed) for row in rows[:request.limit]),
                         coverage=feed["coverage"], truncated=len(rows) > request.limit,
@@ -147,12 +187,13 @@ class JiraTool:
         ids = [value.record_id for value in checked]
         if len(ids) != len(set(ids)) or any(value.scope != context.binding for value in checked):
             raise AccessDenied("Native record is unavailable in this scope")
+        scope_predicate = self._scope_predicate(context, guard)
         try:
             with self.database.transaction(context) as connection:
                 feed = self._feed(connection)
                 if feed is None:
                     raise AccessDenied("Verified Jira feed is unavailable")
-                rows = connection.execute(sa.select(schema.tickets).where(*self._base(feed),
+                rows = connection.execute(sa.select(schema.tickets).where(*self._base(feed, scope_predicate),
                     schema.tickets.c.ticket_id.in_(ids))).mappings().all()
                 actual = {row["ticket_id"]: self._record(context, row, feed) for row in rows}
         except (sa.exc.SQLAlchemyError, DatabaseRoleError):
@@ -161,8 +202,8 @@ class JiraTool:
         if any(actual.get(value.record_id) != value for value in checked):
             raise AccessDenied("Native record differs from its authoritative source")
 
-    def _count(self, connection, context, request, feed, run_id):
-        predicates = self._predicates(feed, request)
+    def _count(self, connection, context, request, feed, run_id, scope_predicate=None):
+        predicates = self._predicates(feed, request, scope_predicate)
         table = schema.tickets
         count = connection.execute(sa.select(sa.func.count()).select_from(table).where(*predicates)).scalar_one()
         filters = tuple(BoundFilter(field=key, value=value) for key, value in sorted(request.filters.items()))
