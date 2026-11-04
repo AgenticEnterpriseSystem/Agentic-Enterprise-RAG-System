@@ -55,8 +55,10 @@ def runtime(data, router, *, provider=True, top_k=5, attest_router=True):
     resolver = PolicyResolver(data.database, data.source.snapshot, catalog=proof)
     retriever = StoreBM25Retriever(MetadataIndex(data.source.snapshot, proof), store, catalog=proof)
     configured = RecordingProvider() if provider is True else provider
+    # Functional PG checks cross the Mac/Docker TCP boundary; serving latency
+    # is measured separately inside Docker. Use the normal request deadline.
     settings = WebSettings(mode='fixture' if configured is not None else 'retrieval',
-        auth_mode='local', demo_access=False, max_seconds=20, max_rounds=2, top_k=top_k)
+        auth_mode='local', demo_access=False, max_seconds=120, max_rounds=2, top_k=top_k)
     actual = AuthenticatedRuntime(settings, retriever, resolver, database=data.database,
         provider=configured, router=router,
         provider_identity=ModelProvenance(provider='fixture', model_id='fixture-generator')
@@ -92,7 +94,9 @@ def test_lookup_uses_native_fields_and_provenance_without_fabricating_passages(r
 def test_grounded_counts_include_zero_and_count_source_records_not_unique_keys(ready, filters, count):
     actual, provider, _resolver = runtime(ready, ScriptedRouter(filters=filters))
     response = actual.query(request(), ready.identities['intern'])
-    assert response.answer.status == 'answered' and response.trace.stop_reason == 'single_pass'
+    assert response.answer.status == 'answered' and response.trace.stop_reason == 'single_pass', (
+        response.answer.status, response.trace.stop_reason, response.trace.total_latency_ms,
+        tuple((step.tool, step.elapsed_ms) for step in response.trace.steps))
     assert response.contract_version == '2'
     assert len(response.sources) == 1 and isinstance(response.sources[0], AggregateEvidence)
     aggregate = response.sources[0]
