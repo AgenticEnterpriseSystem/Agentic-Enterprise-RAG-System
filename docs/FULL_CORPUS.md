@@ -175,12 +175,16 @@ Results: [`evaluation/results/dense_base_titled_full_development/`](../evaluatio
 **Result: BM25+ combined with BGE-base beats BM25+ alone, confirmed on held-out
 questions; the cross-encoder rerankers made results worse.**
 
-`python -m src.evaluation.run_hybrid` runs the project's `HybridRetriever` over the
+The historical `python -m src.evaluation.run_hybrid` run used `HybridRetriever` over the
 BM25+ and BGE-base (titled) indexes. Each question is searched once per method (top 50
 documents out of all 511,958), and every variant reuses those results. It ran with
 [`notebooks/hybrid_colab.ipynb`](../notebooks/hybrid_colab.ipynb) on a Colab T4 with
 High-RAM, from commit `4856894`, with no errors. Both searches together took about
-0.9 seconds per question.
+0.9 seconds per question. Current entry points require an authenticated principal
+and ready PostgreSQL snapshot and use the accepted bounded store-backed factory.
+See [scoped evaluation commands](EVALUATION.md#match-the-web-retriever) for their
+input/output and metric-denominator rules. This loader change does not replace
+or relabel the historical measurements below.
 
 **Development** (282 scored questions); changes are in Recall@10:
 
@@ -704,5 +708,7 @@ boundaries. The final comparison manifest SHA256 is
 `0efa0a21215a66cab53e102e48dbbe8ed237c1650c95688f8b5f9ee77865a480`.
 
 This accepts the retrieval component and its measured envelope. Authenticated
-HTTP integration, account UI, packaged full-application Docker delivery and
-recovery remain later application/delivery gates.
+HTTP integration was subsequently accepted at A6 `766e723`; account UI, scoped
+evaluation-runner acceptance, packaged full-application Docker delivery and
+remaining recovery checks have separate gates. The earlier table is not a new
+full-application measurement.
