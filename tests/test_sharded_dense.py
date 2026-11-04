@@ -329,7 +329,8 @@ def test_catalog_is_single_pass_and_snapshot_fingerprint_and_order_are_verified(
             ShardedDense.load(data.directory, snapshot=data.snapshot, catalog=bad_catalog, block_rows=2)
 
 
-def test_normalized_copies_are_bounded_private_and_mmaps_do_not_escape_operations(tmp_path, monkeypatch):
+@pytest.mark.parametrize("file_cache_policy", ["discard", "retain"])
+def test_normalized_copies_are_bounded_private_and_mmaps_do_not_escape_operations(tmp_path, monkeypatch, file_cache_policy):
     import src.retrieval.sharded_dense as module
     data = artifact(tmp_path)
     real_load, real_normalize = module.np.load, module._normalized_block
@@ -356,7 +357,7 @@ def test_normalized_copies_are_bounded_private_and_mmaps_do_not_escape_operation
 
     monkeypatch.setattr(module.np, "load", watched_load)
     monkeypatch.setattr(module, "_normalized_block", watched_normalize)
-    backend = load(data)
+    backend = load(data, file_cache_policy=file_cache_policy)
     assert all(item.closed for item in mappings)
     backend.rank_vector([1, 0, 0], 4)
     backend.candidates_vector([1, 0, 0], 4, scope=scope(data, {"alpha"}))
@@ -365,10 +366,11 @@ def test_normalized_copies_are_bounded_private_and_mmaps_do_not_escape_operation
     assert all(block() is None for block in blocks)
 
 
-def test_normalizer_failure_closes_mmaps_while_traceback_is_still_retained(tmp_path, monkeypatch):
+@pytest.mark.parametrize("file_cache_policy", ["discard", "retain"])
+def test_normalizer_failure_closes_mmaps_while_traceback_is_still_retained(tmp_path, monkeypatch, file_cache_policy):
     import src.retrieval.sharded_dense as module
     data = artifact(tmp_path)
-    backend = load(data)
+    backend = load(data, file_cache_policy=file_cache_policy)
     real_load = module.np.load
     mappings = []
 
@@ -385,6 +387,106 @@ def test_normalizer_failure_closes_mmaps_while_traceback_is_still_retained(tmp_p
     with pytest.raises(RuntimeError, match="injected normalization failure") as retained:
         backend.rank_vector([1, 0, 0], 4)
     assert retained.value.__traceback__ is not None
+    assert mappings and all(mapping.closed for mapping in mappings)
+
+
+@pytest.mark.parametrize("bad", [None, True, False, 0, "", "Retain", "retain ", "auto", [], {}])
+def test_file_cache_policy_is_explicit_and_never_coerces_invalid_values(tmp_path, bad):
+    data = artifact(tmp_path)
+    with pytest.raises(ValueError):
+        load(data, file_cache_policy=bad)
+
+
+def test_retaining_file_cache_changes_only_posix_hints_not_page_release_or_ranked_results(tmp_path, monkeypatch):
+    import src.retrieval.sharded_dense as module
+    data = artifact(tmp_path)
+    native_load, native_release = module.np.load, module._release_pages
+    mappings, hints, released = [], {"discard": [], "retain": []}, {"discard": [], "retain": []}
+    mode = "discard"
+
+    def watch_load(*args, **kwargs):
+        result = native_load(*args, **kwargs)
+        mappings.append(result._mmap)
+        return result
+
+    def watch_release(stored, start, stop):
+        assert not stored._mmap.closed
+        released[mode].append((Path(stored.filename).name, start, stop))
+        return native_release(stored, start, stop)
+
+    def watch_hint(descriptor, offset, length, advice):
+        assert os.fstat(descriptor).st_size > 0
+        hints[mode].append((offset, length, advice))
+
+    monkeypatch.setattr(module.np, "load", watch_load)
+    monkeypatch.setattr(module, "_release_pages", watch_release)
+    monkeypatch.setattr(module.os, "POSIX_FADV_DONTNEED", 4, raising=False)
+    monkeypatch.setattr(module.os, "posix_fadvise", watch_hint, raising=False)
+    results = {}
+    metadata = {}
+    for mode in ("discard", "retain"):
+        # Omission deliberately proves that the original default remains discard.
+        backend = load(data) if mode == "discard" else load(data, file_cache_policy="retain")
+        assert backend.file_cache_policy == mode
+        metadata[mode] = (backend.snapshot, backend.catalog, backend.doc_ids, backend.manifest,
+                          backend.scoring_provenance, backend.block_rows)
+        results[mode] = (backend.rank_vector([1, 0, 0], 4),
+            backend.candidates_vector([1, 0, 0], 4, scope=scope(data)),
+            backend.candidates_vector([1, 0, 0], 4, scope=scope(data, {"alpha"}),
+                filters=ReadFilters(source_types=("jira",), after=datetime(2026, 10, 1, tzinfo=timezone.utc))),
+            backend.candidates_vector([1, 0, 0], 4, scope=scope(data, ())))
+        assert all(mapping.closed for mapping in mappings)
+    assert metadata["discard"] == metadata["retain"]
+    assert results["discard"] == results["retain"]
+    assert hints["discard"] and any(offset == length == 0 for offset, length, _ in hints["discard"])
+    assert hints["retain"] == []
+    assert released["discard"] and released["discard"] == released["retain"]
+
+
+@pytest.mark.parametrize("file_cache_policy", ["discard", "retain"])
+@pytest.mark.parametrize("ending", ["success", "early_close", "error"])
+def test_cache_policy_never_retains_owned_descriptors_or_mappings(tmp_path, monkeypatch, file_cache_policy, ending):
+    import src.retrieval.sharded_dense as module
+    data = artifact(tmp_path)
+    backend = load(data, file_cache_policy=file_cache_policy)
+    native_open, native_close, native_load = module.os.open, module.os.close, module.np.load
+    descriptors, active, mappings = [], set(), []
+
+    def watch_open(path, *args, **kwargs):
+        descriptor = native_open(path, *args, **kwargs)
+        if str(path).endswith(".npy"):
+            descriptors.append(descriptor)
+            active.add(descriptor)
+        return descriptor
+
+    def watch_close(descriptor):
+        result = native_close(descriptor)
+        active.discard(descriptor)
+        return result
+
+    def watch_load(*args, **kwargs):
+        result = native_load(*args, **kwargs)
+        mappings.append(result._mmap)
+        return result
+
+    monkeypatch.setattr(module.os, "open", watch_open)
+    monkeypatch.setattr(module.os, "close", watch_close)
+    monkeypatch.setattr(module.np, "load", watch_load)
+    if ending == "early_close":
+        stream = backend._blocks(backend._shards[0])
+        retained = next(stream)
+        stream.close()
+        assert retained[0]._mmap.closed
+    elif ending == "error":
+        def fail(*_args):
+            raise RuntimeError("retained normalization traceback")
+        monkeypatch.setattr(module, "_normalized_block", fail)
+        with pytest.raises(RuntimeError, match="retained normalization") as retained_error:
+            backend.rank_vector([1, 0, 0], 4)
+        assert retained_error.value.__traceback__ is not None
+    else:
+        backend.rank_vector([1, 0, 0], 4)
+    assert descriptors and not active
     assert mappings and all(mapping.closed for mapping in mappings)
 
 

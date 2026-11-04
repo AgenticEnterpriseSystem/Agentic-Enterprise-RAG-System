@@ -6,7 +6,9 @@ body table is constructed. The retained catalogue and reduction arrays are
 O(documents); Arrow batches, vector copies and sorting scratch are O(block_rows).
 An mmap spans one shard virtually. Page/cache release is best-effort advice,
 not a process/cgroup memory guarantee; full-corpus fit and latency need separate
-measurement. This module resolves no identity or fresh authorization policy.
+measurement. The default discards consumed file-cache pages; opt-in retain
+keeps the OS file cache eligible for reuse while still releasing mmap pages.
+This module resolves no identity or fresh authorization policy.
 """
 
 from __future__ import annotations
@@ -145,8 +147,11 @@ class ShardedDense:
 
     @classmethod
     def load(cls, directory: str | Path, *, snapshot: SnapshotRef,
-             catalog: Iterable[CatalogEntry], block_rows: int = 8192) -> ShardedDense:
+             catalog: Iterable[CatalogEntry], block_rows: int = 8192,
+             file_cache_policy: str = "discard") -> ShardedDense:
         _positive(block_rows, "block_rows")
+        if not isinstance(file_cache_policy, str) or file_cache_policy not in {"discard", "retain"}:
+            raise ValueError("Dense file cache policy must be discard or retain")
         if not isinstance(snapshot, SnapshotRef):
             raise ValueError("Dense loading requires a snapshot")
         snapshot = SnapshotRef.model_validate(snapshot.model_dump(warnings=False))
@@ -204,6 +209,7 @@ class ShardedDense:
         result._lengths = np.fromiter((entry.text_length for entry in entries), dtype=np.int64,
                                      count=len(entries))
         result._block_rows = block_rows
+        result._file_cache_policy = file_cache_policy
         result._manifest_signature, result._ids_signature = manifest_signature, ids_signature
         result._provenance = "sharded-dense-v1:" + hashlib.sha256(manifest_bytes).hexdigest()
         shards = tuple(result._inspect_shard(name) for name in names)
@@ -247,6 +253,10 @@ class ShardedDense:
     @property
     def block_rows(self) -> int:
         return self._block_rows
+
+    @property
+    def file_cache_policy(self) -> str:
+        return self._file_cache_policy
 
     @property
     def scoring_provenance(self) -> str:
@@ -303,8 +313,9 @@ class ShardedDense:
                         yield stored, start, stop, docs, starts, ends
                     finally:
                         _release_pages(stored, start, stop)
-                        _file_cache_hint(descriptor, stored.offset + start * stored.strides[0],
-                                         (stop - start) * stored.strides[0])
+                        if self.file_cache_policy == "discard":
+                            _file_cache_hint(descriptor, stored.offset + start * stored.strides[0],
+                                             (stop - start) * stored.strides[0])
                     start = stop
                 if start != shard.rows:
                     raise ValueError("Dense metadata row count differs")
@@ -313,7 +324,8 @@ class ShardedDense:
                 if parquet is not None:
                     parquet.close()
             finally:
-                _file_cache_hint(descriptor)
+                if self.file_cache_policy == "discard":
+                    _file_cache_hint(descriptor)
                 os.close(descriptor)
 
     def _vector(self, vector):
