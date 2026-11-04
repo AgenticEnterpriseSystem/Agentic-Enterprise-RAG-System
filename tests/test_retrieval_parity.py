@@ -661,7 +661,8 @@ def cli_artifacts(tmp_path):
     for scope, path in candidates.items():
         candidate_rows[scope] = [{**row, "request_index": index}
                                  for index, row in enumerate(candidate_rows[scope])]
-        retained_artifact(path, {**base_manifest, "stage": "candidate", "scope": scope, "startup_seconds": 1.},
+        retained_artifact(path, {**base_manifest, "stage": "candidate", "scope": scope,
+                          "startup_seconds": 1., "block_rows": 8192},
                           candidate_rows[scope])
         resource = tmp_path / (scope + "-resource.json")
         write_json(resource, measured_resources(scope, path))
@@ -975,6 +976,41 @@ def test_cli_rejects_mixed_or_invalid_file_cache_policy_without_relaxing_gates(t
     # when every separately measured scope process explicitly uses that profile.
     refresh_candidate(data, "full", manifest_changes={"file_cache_policy": policy})
     output = tmp_path / "incoherent-cache-policy"
+    with pytest.raises(SystemExit) as error:
+        compare_cli(data, output)
+    assert error.value.code == 2 and not (output / "manifest.json").exists()
+
+
+@pytest.mark.parametrize("block_rows", [1, 2048, 8192, 32768])
+def test_cli_comparison_records_one_positive_block_size_for_all_scope_processes(tmp_path, block_rows):
+    data = cli_artifacts(tmp_path)
+    for scope in data.candidates:
+        refresh_candidate(data, scope, manifest_changes={"block_rows": block_rows})
+    output = tmp_path / "coherent-block-size"
+    assert compare_cli(data, output) == 0
+    manifest, _ = load_artifact(output)
+    assert manifest["block_rows"] == block_rows and manifest["passed"] is True
+
+
+@pytest.mark.parametrize("block_rows", [4096, None, True, False, 0, -1, 1.0, "8192", [], {}])
+def test_cli_rejects_mixed_or_invalid_block_size_without_relaxing_gates(tmp_path, block_rows):
+    data = cli_artifacts(tmp_path)
+    refresh_candidate(data, "full", manifest_changes={"block_rows": block_rows})
+    output = tmp_path / "incoherent-block-size"
+    with pytest.raises(SystemExit) as error:
+        compare_cli(data, output)
+    assert error.value.code == 2 and not (output / "manifest.json").exists()
+
+
+def test_cli_rejects_missing_candidate_block_size_even_with_resealed_resource_binding(tmp_path):
+    data = cli_artifacts(tmp_path)
+    path = data.candidates["full"]
+    manifest, rows = load_artifact(path)
+    manifest.pop("block_rows")
+    retained_artifact(path, manifest, rows)
+    resource = next(value for value in data.resources if json.loads(value.read_text())["scope"] == "full")
+    write_json(resource, measured_resources("full", path))
+    output = tmp_path / "missing-block-size"
     with pytest.raises(SystemExit) as error:
         compare_cli(data, output)
     assert error.value.code == 2 and not (output / "manifest.json").exists()

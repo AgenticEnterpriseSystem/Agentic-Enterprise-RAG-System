@@ -925,7 +925,7 @@ def _compare(args):
         raise ParityError("Canonical source corpus differs from the frozen snapshot")
     baseline = {(row["question_id"], row["case"]): row for row in expected}
     comparisons, observed, latencies, passed, candidate_digests = [], set(), [], True, {}
-    cache_policies = set()
+    cache_policies, block_sizes = set(), set()
     source_catalog, source_passages = {}, {}
     def collect_source(record):
         for raw in record["catalog"]:
@@ -970,6 +970,11 @@ def _compare(args):
         cache_policies.add(cache_policy)
         if len(cache_policies) != 1:
             raise ParityError("Candidate file cache policies differ across scope processes")
+        block_rows = manifest.get("block_rows")
+        _positive(block_rows, "Candidate block_rows")
+        block_sizes.add(block_rows)
+        if len(block_sizes) != 1:
+            raise ParityError("Candidate block_rows differ across scope processes")
         candidate_digests[manifest["scope"]] = file_sha256(path / "manifest.json")
         provenance(manifest)
         if manifest["packages"] != reference["packages"]:
@@ -1037,6 +1042,7 @@ def _compare(args):
     passed &= complete and resource_verified
     _write_artifact(output, {"stage": "compare", "passed": bool(passed), "matrix_complete": complete,
         "file_cache_policy": next(iter(cache_policies), None),
+        "block_rows": next(iter(block_sizes), None),
         "rank_policy": "exact score maximum; lexical document ID; earliest exact-tied span; no near-tie buckets",
         "latency_gates": latencies, "resource_gates": resources, "resources_verified": resource_verified,
         "source_hashes": _code(), "source_validation": source_validation, "shared_manifest_sha256": shared_sha}, comparisons)

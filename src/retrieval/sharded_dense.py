@@ -125,6 +125,17 @@ def _normalized_block(stored, start, stop):
     return vectors
 
 
+def _top_candidates(best, top_k):
+    """Prune below the exact kth score, retaining every cutoff tie for the heap."""
+    positions = np.flatnonzero(np.isfinite(best))
+    if len(positions) > top_k:
+        scores = best[positions]
+        offset = len(scores) - top_k
+        cutoff = np.partition(scores, offset)[offset]
+        positions = positions[scores >= cutoff]
+    return positions
+
+
 @dataclass(frozen=True)
 class _Shard:
     name: str
@@ -381,7 +392,7 @@ class ShardedDense:
                     docs, scores, starts, ends = docs[improve], scores[improve], starts[improve], ends[improve]
                     best[docs], starts_best[docs], ends_best[docs] = scores, starts, ends
         self._check_identity()
-        positions = heapq.nsmallest(top_k, (index for index, score in enumerate(best) if score != -np.inf),
+        positions = heapq.nsmallest(top_k, _top_candidates(best, top_k),
             key=lambda index: (-float(best[index]), self.doc_ids[index], int(starts_best[index]), int(ends_best[index])))
         return [(index, float(best[index]), int(starts_best[index]), int(ends_best[index])) for index in positions]
 

@@ -6,6 +6,7 @@ without loading a model, canonical corpus bodies, or any full-size artifact.
 
 from datetime import datetime, timezone
 import hashlib
+import heapq
 import json
 import os
 from pathlib import Path
@@ -24,7 +25,7 @@ from src.access.contracts import LegacySetScope, StaleContext
 from src.contracts import ScopeBinding, SnapshotRef
 from src.storage.contracts import CatalogEntry, ReadFilters
 from src.storage.fingerprints import catalog_fingerprint
-from src.retrieval.sharded_dense import ShardedDense
+from src.retrieval.sharded_dense import ShardedDense, _top_candidates
 
 
 def _json(path, value):
@@ -128,6 +129,76 @@ def test_best_passage_ties_and_document_ties_are_stable_and_candidates_have_no_b
     exposed = backend.manifest
     exposed["model"]["normalize"] = False
     assert backend.manifest["model"]["normalize"] is True
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_exact_kth_cutoff_pruning_matches_full_python_oracle_across_random_scores_and_scopes(seed):
+    rng = np.random.default_rng(seed)
+    for count in (0, 1, 2, 17, 257, 2049):
+        doc_ids = tuple(f"doc-{value:06d}" for value in rng.permutation(count))
+        starts = rng.integers(0, 100, size=count, dtype=np.int64)
+        ends = starts + rng.integers(1, 100, size=count, dtype=np.int64)
+        for distribution in ("continuous", "ties", "negative", "zero", "denied"):
+            scores = rng.normal(size=count).astype(np.float32)
+            if distribution == "ties":
+                scores = rng.integers(-3, 4, size=count).astype(np.float32)
+            elif distribution == "negative":
+                scores = -np.abs(scores) - np.float32(.25)
+            elif distribution == "zero":
+                scores.fill(0)
+            if distribution == "denied":
+                scores.fill(-np.inf)
+            else:
+                scores[rng.random(count) < .3] = -np.inf
+            original = scores.copy()
+            permitted = [index for index, value in enumerate(scores) if np.isfinite(value)]
+            key = lambda index: (-float(scores[index]), doc_ids[index], int(starts[index]), int(ends[index]))
+            for top_k in sorted({1, 3, 50, max(1, count), count + 5}):
+                actual = _top_candidates(scores, top_k)
+                expected_top = sorted(permitted, key=key)[:top_k]
+                assert heapq.nsmallest(top_k, actual, key=key) == expected_top
+                if len(permitted) > top_k:
+                    cutoff = sorted((float(scores[index]) for index in permitted), reverse=True)[top_k - 1]
+                    assert actual.tolist() == [index for index in permitted if scores[index] >= cutoff]
+                else:
+                    assert actual.tolist() == permitted
+                np.testing.assert_array_equal(scores, original)
+
+
+def test_exact_cutoff_keeps_all_negative_ties_and_excludes_nonfinite_sentinels():
+    scores = np.array([-5, -3, -3, -3, -4, -np.inf, np.nan, np.inf], dtype=np.float32)
+    assert _top_candidates(scores, 2).tolist() == [1, 2, 3]
+    assert _top_candidates(np.zeros(20, dtype=np.float32), 1).tolist() == list(range(20))
+
+
+@pytest.mark.parametrize("query", [[1, 0, 0], [-1, 0, 0], [0, 0, 0]])
+@pytest.mark.parametrize("top_k", [1, 2, 3])
+def test_pruned_public_candidates_keep_exact_scope_order_and_winning_spans(tmp_path, query, top_k):
+    data = artifact(tmp_path)
+    backend = load(data)
+    for mask in ([True] * 4, [False, True, False, True], [False] * 4):
+        allowed = [doc_id for doc_id, permit in zip(data.doc_ids, mask) if permit]
+        expected = reference(data, query, top_k, mask)
+        actual = backend.candidates_vector(query, top_k, scope=scope(data, allowed))
+        assert [(item.doc_id, item.start_char, item.end_char) for item in actual] == [
+            (doc_id, start, end) for doc_id, _score, start, end in expected]
+        np.testing.assert_allclose([item.score for item in actual], [row[1] for row in expected], rtol=2e-6, atol=2e-6)
+
+
+def test_public_heap_receives_every_exact_cutoff_tie_and_no_lower_score(tmp_path, monkeypatch):
+    import src.retrieval.sharded_dense as module
+    data = artifact(tmp_path)
+    backend = load(data)
+    original = module.heapq.nsmallest
+    seen = []
+    def watch(top_k, iterable, *, key):
+        values = list(iterable)
+        seen.append(values)
+        return original(top_k, values, key=key)
+    monkeypatch.setattr(module.heapq, "nsmallest", watch)
+    hits = backend.candidates_vector([1, 0, 0], 1, scope=scope(data))
+    assert seen == [[0, 1, 3]]  # zeta/alpha/secret tie at1; middle is strictly lower.
+    assert [(item.doc_id, item.start_char, item.end_char) for item in hits] == [("alpha", 0, 8)]
 
 
 def test_authorization_and_source_dates_filter_before_emitting_ranked_candidates(tmp_path):
