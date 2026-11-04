@@ -95,8 +95,20 @@ class Evidence(Contract):
     retrieval_method: Literal["bm25", "dense", "hybrid", "structured"]
 
 
-def validate_evidence(user: UserContext, evidence: tuple[Evidence, ...]) -> None:
-    """Call before passing results to rerankers, critics, generators or clients."""
+def validate_evidence(user: UserContext, evidence: tuple["GroundedEvidence | Evidence", ...]) -> None:
+    """Validate legacy passages or require active authority for native evidence.
+
+    Native scope/provenance metadata is not an authorization credential. Its
+    compatibility path is available only to a sealed server user inside a live
+    dispatch context with the relevant authoritative validators.
+    """
+    if any(isinstance(item, (AggregateEvidence, StructuredRecord)) for item in evidence):
+        # The import is deliberately lazy: access contracts depend on the DTOs.
+        from src.access.contracts import validate_dispatch_evidence
+        validate_dispatch_evidence(user, evidence)
+        return
+    if any(not isinstance(item, Evidence) for item in evidence):
+        raise ValueError("Unsupported evidence type")
     if any(not user.permits(item.chunk.doc_id) for item in evidence):
         raise ValueError("Evidence outside authorized document scope")
     ids = [item.citation_id for item in evidence]
@@ -186,6 +198,7 @@ class Answer(Contract):
 
 
 CONTRACT_VERSION = "2"
+RECORD_CONTRACT_VERSION = "3"
 Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 Revision = Annotated[int, Field(strict=True, ge=0)]
 
@@ -247,71 +260,6 @@ class AggregateEvidence(Contract):
         return self
 
 
-GroundedEvidence = Annotated[
-    PassageEvidence | AggregateEvidence, Field(discriminator="kind")
-]
-
-
-class QueryResponse(Contract):
-    """Shared response; snapshot-bound evidence requires explicit provenance.
-
-    Model validation checks structure, not session authorization. Adapters must
-    run the access boundary before releasing snapshot-bound responses.
-    """
-
-    contract_version: Literal["2"] | None = Field(default=None, exclude_if=lambda value: value is None)
-    snapshot: SnapshotRef | None = Field(default=None, exclude_if=lambda value: value is None)
-    answer: Answer
-    sources: tuple[GroundedEvidence | Evidence, ...] = ()
-    trace: Trace
-
-    @model_validator(mode="after")
-    def cited_sources_exist(self):
-        ids = [item.citation_id for item in self.sources]
-        if len(ids) != len(set(ids)) or not set(self.answer.citation_ids) <= set(ids):
-            raise ValueError("Citations must resolve to unique supplied sources")
-        if self.snapshot is None:
-            if self.contract_version is not None or any(
-                isinstance(source, (PassageEvidence, AggregateEvidence)) for source in self.sources
-            ):
-                raise ValueError("Snapshot-bound evidence requires a response snapshot")
-            return self
-        object.__setattr__(self, "contract_version", CONTRACT_VERSION)
-        for source in self.sources:
-            if isinstance(source, PassageEvidence):
-                if source.snapshot_id != self.snapshot.snapshot_id:
-                    raise ValueError("Passage belongs to another snapshot")
-            elif isinstance(source, AggregateEvidence):
-                if source.scope.snapshot != self.snapshot:
-                    raise ValueError("Aggregate belongs to another snapshot")
-            else:
-                raise ValueError("Snapshot-bound responses require tagged evidence")
-        return self
-
-
-class GenerationRequest(Contract):
-    search_limitation: str | None = None
-    assessment: CriticDecision | None = None
-    question: Identifier
-    user: UserContext
-    evidence: tuple[Evidence, ...] = ()
-
-    @model_validator(mode="after")
-    def authorized(self):
-        validate_evidence(self.user, self.evidence)
-        return self
-
-
-class ToolRequest(Contract):
-    # Kept for the existing router/reference adapters. Store-backed tools require
-    # an explicit RequestContext and never treat this compatibility field as authority.
-    user: UserContext = UserContext()
-    source_type: Identifier
-    operation: Literal["lookup", "filter", "count"]
-    filters: dict[str, StrictStr | StrictInt | StrictBool] = Field(default_factory=dict)
-    limit: int = Field(default=10, strict=True, ge=1, le=100)
-
-
 class RecordSource(Contract):
     feed_id: Sha256
     repository: Identifier
@@ -339,9 +287,14 @@ class StructuredRecord(Contract):
     """Authorized native fields, not an invented canonical-text passage.
 
     Jira native keys are not unique in the pinned benchmark. record_id is the
-    canonical document UUID. WIRE-01 must explicitly consume this DTO before
-    native fields become generator/UI evidence; they are not PassageEvidence.
+    canonical document UUID. Native fields require authoritative validation;
+    their provenance metadata alone confers no access or factual authenticity.
     """
+    # Unchecked model_copy updates must be parsed before native identity
+    # validators access nested DTO attributes inside a parent union.
+    model_config = ConfigDict(revalidate_instances="always")
+
+    kind: Literal["record"] = "record"
     scope: ScopeBinding
     citation_id: Identifier
     record_id: Identifier
@@ -365,6 +318,87 @@ class StructuredRecord(Contract):
             if item.json_pointer != pointers[item.field] or ((getattr(self, item.field) is not None) != (item.state == "verified")):
                 raise ValueError("Native field value differs from its declared provenance")
         return self
+
+
+GroundedEvidence = Annotated[
+    PassageEvidence | AggregateEvidence | StructuredRecord, Field(discriminator="kind")
+]
+
+
+class QueryResponse(Contract):
+    """Shared response; snapshot-bound evidence requires explicit provenance.
+
+    Model validation checks structure, not session authorization. Adapters must
+    run the access boundary before releasing snapshot-bound responses.
+    Snapshot-bound passage/count responses default to version 2; native records
+    require version 3. Explicit version 3 is preserved even without records.
+    """
+
+    contract_version: Literal["2", "3"] | None = Field(default=None, exclude_if=lambda value: value is None)
+    snapshot: SnapshotRef | None = Field(default=None, exclude_if=lambda value: value is None)
+    answer: Answer
+    sources: tuple[GroundedEvidence | Evidence, ...] = ()
+    trace: Trace
+
+    @model_validator(mode="after")
+    def cited_sources_exist(self):
+        # Existing model instances may contain unchecked model_copy updates.
+        sources = tuple(type(source).model_validate(source.model_dump(warnings=False))
+            if isinstance(source, (PassageEvidence, AggregateEvidence, StructuredRecord)) else source
+            for source in self.sources)
+        object.__setattr__(self, "sources", sources)
+        ids = [item.citation_id for item in self.sources]
+        if len(ids) != len(set(ids)) or not set(self.answer.citation_ids) <= set(ids):
+            raise ValueError("Citations must resolve to unique supplied sources")
+        if self.snapshot is None:
+            if self.contract_version is not None or any(
+                isinstance(source, (PassageEvidence, AggregateEvidence, StructuredRecord)) for source in self.sources
+            ):
+                raise ValueError("Snapshot-bound evidence requires a response snapshot")
+            return self
+        has_records = any(isinstance(source, StructuredRecord) for source in self.sources)
+        if has_records and self.contract_version == CONTRACT_VERSION:
+            raise ValueError("Native record responses require contract version 3")
+        if self.contract_version is None:
+            object.__setattr__(self, "contract_version",
+                               RECORD_CONTRACT_VERSION if has_records else CONTRACT_VERSION)
+        native_scope = None
+        for source in self.sources:
+            if isinstance(source, PassageEvidence):
+                if source.snapshot_id != self.snapshot.snapshot_id:
+                    raise ValueError("Passage belongs to another snapshot")
+            elif isinstance(source, (AggregateEvidence, StructuredRecord)):
+                if source.scope.snapshot != self.snapshot:
+                    raise ValueError("Native evidence belongs to another snapshot")
+                if native_scope is not None and source.scope != native_scope:
+                    raise ValueError("Native evidence belongs to different permission scopes")
+                native_scope = source.scope
+            else:
+                raise ValueError("Snapshot-bound responses require tagged evidence")
+        return self
+
+
+class GenerationRequest(Contract):
+    search_limitation: str | None = None
+    assessment: CriticDecision | None = None
+    question: Identifier
+    user: UserContext
+    evidence: tuple[GroundedEvidence | Evidence, ...] = ()
+
+    @model_validator(mode="after")
+    def authorized(self):
+        validate_evidence(self.user, self.evidence)
+        return self
+
+
+class ToolRequest(Contract):
+    # Kept for the existing router/reference adapters. Store-backed tools require
+    # an explicit RequestContext and never treat this compatibility field as authority.
+    user: UserContext = UserContext()
+    source_type: Identifier
+    operation: Literal["lookup", "filter", "count"]
+    filters: dict[str, StrictStr | StrictInt | StrictBool] = Field(default_factory=dict)
+    limit: int = Field(default=10, strict=True, ge=1, le=100)
 
 
 class ToolResult(Contract):

@@ -8,13 +8,14 @@ trusted store; role labels and browser-supplied metadata never grant authority.
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Protocol, Sequence, runtime_checkable
+from typing import Callable, Protocol, Sequence, runtime_checkable
 import weakref
 
 from pydantic import AwareDatetime, PrivateAttr, model_validator
 
 from src.contracts import Contract, Identifier, UserContext
-from src.contracts import AggregateEvidence, PassageEvidence, Revision, ScopeBinding, SnapshotRef
+from src.contracts import (AggregateEvidence, GroundedEvidence, PassageEvidence, Revision,
+                           ScopeBinding, SnapshotRef, StructuredRecord)
 
 
 class AccessError(ValueError):
@@ -203,19 +204,44 @@ def assert_dispatch_current(user=None) -> None:
         if isinstance(user, ScopedUserContext):
             raise AccessDenied("Scoped model work requires an active dispatch guard")
         return
-    context, guard = state
+    context, guard, _, _ = state
     if user is not None:
         ScopedUserContext.require_context(user, context)
     guard.assert_current(context)
     context.assert_bound()
 
 
+def validate_dispatch_evidence(user: UserContext, sources: Sequence[GroundedEvidence]) -> None:
+    """Authorize native generation input against this exact active request.
+
+    Serialized/downcast/copied users cannot use the compatibility path. Neither
+    an aggregate's binding nor a native record's field metadata substitutes for
+    the authoritative registry/callback supplied by trusted server code.
+    """
+    state = _DISPATCH_CONTEXT.get()
+    if state is None:
+        raise AccessDenied("Native evidence requires an active dispatch guard")
+    context, guard, aggregates, record_validator = state
+    ScopedUserContext.require_context(user, context)
+    validate_grounded_evidence(context, sources, guard, aggregates,
+                               record_validator=record_validator)
+
+
 @contextmanager
-def guarded_dispatch(context: RequestContext, guard: FreshnessGuard):
-    """Bind/reset one operation's authority, including exception paths."""
+def guarded_dispatch(context: RequestContext, guard: FreshnessGuard, *,
+                     aggregates: "AggregateRegistry | None" = None,
+                     record_validator: "RecordValidator | None" = None):
+    """Bind/reset one operation's authority, including exception paths.
+
+    Native validators are server-only callbacks, never serialized with user
+    metadata. Nested dispatches explicitly replace them; omitted validators do
+    not inherit authority from an outer operation, even for the same context.
+    """
     if not isinstance(context, RequestContext) or not callable(getattr(guard, "assert_current", None)):
         raise AccessDenied("Model work requires a request context and freshness guard")
-    token = _DISPATCH_CONTEXT.set((context, guard))
+    if record_validator is not None and not callable(record_validator):
+        raise EvidenceValidationError("Native records require an authoritative validator")
+    token = _DISPATCH_CONTEXT.set((context, guard, aggregates, record_validator))
     try:
         assert_dispatch_current()
         yield
@@ -235,6 +261,9 @@ class AggregateRegistry(Protocol):
     """
 
     def resolve(self, artifact_id: str) -> AggregateEvidence | None: ...
+
+
+RecordValidator = Callable[[tuple[StructuredRecord, ...]], None]
 
 
 class LegacySetScope(Contract):
@@ -265,23 +294,30 @@ class LegacySetScope(Contract):
 
 def validate_grounded_evidence(
     context: RequestContext,
-    sources: Sequence[PassageEvidence | AggregateEvidence],
+    sources: Sequence[GroundedEvidence],
     guard: FreshnessGuard,
     aggregates: AggregateRegistry | None = None,
+    *,
+    record_validator: RecordValidator | None = None,
 ) -> None:
-    """Fail closed before using or releasing passage/aggregate evidence.
+    """Fail closed before using or releasing passage/aggregate/native records.
 
     This proves permission/snapshot binding and canonical aggregate provenance;
     passage text/revision authenticity remains the trusted DocumentStore's job.
     Valid citations do not prove factual support. Aggregate owner/version metadata
     cannot establish authority without the registry's exact canonical artifact.
+    Native records require a trusted batched callback that re-reads the exact
+    authorized canonical records (including revision and field provenance),
+    returns None on success and raises on any disagreement. Only validated
+    immutable DTO copies enter that callback; it is never a truthiness predicate.
     """
 
     guard.assert_current(context)
     context.assert_bound()
     seen: set[str] = set()
+    records = []
     for source in sources:
-        if not isinstance(source, (PassageEvidence, AggregateEvidence)):
+        if not isinstance(source, (PassageEvidence, AggregateEvidence, StructuredRecord)):
             raise EvidenceValidationError("Unsupported grounded evidence type")
         try:
             checked = type(source).model_validate(source.model_dump(warnings=False))
@@ -297,7 +333,12 @@ def validate_grounded_evidence(
                 raise AccessDenied("Passage is outside the authorized document scope")
             continue
         if checked.scope != context.binding:
-            raise AccessDenied("Aggregate is outside the current owner or scope")
+            raise AccessDenied("Native evidence is outside the current owner or scope")
+        if isinstance(checked, StructuredRecord):
+            if not context.scope.permits(checked.doc_id):
+                raise AccessDenied("Native record is outside the authorized document scope")
+            records.append(checked)
+            continue
         if aggregates is None:
             raise AccessDenied("Aggregate requires authoritative artifact resolution")
         canonical = aggregates.resolve(checked.artifact_id)
@@ -309,6 +350,13 @@ def validate_grounded_evidence(
             raise EvidenceValidationError("Invalid authoritative aggregate artifact") from None
         if canonical.scope != context.binding or canonical != checked:
             raise AccessDenied("Aggregate differs from its authoritative artifact")
+    if records:
+        if record_validator is None or not callable(record_validator):
+            raise AccessDenied("Native records require authoritative record validation")
+        guard.assert_current(context)
+        context.assert_bound()
+        if record_validator(tuple(records)) is not None:
+            raise EvidenceValidationError("Authoritative record validation must return None or raise")
     # Registry resolution may perform I/O. Recheck revocation/expiry and binding
     # before callers use any validated output, including an empty source list.
     guard.assert_current(context)
