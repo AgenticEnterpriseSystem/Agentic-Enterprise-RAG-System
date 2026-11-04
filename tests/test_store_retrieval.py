@@ -27,7 +27,7 @@ from src.retrieval.store import (
     StoreBM25Retriever, StoreDenseRetriever, StoreHybridRetriever, reciprocal_rank_candidates,
 )
 from src.storage.contracts import CatalogEntry, RankedCandidate, ReadFilters
-from src.storage.fingerprints import canonical_revision_id, catalog_fingerprint
+from src.storage.fingerprints import ValidatedCatalog, canonical_revision_id, catalog_fingerprint
 from src.storage.testing import FixtureDocument, InMemoryDocumentStore
 
 
@@ -636,6 +636,128 @@ def test_catalogue_hash_order_and_source_enumeration_are_metadata_only():
     with pytest.raises(SnapshotMismatch):
         StoreBM25Retriever(index, store, catalog=altered)
     assert store.body_reads == []
+
+
+def proof_hybrid(store, *, handle=None):
+    lexical = bm25_index(store)
+    index, encoder = ScriptedDense(store), Encoder()
+    if handle is not None:
+        index.catalog_handle, index.catalog, index.doc_ids = handle, handle.entries, handle.doc_ids
+    bm25 = StoreBM25Retriever(lexical, store, catalog=handle)
+    dense = StoreDenseRetriever(index, encoder, store)
+    return StoreHybridRetriever(bm25, dense, config=HybridConfig(candidate_k=3, rerank_k=3)), index, encoder
+
+
+def test_reader_proof_path_shares_exact_metadata_and_never_revalidates_or_enumerates_again(monkeypatch):
+    import src.retrieval.store as module
+    store = fixture_store()
+    handle = ValidatedCatalog.build(store.snapshot(), entries(store), issuer=store)
+    lexical, index, encoder = bm25_index(store), ScriptedDense(store), Encoder()
+    index.catalog_handle, index.catalog, index.doc_ids = handle, handle.entries, handle.doc_ids
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("Issued metadata was revalidated, fingerprinted or enumerated again")
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "catalog_fingerprint", unexpected)
+        patch.setattr(CatalogEntry, "model_validate", classmethod(unexpected))
+        patch.setattr(store, "iter_catalog", unexpected)
+        bm25 = StoreBM25Retriever(lexical, store, catalog=handle)
+        dense = StoreDenseRetriever(index, encoder, store)
+        combined = StoreHybridRetriever(bm25, dense)
+    assert bm25.catalog_handle is dense.catalog_handle is handle
+    assert bm25.catalog is dense.catalog is handle.entries
+    assert bm25.doc_ids is dense.doc_ids is handle.doc_ids
+    assert bm25._positions is dense._positions is handle.positions
+    assert combined.doc_ids is handle.doc_ids and type(bm25.catalog) is tuple
+    assert store.body_reads == store.spans == encoder.calls == index.calls == []
+    assert bm25.source_types() == ("jira",)
+
+
+@pytest.mark.parametrize("allowed,filters,encoding_calls", [
+    (("alpha", "beta"), ReadFilters(), 1),
+    ((), ReadFilters(), 0),
+    (("alpha", "beta"), ReadFilters(source_types=("jira",)), 1),
+    (("alpha", "beta"), ReadFilters(source_types=("unknown",)), 0),
+    (("alpha", "beta"), ReadFilters(after=NOW, before=NOW), 1),
+    (("alpha", "beta"), ReadFilters(after=NOW + timedelta(days=2)), 0),
+])
+def test_shared_proof_preserves_exact_hybrid_windows_filters_guards_and_model_calls(allowed, filters, encoding_calls):
+    store = fixture_store({"alpha": "🙂\x00 café needle trail " * 200, "beta": "needle beta", "secret": "needle executive"},
+        sources={"alpha": "jira", "beta": "slack"}, timestamps={"alpha": NOW, "beta": NOW + timedelta(days=1)})
+    handle = ValidatedCatalog.build(store.snapshot(), entries(store), issuer=store)
+    ordinary, ordinary_index, ordinary_encoder = proof_hybrid(store)
+    shared, shared_index, shared_encoder = proof_hybrid(store, handle=handle)
+    assert ordinary.bm25.catalog_handle is ordinary.dense.catalog_handle is None
+    request = context(store, allowed)
+    results, expansions, counts = [], [], []
+    for reader, index, encoder in ((ordinary, ordinary_index, ordinary_encoder), (shared, shared_index, shared_encoder)):
+        store.body_reads.clear()
+        store.spans.clear()
+        guard = Guard()
+        result = reader.search(request, "needle trail", guard=guard, top_k=2, filters=filters)
+        expansion = reader.read_more(request, result[:2], guard=guard, max_chars=1000, filters=filters)
+        assert len(encoder.calls) == encoding_calls
+        assert len(index.calls) == encoding_calls
+        assert set(store.body_reads) <= set(allowed)
+        assert all(end-start <= 3000 for _doc, start, end in store.spans)
+        for passage_value in (*result, *expansion):
+            record = store._documents[passage_value.chunk.doc_id]
+            assert passage_value.snapshot_id == store.snapshot().snapshot_id
+            assert passage_value.revision_id == record.entry.revision_id
+            assert passage_value.chunk.text == record.text[passage_value.chunk.start_char:passage_value.chunk.end_char]
+        results.append(result)
+        expansions.append(expansion)
+        counts.append(guard.calls)
+    assert results[0] == results[1] and expansions[0] == expansions[1]
+    assert counts[0] == counts[1]
+
+
+@pytest.mark.parametrize("kind", ["unissued", "snapshot", "copied-fields"])
+def test_readers_reject_invalid_dense_handle_without_falling_back_to_valid_catalog_tuple(kind):
+    store = fixture_store()
+    handle = ValidatedCatalog.build(store.snapshot(), entries(store), issuer=store)
+    invalid = object.__new__(ValidatedCatalog)
+    failure = EvidenceValidationError
+    if kind == "snapshot":
+        other = store.snapshot().model_copy(update={"snapshot_id": "other-proof-snapshot"})
+        invalid = ValidatedCatalog.build(other, entries(store), issuer=store)
+        failure = SnapshotMismatch
+    elif kind == "copied-fields":
+        for slot in ValidatedCatalog.__slots__:
+            if slot != "__weakref__":
+                object.__setattr__(invalid, slot, getattr(handle, slot))
+    lexical, index, encoder = bm25_index(store), ScriptedDense(store), Encoder()
+    index.catalog_handle = invalid
+    with pytest.raises(failure):
+        StoreBM25Retriever(lexical, store, catalog=invalid)
+    with pytest.raises(failure):
+        StoreDenseRetriever(index, encoder, store)
+    assert store.body_reads == store.spans == encoder.calls == index.calls == []
+
+
+@pytest.mark.parametrize("bad", [True, -1])
+def test_ordinary_reader_model_copies_still_receive_full_validation(bad):
+    store = fixture_store()
+    rows = entries(store)
+    invalid = (rows[0].model_copy(update={"text_length": bad}), *rows[1:])
+    index, encoder = ScriptedDense(store), Encoder()
+    index.catalog = invalid
+    with pytest.raises(ValueError):
+        StoreBM25Retriever(bm25_index(store), store, catalog=invalid)
+    with pytest.raises(ValueError):
+        StoreDenseRetriever(index, encoder, store)
+    assert store.body_reads == encoder.calls == index.calls == []
+
+
+@pytest.mark.parametrize("failure", [SessionExpired, StaleContext, PolicyUnavailable])
+def test_metadata_proof_never_bypasses_a_live_guard_failure_before_model_or_body(failure):
+    store = fixture_store()
+    handle = ValidatedCatalog.build(store.snapshot(), entries(store), issuer=store)
+    combined, index, encoder = proof_hybrid(store, handle=handle)
+    guard = Guard()
+    guard.failure = failure
+    with pytest.raises(failure):
+        combined.search(context(store), "needle", guard=guard)
+    assert store.body_reads == store.spans == encoder.calls == index.calls == []
 
 
 @pytest.mark.parametrize("bad", [True, 0, 101, -1, 1.2, "1"])

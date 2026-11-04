@@ -6,7 +6,9 @@ body table is constructed. The retained catalogue and reduction arrays are
 O(documents); Arrow batches, vector copies and sorting scratch are O(block_rows).
 An mmap spans one shard virtually. Page/cache release is best-effort advice,
 not a process/cgroup memory guarantee; full-corpus fit and latency need separate
-measurement. This module resolves no identity or fresh authorization policy.
+measurement. The default discards consumed file-cache pages; opt-in retain
+keeps the OS file cache eligible for reuse while still releasing mmap pages.
+This module resolves no identity or fresh authorization policy.
 """
 
 from __future__ import annotations
@@ -34,7 +36,7 @@ from src.access.contracts import (
 )
 from src.contracts import ScopeBinding, SnapshotRef
 from src.storage.contracts import CatalogEntry, RankedCandidate, ReadFilters
-from src.storage.fingerprints import catalog_fingerprint
+from src.storage.fingerprints import ValidatedCatalog, catalog_fingerprint
 
 _COLUMNS = ("doc_index", "start_char", "end_char")
 _DTYPES = (np.dtype("float16"), np.dtype("float32"))
@@ -123,6 +125,17 @@ def _normalized_block(stored, start, stop):
     return vectors
 
 
+def _top_candidates(best, top_k):
+    """Prune below the exact kth score, retaining every cutoff tie for the heap."""
+    positions = np.flatnonzero(np.isfinite(best))
+    if len(positions) > top_k:
+        scores = best[positions]
+        offset = len(scores) - top_k
+        cutoff = np.partition(scores, offset)[offset]
+        positions = positions[scores >= cutoff]
+    return positions
+
+
 @dataclass(frozen=True)
 class _Shard:
     name: str
@@ -145,8 +158,11 @@ class ShardedDense:
 
     @classmethod
     def load(cls, directory: str | Path, *, snapshot: SnapshotRef,
-             catalog: Iterable[CatalogEntry], block_rows: int = 8192) -> ShardedDense:
+             catalog: Iterable[CatalogEntry] | ValidatedCatalog, block_rows: int = 8192,
+             file_cache_policy: str = "discard") -> ShardedDense:
         _positive(block_rows, "block_rows")
+        if not isinstance(file_cache_policy, str) or file_cache_policy not in {"discard", "retain"}:
+            raise ValueError("Dense file cache policy must be discard or retain")
         if not isinstance(snapshot, SnapshotRef):
             raise ValueError("Dense loading requires a snapshot")
         snapshot = SnapshotRef.model_validate(snapshot.model_dump(warnings=False))
@@ -181,29 +197,40 @@ class ShardedDense:
                 or any(not isinstance(doc_id, str) or not doc_id.strip() for doc_id in ids)
                 or len(set(ids)) != len(ids)):
             raise ValueError("Dense document IDs are invalid or duplicated")
-        entries = []
+        catalog_handle = None
+        if isinstance(catalog, ValidatedCatalog):
+            catalog_handle = ValidatedCatalog.require(catalog, snapshot)
+            if tuple(ids) != catalog_handle.doc_ids:
+                raise SnapshotMismatch("Dense document order differs from the catalogue")
+            entries, doc_ids = catalog_handle.entries, catalog_handle.doc_ids
+        else:
+            entries = []
 
-        def checked_catalog():
-            for position, supplied in enumerate(catalog):
-                if not isinstance(supplied, CatalogEntry):
-                    raise ValueError("Dense catalogue requires CatalogEntry records")
-                entry = CatalogEntry.model_validate(supplied.model_dump(warnings=False))
-                if position >= len(ids) or entry.doc_id != ids[position]:
-                    raise SnapshotMismatch("Dense document order differs from the catalogue")
-                entries.append(entry)
-                yield entry
+            def checked_catalog():
+                for position, supplied in enumerate(catalog):
+                    if not isinstance(supplied, CatalogEntry):
+                        raise ValueError("Dense catalogue requires CatalogEntry records")
+                    entry = CatalogEntry.model_validate(supplied.model_dump(warnings=False))
+                    if position >= len(ids) or entry.doc_id != ids[position]:
+                        raise SnapshotMismatch("Dense document order differs from the catalogue")
+                    entries.append(entry)
+                    yield entry
 
-        fingerprint = catalog_fingerprint(checked_catalog(), expected_count=snapshot.document_count)
-        if fingerprint != snapshot.catalog_sha256:
-            raise SnapshotMismatch("Dense catalogue differs from the snapshot")
+            fingerprint = catalog_fingerprint(checked_catalog(), expected_count=snapshot.document_count)
+            if fingerprint != snapshot.catalog_sha256:
+                raise SnapshotMismatch("Dense catalogue differs from the snapshot")
+            entries = tuple(entries)
+            doc_ids = tuple(entry.doc_id for entry in entries)
         result = cls()
         result._directory, result._snapshot = directory, snapshot
         result._manifest = deepcopy(manifest)
-        result._catalog = tuple(entries)
-        result._doc_ids = tuple(entry.doc_id for entry in entries)
+        result._catalog_handle = catalog_handle
+        result._catalog = entries
+        result._doc_ids = doc_ids
         result._lengths = np.fromiter((entry.text_length for entry in entries), dtype=np.int64,
                                      count=len(entries))
         result._block_rows = block_rows
+        result._file_cache_policy = file_cache_policy
         result._manifest_signature, result._ids_signature = manifest_signature, ids_signature
         result._provenance = "sharded-dense-v1:" + hashlib.sha256(manifest_bytes).hexdigest()
         shards = tuple(result._inspect_shard(name) for name in names)
@@ -229,6 +256,10 @@ class ShardedDense:
         return self._catalog
 
     @property
+    def catalog_handle(self) -> ValidatedCatalog | None:
+        return self._catalog_handle
+
+    @property
     def doc_ids(self) -> tuple[str, ...]:
         return self._doc_ids
 
@@ -247,6 +278,10 @@ class ShardedDense:
     @property
     def block_rows(self) -> int:
         return self._block_rows
+
+    @property
+    def file_cache_policy(self) -> str:
+        return self._file_cache_policy
 
     @property
     def scoring_provenance(self) -> str:
@@ -303,8 +338,9 @@ class ShardedDense:
                         yield stored, start, stop, docs, starts, ends
                     finally:
                         _release_pages(stored, start, stop)
-                        _file_cache_hint(descriptor, stored.offset + start * stored.strides[0],
-                                         (stop - start) * stored.strides[0])
+                        if self.file_cache_policy == "discard":
+                            _file_cache_hint(descriptor, stored.offset + start * stored.strides[0],
+                                             (stop - start) * stored.strides[0])
                     start = stop
                 if start != shard.rows:
                     raise ValueError("Dense metadata row count differs")
@@ -313,7 +349,8 @@ class ShardedDense:
                 if parquet is not None:
                     parquet.close()
             finally:
-                _file_cache_hint(descriptor)
+                if self.file_cache_policy == "discard":
+                    _file_cache_hint(descriptor)
                 os.close(descriptor)
 
     def _vector(self, vector):
@@ -369,7 +406,7 @@ class ShardedDense:
                     docs, scores, starts, ends = docs[improve], scores[improve], starts[improve], ends[improve]
                     best[docs], starts_best[docs], ends_best[docs] = scores, starts, ends
         self._check_identity()
-        positions = heapq.nsmallest(top_k, (index for index, score in enumerate(best) if score != -np.inf),
+        positions = heapq.nsmallest(top_k, _top_candidates(best, top_k),
             key=lambda index: (-float(best[index]), self.doc_ids[index], int(starts_best[index]), int(ends_best[index])))
         return [(index, float(best[index]), int(starts_best[index]), int(ends_best[index])) for index in positions]
 

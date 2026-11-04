@@ -474,6 +474,22 @@ before materializing final winners (or explicit reranker candidates), retaining
 document deduplication, dense-passage preference and deterministic ties. An
 optional shared catalog avoids retaining duplicate dense catalog objects.
 
+Full-hybrid construction can now share one sealed `ValidatedCatalog` from
+`PostgresDocumentStore(..., retain_catalog=True)`. Its `validated_catalog()`
+getter checks live snapshot readiness before and after returning the retained
+metadata. The default remains `retain_catalog=False`, preserving streaming
+verification for storage/import jobs that do not need the full metadata table.
+The capsule contains no bodies or permissions. Exact issuance and complete
+snapshot identity are checked before its entries, IDs or read-only position map
+are reused; ordinary iterables still take the full validation/fingerprint path.
+
+`ShardedDense.load(catalog=handle, ...)` keeps the existing tuple `index.catalog`
+and exposes the issued handle as `index.catalog_handle`. Both store-backed
+retrievers share that handle's entries, IDs and positions. Policy resolvers use
+their own small identity wrappers over the same immutable metadata, preserving
+scope/issuer/freshness checks. Manifest/document order and every shard's vectors,
+finite values, spans, dimensions and counts are still validated during loading.
+
 Materialization streams exact overlapping3000-character windows with the existing
 query-match/tie heuristic, retaining only the current/best window. This preserves
 legacy hybrid output without requiring a full Arrow body table. It can perform
@@ -492,3 +508,201 @@ fusion/window/hybrid/expansion behavior, including revocation boundaries and
 embedded null Unicode text. These checks do not establish a live PostgreSQL,
 HTTP factory, full-corpus memory/latency or answer-quality result. APP-01/PARITY-01
 still perform the concrete integration and measurement.
+
+## Reproducible full-corpus parity protocol
+
+`scripts/compare_retrieval_backends.py` runs four separate offline stages. It
+does not import or call an answer provider. Use the nonowner runtime database
+configuration and the isolated0600 benchmark credential file from the reviewed
+ACL operation; reference reads also pass through actual PostgreSQL policy/RLS.
+
+```sh
+python -m scripts.compare_retrieval_backends encode \
+  --questions /inputs/questions.jsonl --splits /app/evaluation/splits.json \
+  --snapshot /inputs/snapshot.json --corpus /artifacts/documents.parquet \
+  --dense-directory /artifacts/indexes/dense-bge-base \
+  --bm25-directory /artifacts/indexes/bm25 --output /reports/shared
+python -m scripts.compare_retrieval_backends reference \
+  --shared /reports/shared --credentials-file /private/benchmark-credentials.json \
+  --corpus /artifacts/documents.parquet --dense-directory /artifacts/indexes/dense-bge-base \
+  --bm25-directory /artifacts/indexes/bm25 --output /reports/reference
+python -m scripts.compare_retrieval_backends candidate --scope full \
+  --shared /reports/shared --credentials-file /private/benchmark-credentials.json \
+  --corpus /artifacts/documents.parquet --dense-directory /artifacts/indexes/dense-bge-base \
+  --bm25-directory /artifacts/indexes/bm25 --output /reports/candidate-full
+```
+
+Run `candidate` again in fresh processes with `--scope narrow` and `--scope empty`
+and new output paths. The default `--file-cache-policy discard` retains the
+accepted scanner behavior. The explicit `--file-cache-policy retain` experiment
+keeps consumed dense pages eligible for OS file-cache reuse, while still
+releasing mmap pages and closing mappings, metadata readers and file descriptors.
+It suppresses only POSIX_FADV_DONTNEED advice. Retained file-cache pages count
+toward cgroup/VM memory, so this mode requires a new measured resource run under
+the same limits; it does not establish fit. The manifest records the policy,
+and all three candidate processes must use the same policy for comparison.
+Every output directory is exclusive. Interrupted runs stay
+incomplete; the tool does not overwrite or silently resume them. Frozen shared
+question/vector/config digests and completed case digests are checked before
+comparison. Package and executed source hashes are retained. An early frozen
+encode snapshot may have a different driver hash; its actual query encoder
+implementation must still match, and candidate encodings must be byte-equal to
+the frozen vectors. Reference and final candidate source hashes must match.
+
+The predeclared ten development IDs are qst_0001,qst_0431,qst_0412,qst_0384,
+qst_0471,qst_0482,qst_0301,qst_0451,qst_0342,qst_0176. The32-document scope is
+the union of their14 referenced documents and the first18 other document IDs in
+lexical order. This is a reproducible access fixture, not an unbiased retrieval
+quality sample. Full-scope cases also exercise the declared query source hints
+and an after2020-01-01 UTC filter; unknown timestamps fail date filters.
+No calibration/final selection or answer judging is performed.
+
+The primary oracle scores every passage and retains each document's exact
+maximum before top-k/deduplication. It uses an independent FAISS1.15.1 native
+reference, including the global thread partitions and1024-row BLAS tiles needed
+to reproduce full-index scores. Arbitrary small FlatIP blocks can switch native
+kernels and cause ULP rank differences; that failed approach is retained in the
+development evidence. The bounded matching helper is tested against full native
+indexes with bitwise score checks, odd/even row counts, dimensions64/768,
+fp16/fp32 and multiple thread counts. Unsupported dispatch settings fail.
+
+Primary ties use exact score equality, lexical document IDs and earliest
+start/end offsets. Score tolerance is atol=rtol=2e-6; all score deltas are retained,
+and a rank-ID or canonical-span mismatch fails rather than being hidden as a
+near-tie. Secondary exhaustive-FAISS representative differences are explicitly
+reported only with exact document-maximum/tie proof and both excerpts checked
+against canonical source. Native BM25 ranks feed an independent weighted RRF
+oracle (weights0.7/0.3,rrf60,candidate50,no reranker). Metadata rank prefixes5,10,20
+are compared; the real timed hybrid call materializes top5.
+
+Each candidate process has one active resolver, a resident manifest-matched CPU
+fp16 BGE model, mmap BM25 and bounded dense search. Timing includes actual input
+verification, imports/model/backend initialization, fresh scope resolution,
+adapter-invoked real query encoding, guards and PostgreSQL materialization plus
+bounded adjacent reads. Authorized empty/date-filter paths skip encoding/scoring
+as the accepted adapter does; the model remains resident. Shared vectors control
+numerical comparison, while fresh encoding work is measured and verified.
+Startup/first/warm thresholds are120/30/10seconds with three warm repeats. Only
+request_index0 in each fresh scope process receives the30-second first limit;
+every later request, including new questions and source/date cases, receives
+the10-second warm limit. Records carry a contiguous process-wide request_index.
+Startup uses Linux process age (driver-entry fallback outside procfs). These
+are first-process/warm measurements, not a cold-disk claim. Reference setup with
+three workload resolvers is recorded as harness overhead and is not app readiness.
+Candidate setup explicitly retains one store-issued catalogue; the reference's
+three resolver-local wrappers share the same capsule. Manifests report one
+retained catalogue and the separate resolver count. The independent reference
+keeps its own metadata/oracle validation and scoring path.
+Nested startup events and `startup_components` separate input verification,
+database/identity/store/policy setup, imports, catalogue retrieval, dense/BM25
+loading, model loading and adapter initialization. Request events and component
+fields separate native BM25/dense ranking, materialization, adjacent reads and
+freshness-guard calls. These durations are inclusive: guard time overlaps
+materialization and adjacent reads, so component totals must not be summed.
+Every guard still calls the same authoritative resolver; timing adds no cache
+or authorization shortcut.
+
+Finally, `compare --shared ... --reference ... --candidate ...` accepts the three
+candidate directories, `--corpus`, three `--resources` files and a new `--output`.
+Source evidence is deduplicated across repeats and verified in one bounded scan
+of the selected canonical Parquet row groups. Exact Unicode text, revisions,
+titles, source/date/provenance, citation offsets and adjacent excerpts are checked.
+The command exits nonzero if numerical/text, matrix, latency or resource gates fail.
+Missing resource evidence never becomes an acceptance result.
+
+Each external resource report binds `scope` and `candidate_manifest_sha256` to
+one completed candidate. It includes complete=true,guard_status=not_triggered,
+measurement_kind=sampled_sequential_app_db_cgroup_1s,sample_count,
+raw_sampler_sha256,app_supervisor_sha256,peak_aggregate_bytes,
+min_vm_available_bytes and oom_events_delta. The aggregate is the maximum of
+paired app/database samples, never the sum of isolated component maxima. Require
+aggregate<=6.5GiB,VMavailable>=256MiB and no OOM increase. Unknown values remain
+unknown; sampled counters do not establish an unavailable true kernel peak.
+
+### I/O placement is a measured prerequisite
+
+The initial read-only Mac bind-mount preflight has already failed the120-second
+startup target:388.334seconds for full hybrid. Its first request took122.065seconds
+and the first warm repeat110.580seconds, failing both serving limits. The run was
+then deliberately stopped and remains an incomplete preflight. App peak RSS was
+2,673,369,088bytes; sampled cgroup maximum2,807,717,888bytes; actual paired
+app/database sample maximum3,172,130,816bytes. No memory guard or OOM fired.
+The separate encode component took
+239.623seconds, of which209.690seconds were input hashing. These are component/
+incomplete preflight observations, not completed query, resource or parity
+acceptance. Preserve their raw profiles and failures.
+
+The completed managed-index run retained the raw Parquet on the Mac bind and
+the default discard policy. It covered all 120 full-profile requests, with
+startup 139.509 seconds, first request 15.098 seconds, and 35 later requests
+above the 10-second limit (maximum 24.418 seconds). The worker exited 0 with
+no memory guard and no app OOM increase. Peak RSS was 2,678,919,168 bytes,
+sampled app cgroup maximum 3,068,968,960 bytes, and sampled paired app/database maximum
+3,452,321,792 bytes. This is a completed candidate profile with failed serving
+gates; numerical parity still requires the independent reference/comparison.
+Sampled per-request I/O shows each unfiltered warm request reading
+2,683,293,696 bytes from storage under unconditional dense cache-discard advice.
+
+Before APP integration, measure verified read-only Docker volumes for both
+indexes and raw Parquet, and the explicit retain-cache policy. Keep all26 dense
+shards,511,958 documents, pinned model/weights and the same app/database/VM limits;
+record storage headroom and prove identical digests. This is an I/O-placement
+and cache-budget experiment, not corpus reduction or extra RAM. The managed
+index-only placement substantially improved latency but did not meet every gate.
+The next results must establish whether retaining the approximately 2.68 GB raw
+dense cache improves warm latency while fitting the existing memory limits.
+Input checks remain inside the
+measured boundary unless a separately reviewed immutable-deployment receipt
+protocol is explicitly introduced after evidence. Numerical, serving and
+resource acceptance requires the complete protocol; the accepted run is recorded below.
+
+Startup margin also remains an explicit gate. The optimized full-profile run
+at source `51bd422` completed all 120 requests with startup 96.652 seconds,
+first request 12.716 seconds and maximum later request 9.648 seconds. A fresh
+empty-scope process of the same source took 138.474 seconds to initialize and
+therefore failed the 120-second startup target, despite correctly skipping
+encoding and evidence for denied requests. A passing full profile does not
+override that failure. Reusing the validated catalogue removes repeated metadata
+SQL scans, model validation and fingerprinting; it does not skip raw input hashes,
+model loading or shard checks. The accepted catalogue-only prerequisite built
+all 511,958 entries in 13.227 seconds, with no additional metadata queries for
+three policy resolvers. That component result is not full-runtime acceptance;
+the changed retrieval consumers required fresh full/narrow/empty and independent
+reference measurements under the unchanged limits. Those subsequent measurements
+passed at source `a51e6a9`.
+
+### Accepted full-corpus retrieval measurement
+
+The November 3 local run at `a51e6a9` passed the complete protocol: 511,958
+documents, 1,746,899 passages and all 26 dense shards. All 200 candidate cases
+matched the independent reference at rank prefixes 5, 10 and 20 for dense and
+hybrid results, with the declared score tolerances and exact document/span
+ordering. Canonical source verification checked 164 distinct excerpts and
+expansions, including exact text and Unicode offsets. No LLM answer generation
+or paid model call was involved.
+
+| Access scope | Process startup | First request | Maximum later request | Maximum paired app + DB sample |
+| --- | ---: | ---: | ---: | ---: |
+| Full | 64.746s | 8.809s | 7.477s | 5.35GiB |
+| Narrow | 55.932s | 3.340s | 2.588s | 5.30GiB |
+| Empty | 54.628s | 2.096s | 0.818s | 5.05GiB |
+
+These are fresh-process/warm-request measurements, without a cold-disk claim.
+Each process used the same six-GiB/no-extra-swap/two-CPU application limit,
+384-MiB PostgreSQL service and unchanged Docker VM allocation. The parent
+sampler began before each process and verified paired app/database coverage;
+all resource proofs passed with zero OOM counter increases. The kernel did not
+provide a true memory high-water counter, so the table reports observed paired
+samples rather than a claimed kernel peak.
+
+Verified read-only Linux index and canonical-source volumes were used; the
+manifest-matched CPU/fp16 BGE model stayed resident and nonempty requests encoded
+their queries again. Empty scopes and unknown-date restrictions skipped encoding
+when no evidence could be admitted. File hashes, model loading, every shard,
+policy/session freshness and protected text reads remained inside their stated
+boundaries. The final comparison manifest SHA256 is
+`0efa0a21215a66cab53e102e48dbbe8ed237c1650c95688f8b5f9ee77865a480`.
+
+This accepts the retrieval component and its measured envelope. Authenticated
+HTTP integration, account UI, packaged full-application Docker delivery and
+recovery remain later application/delivery gates.

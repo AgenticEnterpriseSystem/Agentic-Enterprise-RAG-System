@@ -6,6 +6,7 @@ without loading a model, canonical corpus bodies, or any full-size artifact.
 
 from datetime import datetime, timezone
 import hashlib
+import heapq
 import json
 import os
 from pathlib import Path
@@ -20,11 +21,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from src.access.contracts import LegacySetScope, StaleContext
+from src.access.contracts import EvidenceValidationError, LegacySetScope, SnapshotMismatch, StaleContext
 from src.contracts import ScopeBinding, SnapshotRef
 from src.storage.contracts import CatalogEntry, ReadFilters
-from src.storage.fingerprints import catalog_fingerprint
-from src.retrieval.sharded_dense import ShardedDense
+from src.storage.fingerprints import ValidatedCatalog, catalog_fingerprint
+from src.retrieval.sharded_dense import ShardedDense, _top_candidates
 
 
 def _json(path, value):
@@ -128,6 +129,76 @@ def test_best_passage_ties_and_document_ties_are_stable_and_candidates_have_no_b
     exposed = backend.manifest
     exposed["model"]["normalize"] = False
     assert backend.manifest["model"]["normalize"] is True
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_exact_kth_cutoff_pruning_matches_full_python_oracle_across_random_scores_and_scopes(seed):
+    rng = np.random.default_rng(seed)
+    for count in (0, 1, 2, 17, 257, 2049):
+        doc_ids = tuple(f"doc-{value:06d}" for value in rng.permutation(count))
+        starts = rng.integers(0, 100, size=count, dtype=np.int64)
+        ends = starts + rng.integers(1, 100, size=count, dtype=np.int64)
+        for distribution in ("continuous", "ties", "negative", "zero", "denied"):
+            scores = rng.normal(size=count).astype(np.float32)
+            if distribution == "ties":
+                scores = rng.integers(-3, 4, size=count).astype(np.float32)
+            elif distribution == "negative":
+                scores = -np.abs(scores) - np.float32(.25)
+            elif distribution == "zero":
+                scores.fill(0)
+            if distribution == "denied":
+                scores.fill(-np.inf)
+            else:
+                scores[rng.random(count) < .3] = -np.inf
+            original = scores.copy()
+            permitted = [index for index, value in enumerate(scores) if np.isfinite(value)]
+            key = lambda index: (-float(scores[index]), doc_ids[index], int(starts[index]), int(ends[index]))
+            for top_k in sorted({1, 3, 50, max(1, count), count + 5}):
+                actual = _top_candidates(scores, top_k)
+                expected_top = sorted(permitted, key=key)[:top_k]
+                assert heapq.nsmallest(top_k, actual, key=key) == expected_top
+                if len(permitted) > top_k:
+                    cutoff = sorted((float(scores[index]) for index in permitted), reverse=True)[top_k - 1]
+                    assert actual.tolist() == [index for index in permitted if scores[index] >= cutoff]
+                else:
+                    assert actual.tolist() == permitted
+                np.testing.assert_array_equal(scores, original)
+
+
+def test_exact_cutoff_keeps_all_negative_ties_and_excludes_nonfinite_sentinels():
+    scores = np.array([-5, -3, -3, -3, -4, -np.inf, np.nan, np.inf], dtype=np.float32)
+    assert _top_candidates(scores, 2).tolist() == [1, 2, 3]
+    assert _top_candidates(np.zeros(20, dtype=np.float32), 1).tolist() == list(range(20))
+
+
+@pytest.mark.parametrize("query", [[1, 0, 0], [-1, 0, 0], [0, 0, 0]])
+@pytest.mark.parametrize("top_k", [1, 2, 3])
+def test_pruned_public_candidates_keep_exact_scope_order_and_winning_spans(tmp_path, query, top_k):
+    data = artifact(tmp_path)
+    backend = load(data)
+    for mask in ([True] * 4, [False, True, False, True], [False] * 4):
+        allowed = [doc_id for doc_id, permit in zip(data.doc_ids, mask) if permit]
+        expected = reference(data, query, top_k, mask)
+        actual = backend.candidates_vector(query, top_k, scope=scope(data, allowed))
+        assert [(item.doc_id, item.start_char, item.end_char) for item in actual] == [
+            (doc_id, start, end) for doc_id, _score, start, end in expected]
+        np.testing.assert_allclose([item.score for item in actual], [row[1] for row in expected], rtol=2e-6, atol=2e-6)
+
+
+def test_public_heap_receives_every_exact_cutoff_tie_and_no_lower_score(tmp_path, monkeypatch):
+    import src.retrieval.sharded_dense as module
+    data = artifact(tmp_path)
+    backend = load(data)
+    original = module.heapq.nsmallest
+    seen = []
+    def watch(top_k, iterable, *, key):
+        values = list(iterable)
+        seen.append(values)
+        return original(top_k, values, key=key)
+    monkeypatch.setattr(module.heapq, "nsmallest", watch)
+    hits = backend.candidates_vector([1, 0, 0], 1, scope=scope(data))
+    assert seen == [[0, 1, 3]]  # zeta/alpha/secret tie at1; middle is strictly lower.
+    assert [(item.doc_id, item.start_char, item.end_char) for item in hits] == [("alpha", 0, 8)]
 
 
 def test_authorization_and_source_dates_filter_before_emitting_ranked_candidates(tmp_path):
@@ -329,7 +400,109 @@ def test_catalog_is_single_pass_and_snapshot_fingerprint_and_order_are_verified(
             ShardedDense.load(data.directory, snapshot=data.snapshot, catalog=bad_catalog, block_rows=2)
 
 
-def test_normalized_copies_are_bounded_private_and_mmaps_do_not_escape_operations(tmp_path, monkeypatch):
+@pytest.mark.parametrize("dtype", [np.float16, np.float32])
+@pytest.mark.parametrize("file_cache_policy", ["discard", "retain"])
+def test_issued_catalog_shares_metadata_without_revalidation_and_preserves_exact_candidates(tmp_path, monkeypatch, dtype, file_cache_policy):
+    import src.retrieval.sharded_dense as module
+    data = artifact(tmp_path, dtype=dtype)
+    baseline = load(data, file_cache_policy=file_cache_policy)
+    handle = ValidatedCatalog.build(data.snapshot, data.catalog, issuer=object())
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("Issued catalogue was revalidated or fingerprinted again")
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "catalog_fingerprint", unexpected)
+        patch.setattr(CatalogEntry, "model_validate", classmethod(unexpected))
+        shared = ShardedDense.load(data.directory, snapshot=data.snapshot, catalog=handle,
+            block_rows=data.block_rows, file_cache_policy=file_cache_policy)
+    assert baseline.catalog_handle is None and shared.catalog_handle is handle
+    assert shared.catalog is handle.entries and shared.doc_ids is handle.doc_ids
+    assert type(shared.catalog) is tuple
+    assert all(left is right for left, right in zip(shared.catalog, handle.entries))
+    assert shared.manifest == baseline.manifest and shared.scoring_provenance == baseline.scoring_provenance
+    for vector in ([1, 0, 0], [1.7, 0, 0], [0, 0, 0]):
+        for allowed, filters in ((data.doc_ids, ReadFilters()), (("alpha",), ReadFilters()),
+                ((), ReadFilters()), (data.doc_ids, ReadFilters(source_types=("jira",))),
+                (data.doc_ids, ReadFilters(after=datetime(2026, 10, 2, tzinfo=timezone.utc)))):
+            permission = scope(data, allowed)
+            assert shared.candidates_vector(vector, 4, scope=permission, filters=filters) == baseline.candidates_vector(
+                vector, 4, scope=permission, filters=filters)
+        assert shared.rank_vector(vector, 4) == baseline.rank_vector(vector, 4)
+
+
+@pytest.mark.parametrize("forgery", ["unissued", "copied-fields"])
+def test_unissued_exact_catalog_type_cannot_enter_dense_fast_path(tmp_path, forgery):
+    data = artifact(tmp_path)
+    forged = object.__new__(ValidatedCatalog)
+    if forgery == "copied-fields":
+        issued = ValidatedCatalog.build(data.snapshot, data.catalog, issuer=object())
+        for slot in ValidatedCatalog.__slots__:
+            if slot != "__weakref__":
+                object.__setattr__(forged, slot, getattr(issued, slot))
+    with pytest.raises(EvidenceValidationError):
+        ShardedDense.load(data.directory, snapshot=data.snapshot, catalog=forged, block_rows=2)
+
+
+@pytest.mark.parametrize("field", ["snapshot_id", "corpus_sha256", "catalog_sha256", "document_count"])
+def test_issued_dense_catalog_must_match_every_snapshot_field(tmp_path, field):
+    data = artifact(tmp_path)
+    rows = data.catalog
+    changes = {"snapshot_id": "other-snapshot"} if field == "snapshot_id" else {"corpus_sha256": "f" * 64}
+    if field == "catalog_sha256":
+        rows = (rows[0].model_copy(update={"source_type": "other-source"}), *rows[1:])
+        changes = {"catalog_sha256": catalog_fingerprint(rows, expected_count=len(rows))}
+    elif field == "document_count":
+        rows = rows[:-1]
+        changes = {"document_count": len(rows), "catalog_sha256": catalog_fingerprint(rows, expected_count=len(rows))}
+    snapshot = data.snapshot.model_copy(update=changes)
+    handle = ValidatedCatalog.build(snapshot, rows, issuer=object())
+    with pytest.raises(SnapshotMismatch):
+        ShardedDense.load(data.directory, snapshot=data.snapshot, catalog=handle, block_rows=2)
+
+
+def test_dense_catalog_lookalike_uses_full_iterable_validation_and_cannot_self_attest(tmp_path):
+    data = artifact(tmp_path)
+    class Lookalike:
+        consumed = False
+        validated = True
+        entries = data.catalog
+        def require(self, *_args, **_kwargs):
+            pytest.fail("A catalogue lookalike attested its own validity")
+        def __iter__(self):
+            self.consumed = True
+            yield data.catalog[0].model_copy(update={"text_length": True})
+            yield from data.catalog[1:]
+    fake = Lookalike()
+    with pytest.raises(ValueError):
+        ShardedDense.load(data.directory, snapshot=data.snapshot, catalog=fake, block_rows=2)
+    assert fake.consumed
+
+
+@pytest.mark.parametrize("corruption", ["incomplete", "ids", "span", "nonfinite", "corpus", "model"])
+def test_trusted_catalog_never_skips_dense_artifact_validation(tmp_path, corruption):
+    data = artifact(tmp_path)
+    handle = ValidatedCatalog.build(data.snapshot, data.catalog, issuer=object())
+    if corruption in {"incomplete", "corpus", "model"}:
+        manifest = dict(data.manifest)
+        if corruption == "incomplete": manifest["complete"] = False
+        elif corruption == "corpus": manifest["corpus_sha256"] = "f" * 64
+        else: manifest["model"] = {**manifest["model"], "normalize": False}
+        _json(data.directory / "manifest.json", manifest)
+    elif corruption == "ids":
+        _json(data.directory / "doc_ids.json", list(reversed(data.doc_ids)))
+    elif corruption == "span":
+        records = list(data.records[0])
+        records[0] = (0, 0, 101)
+        _write_metadata(data.directory / "shard_00000.parquet", records)
+    else:
+        vectors = data.vectors[0].copy()
+        vectors[0, 0] = np.nan
+        np.save(data.directory / "shard_00000.npy", vectors, allow_pickle=False)
+    with pytest.raises(ValueError):
+        ShardedDense.load(data.directory, snapshot=data.snapshot, catalog=handle, block_rows=2)
+
+
+@pytest.mark.parametrize("file_cache_policy", ["discard", "retain"])
+def test_normalized_copies_are_bounded_private_and_mmaps_do_not_escape_operations(tmp_path, monkeypatch, file_cache_policy):
     import src.retrieval.sharded_dense as module
     data = artifact(tmp_path)
     real_load, real_normalize = module.np.load, module._normalized_block
@@ -356,7 +529,7 @@ def test_normalized_copies_are_bounded_private_and_mmaps_do_not_escape_operation
 
     monkeypatch.setattr(module.np, "load", watched_load)
     monkeypatch.setattr(module, "_normalized_block", watched_normalize)
-    backend = load(data)
+    backend = load(data, file_cache_policy=file_cache_policy)
     assert all(item.closed for item in mappings)
     backend.rank_vector([1, 0, 0], 4)
     backend.candidates_vector([1, 0, 0], 4, scope=scope(data, {"alpha"}))
@@ -365,10 +538,11 @@ def test_normalized_copies_are_bounded_private_and_mmaps_do_not_escape_operation
     assert all(block() is None for block in blocks)
 
 
-def test_normalizer_failure_closes_mmaps_while_traceback_is_still_retained(tmp_path, monkeypatch):
+@pytest.mark.parametrize("file_cache_policy", ["discard", "retain"])
+def test_normalizer_failure_closes_mmaps_while_traceback_is_still_retained(tmp_path, monkeypatch, file_cache_policy):
     import src.retrieval.sharded_dense as module
     data = artifact(tmp_path)
-    backend = load(data)
+    backend = load(data, file_cache_policy=file_cache_policy)
     real_load = module.np.load
     mappings = []
 
@@ -385,6 +559,106 @@ def test_normalizer_failure_closes_mmaps_while_traceback_is_still_retained(tmp_p
     with pytest.raises(RuntimeError, match="injected normalization failure") as retained:
         backend.rank_vector([1, 0, 0], 4)
     assert retained.value.__traceback__ is not None
+    assert mappings and all(mapping.closed for mapping in mappings)
+
+
+@pytest.mark.parametrize("bad", [None, True, False, 0, "", "Retain", "retain ", "auto", [], {}])
+def test_file_cache_policy_is_explicit_and_never_coerces_invalid_values(tmp_path, bad):
+    data = artifact(tmp_path)
+    with pytest.raises(ValueError):
+        load(data, file_cache_policy=bad)
+
+
+def test_retaining_file_cache_changes_only_posix_hints_not_page_release_or_ranked_results(tmp_path, monkeypatch):
+    import src.retrieval.sharded_dense as module
+    data = artifact(tmp_path)
+    native_load, native_release = module.np.load, module._release_pages
+    mappings, hints, released = [], {"discard": [], "retain": []}, {"discard": [], "retain": []}
+    mode = "discard"
+
+    def watch_load(*args, **kwargs):
+        result = native_load(*args, **kwargs)
+        mappings.append(result._mmap)
+        return result
+
+    def watch_release(stored, start, stop):
+        assert not stored._mmap.closed
+        released[mode].append((Path(stored.filename).name, start, stop))
+        return native_release(stored, start, stop)
+
+    def watch_hint(descriptor, offset, length, advice):
+        assert os.fstat(descriptor).st_size > 0
+        hints[mode].append((offset, length, advice))
+
+    monkeypatch.setattr(module.np, "load", watch_load)
+    monkeypatch.setattr(module, "_release_pages", watch_release)
+    monkeypatch.setattr(module.os, "POSIX_FADV_DONTNEED", 4, raising=False)
+    monkeypatch.setattr(module.os, "posix_fadvise", watch_hint, raising=False)
+    results = {}
+    metadata = {}
+    for mode in ("discard", "retain"):
+        # Omission deliberately proves that the original default remains discard.
+        backend = load(data) if mode == "discard" else load(data, file_cache_policy="retain")
+        assert backend.file_cache_policy == mode
+        metadata[mode] = (backend.snapshot, backend.catalog, backend.doc_ids, backend.manifest,
+                          backend.scoring_provenance, backend.block_rows)
+        results[mode] = (backend.rank_vector([1, 0, 0], 4),
+            backend.candidates_vector([1, 0, 0], 4, scope=scope(data)),
+            backend.candidates_vector([1, 0, 0], 4, scope=scope(data, {"alpha"}),
+                filters=ReadFilters(source_types=("jira",), after=datetime(2026, 10, 1, tzinfo=timezone.utc))),
+            backend.candidates_vector([1, 0, 0], 4, scope=scope(data, ())))
+        assert all(mapping.closed for mapping in mappings)
+    assert metadata["discard"] == metadata["retain"]
+    assert results["discard"] == results["retain"]
+    assert hints["discard"] and any(offset == length == 0 for offset, length, _ in hints["discard"])
+    assert hints["retain"] == []
+    assert released["discard"] and released["discard"] == released["retain"]
+
+
+@pytest.mark.parametrize("file_cache_policy", ["discard", "retain"])
+@pytest.mark.parametrize("ending", ["success", "early_close", "error"])
+def test_cache_policy_never_retains_owned_descriptors_or_mappings(tmp_path, monkeypatch, file_cache_policy, ending):
+    import src.retrieval.sharded_dense as module
+    data = artifact(tmp_path)
+    backend = load(data, file_cache_policy=file_cache_policy)
+    native_open, native_close, native_load = module.os.open, module.os.close, module.np.load
+    descriptors, active, mappings = [], set(), []
+
+    def watch_open(path, *args, **kwargs):
+        descriptor = native_open(path, *args, **kwargs)
+        if str(path).endswith(".npy"):
+            descriptors.append(descriptor)
+            active.add(descriptor)
+        return descriptor
+
+    def watch_close(descriptor):
+        result = native_close(descriptor)
+        active.discard(descriptor)
+        return result
+
+    def watch_load(*args, **kwargs):
+        result = native_load(*args, **kwargs)
+        mappings.append(result._mmap)
+        return result
+
+    monkeypatch.setattr(module.os, "open", watch_open)
+    monkeypatch.setattr(module.os, "close", watch_close)
+    monkeypatch.setattr(module.np, "load", watch_load)
+    if ending == "early_close":
+        stream = backend._blocks(backend._shards[0])
+        retained = next(stream)
+        stream.close()
+        assert retained[0]._mmap.closed
+    elif ending == "error":
+        def fail(*_args):
+            raise RuntimeError("retained normalization traceback")
+        monkeypatch.setattr(module, "_normalized_block", fail)
+        with pytest.raises(RuntimeError, match="retained normalization") as retained_error:
+            backend.rank_vector([1, 0, 0], 4)
+        assert retained_error.value.__traceback__ is not None
+    else:
+        backend.rank_vector([1, 0, 0], 4)
+    assert descriptors and not active
     assert mappings and all(mapping.closed for mapping in mappings)
 
 
