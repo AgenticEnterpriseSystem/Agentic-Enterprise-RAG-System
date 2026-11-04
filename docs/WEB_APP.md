@@ -138,8 +138,9 @@ corpus order, complete shards and query-model settings are still checked.
 grants; an empty document list denies all documents. Each question resolves its
 own current session and scope, and rechecks them around retrieval, document
 expansion, model dispatch and response release. Readiness exposes no corpus or
-permission counts. The login UI, structured-tool registration and packaged
-full-app deployment are separate integration steps.
+permission counts. The account lifecycle below uses that authenticated backend;
+structured-tool registration and packaged full-app deployment remain separate
+integration steps.
 
 ## 4. Start
 
@@ -349,6 +350,7 @@ queries. Explicit factory-injected settings take precedence over environment.
 
 | Endpoint | Behavior |
 | --- | --- |
+| `GET /api/auth/profile` | Public, no-store `{enabled: boolean}` selects the account UI even while search initializes |
 | `GET /api/auth/csrf` | Short-lived signed pre-login cookie and CSRF value |
 | `POST /api/auth/login` | JSON login/password plus matching bootstrap CSRF header and allowed Origin; renew session token |
 | `GET /api/auth/me` | Current public identity and session CSRF after authoritative checks; does not extend idle expiry |
@@ -378,11 +380,41 @@ is rechecked after password hashing without holding a database transaction acros
 that work. Runtime users remain SELECT-only on accounts; PostgreSQL row-lock
 privileges are not broadened for authentication. [PostgreSQL locking privileges](https://www.postgresql.org/docs/17/sql-select.html).
 
-This ticket provides the backend account API. The account UI and per-user query
-integration come later. In local-auth mode, `/api/ready` stays503 without corpus
-metadata and even a valid session receives403 for queries until document policy
-is connected. No benchmark identity is used as a fallback; login remains
-responsive while a separate RAG initialization/worker is occupied.
+The original AUTH-01 backend kept questions denied until APP-01 connected the
+document policy. The accepted authenticated runtime now handles permitted
+questions after startup; `/api/ready` remains503 while it initializes. No
+benchmark identity is used as a fallback. Login remains responsive while a
+separate RAG initialization/worker is occupied.
+
+### Browser account lifecycle
+
+The existing search screen now restores a session with `/api/auth/me`, offers
+provisioned-account sign-in and sign-out, and sends the session CSRF header with
+each question. Passwords are cleared from the form after submission. The browser
+does not read the HttpOnly session cookie or save credentials, CSRF values,
+questions, answers, sources or traces in web storage. Session state is in memory.
+
+Logout, expiry, account/session rotation and tab revalidation clear the question,
+answer, evidence, trace and source selection. Every asynchronous search result
+and cleanup callback is tagged with the current identity generation and request,
+so an older response cannot repaint another account's screen. Aborting a fetch
+does not stop or free the backend worker; the existing readiness/busy behavior
+still controls admission. A failed sign-out leaves search closed until the
+server confirms expiry/logout or a new sign-in succeeds.
+
+Same-origin tabs use payload-free BroadcastChannel notifications and recheck
+`/me` on focus/visibility restoration. The server remains authoritative; UI
+clearing cannot recall already-displayed information or already-dispatched
+model input. The explicit public profile signal selects local versus benchmark
+UI; a failed `/me` request never enables the benchmark identity. The local source
+selector lists supported platform filters rather than exposing a global document
+catalogue; filters can only narrow the server-enforced account scope.
+
+Baseline/agent selection, cited excerpts and search traces keep their existing
+behavior. This UI adds no role selector, signup, stored chat history, aggregate
+rendering or streaming. HTTPS uses secure cookies; loopback HTTP development
+still requires the explicit server-side insecure-loopback setting described
+above.
 
 ### Reviewed document permissions
 

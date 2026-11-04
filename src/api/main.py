@@ -143,6 +143,11 @@ def create_app(settings=None, runtime_factory=None, *, auth_settings=None, auth_
     app.add_middleware(CORSMiddleware, allow_origins=list(origins),
                        allow_methods=['GET', 'POST'], allow_credentials=auth_enabled,
                        allow_headers=['Content-Type', 'X-CSRF-Token'] if auth_enabled else ['Content-Type'])
+
+    @app.get('/api/auth/profile')
+    async def authentication_profile():
+        return JSONResponse(content={'enabled': auth_enabled}, headers={'Cache-Control': 'no-store'})
+
     if auth_enabled:
         app.include_router(create_auth_router(auth_service, auth_settings, worker=auth_worker))
 
