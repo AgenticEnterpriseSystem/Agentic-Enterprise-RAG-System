@@ -88,10 +88,12 @@ def test_two_browser_sessions_use_one_runtime_and_never_share_other_users_source
         # lifespan or executor. Each HTTP client owns its own cookie jar.
         with httpx.Client(transport=intern._transport, base_url=ORIGIN) as executive:
             first, second = sign_in(intern, app_db), sign_in(executive, app_db, 'executive')
-            for client, headers, expected in ((intern, first, {'general', 'atlas'}),
-                    (executive, second, {'general', 'finance-exec'}), (intern, first, {'general', 'atlas'})):
+            for ordinal, (client, headers, expected) in enumerate(((intern, first, {'general', 'atlas'}),
+                    (executive, second, {'general', 'finance-exec'}), (intern, first, {'general', 'atlas'})), 1):
                 response = client.post('/api/query', json={'question': QUESTION}, headers=headers)
-                assert response.status_code == 200 and 'no-store' in response.headers.get('cache-control', '')
+                code = response.json().get('detail', {}).get('code') if response.status_code >= 400 else None
+                assert response.status_code == 200, (ordinal, response.status_code, code)
+                assert 'no-store' in response.headers.get('cache-control', '')
                 value = QueryResponse.model_validate(response.json())
                 assert value.snapshot == app_db.snapshot
                 assert {source.chunk.doc_id for source in value.sources} == expected

@@ -560,6 +560,53 @@ h2 {
 .source-id p {
   margin: 5px 0;
 }
+.record-fields,
+.native-filters {
+  display: grid;
+  grid-template-columns: minmax(5rem, 1fr) minmax(0, 2fr);
+  gap: 8px 14px;
+  margin: 14px 0;
+  font-size: 0.9375rem;
+}
+.record-fields dt,
+.native-filters dt {
+  color: #6c786f;
+}
+.record-fields dd,
+.native-filters dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.record-fields dd small {
+  display: block;
+  color: #64715e;
+  font-size: 0.75rem;
+}
+.record-count {
+  display: grid;
+  gap: 2px;
+  margin: 14px 0;
+}
+.record-count strong {
+  color: #254e40;
+  font-size: 2.5rem;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+.record-count span {
+  color: #64715e;
+  font-size: 0.875rem;
+}
+.source-id ul {
+  padding-left: 20px;
+}
+.steps li .native-step {
+  display: block;
+}
+.native-warning {
+  color: #7b5b27;
+  font-size: 0.875rem;
+}
 .empty-state {
   text-align: center;
   color: #98a18f;

@@ -15,6 +15,75 @@ const stops = {
 const money = (value) =>
   value == null ? "Unavailable" : `$${value.toFixed(4)}`;
 const platforms = ["slack", "gmail", "linear", "google_drive", "hubspot", "fireflies", "github", "jira", "confluence"];
+const nativeFields = { native_key: "Jira key", status: "Status", priority: "Priority", project_id: "Project" };
+const coverageLabel = (coverage) => coverage === "verified_records" ? "Verified source records"
+  : coverage === "synthetic_fixture" ? "Synthetic fixture" : "Coverage unavailable";
+
+function FilterList({ filters = [] }) {
+  return filters.length ? <dl className="native-filters">{filters.map(({ field, value }) =>
+    <React.Fragment key={field}><dt>{nativeFields[field] || (field === "doc_id" ? "Record ID" : field)}</dt>
+      <dd>{String(value)}</dd></React.Fragment>)}</dl> : <p className="fine-print">No field filters.</p>;
+}
+
+function structuredStep(step) {
+  try {
+    const value = JSON.parse(step.query);
+    return value && value.request?.source_type === "jira" && value.result
+      && typeof value.result === "object" ? value : null;
+  } catch { return null; }
+}
+
+function StructuredStep({ value }) {
+  const { request, result } = value;
+  return <div className="native-step">
+    <p>Jira {request.operation === "count" ? "record count" : request.operation === "lookup" ? "record lookup" : "record filter"}</p>
+    <FilterList filters={Object.entries(request.filters || {}).map(([field, value]) => ({ field, value }))} />
+    <p className="fine-print">{coverageLabel(result.coverage)}
+      {typeof result.count === "number" ? ` · ${result.count.toLocaleString()} canonical Jira source records` : ""}</p>
+    {result.ambiguous && <p className="native-warning">This Jira key matches multiple permitted source records. Choose a canonical record ID to narrow the lookup.</p>}
+    {result.truncated && <p className="native-warning">Only part of the matching records is shown. Narrow the filters for a complete lookup.</p>}
+    {result.coverage === "unknown" && <p className="native-warning">Verified field coverage is unavailable. This result does not establish a zero count.</p>}
+    {result.limitation && <p className="fine-print">{result.limitation}</p>}
+  </div>;
+}
+
+function NativeRecord({ item }) {
+  const states = Object.fromEntries((item.field_provenance || []).map((field) => [field.field, field.state]));
+  return <>
+    <h3>{item.native_key || "Jira source record"}</h3>
+    <dl className="record-fields">{Object.entries(nativeFields).map(([field, label]) =>
+      <React.Fragment key={field}><dt>{label}</dt><dd>
+        <span>{item[field] ?? "Not available"}</span>
+        <small>{states[field] === "verified" ? "Verified from source" : states[field] === "missing" ? "Missing in source" : "Invalid in source"}</small>
+      </dd></React.Fragment>)}</dl>
+    <p className="fine-print">Each card is a canonical source record. Jira keys may repeat.</p>
+    <details className="source-id"><summary>Record provenance</summary>
+      <p>Record ID: {item.record_id}</p><p>Revision: {item.revision_id}</p>
+      <p>Source: {item.source?.path}</p><p>Repository: {item.source?.repository}</p>
+      <p>Git revision: {item.source?.git_commit}</p><p>Source file hash: {item.source?.raw_sha256}</p>
+      <p>Parser: {item.source?.parser_version}</p>
+      <ul>{(item.field_provenance || []).map((field) => <li key={field.field}>
+        {nativeFields[field.field]}: {field.json_pointer} · {field.state}
+      </li>)}</ul><p>Citation: {item.citation_id}</p>
+    </details>
+  </>;
+}
+
+function AggregateCount({ item }) {
+  return <>
+    <h3>Matching Jira source records</h3>
+    <div className="record-count"><strong>{item.count.toLocaleString()}</strong><span>canonical Jira source records</span></div>
+    <p>Within your permitted records and the filters below.</p>
+    <FilterList filters={item.filters} />
+    <p className="fine-print">{coverageLabel(item.coverage)}. Jira keys may repeat; this is not a count of unique issues.</p>
+    <details className="source-id"><summary>Count provenance</summary>
+      <p>Template: {item.template_id} · version {item.template_version}</p>
+      <p>Lineage: {item.lineage_sha256}</p><p>Artifact: {item.artifact_id}</p>
+      <p>Snapshot: {item.scope?.snapshot?.snapshot_id}</p><p>Computed: {item.created_at}</p>
+      <p>Citation: {item.citation_id}</p>
+    </details>
+  </>;
+}
 
 function citedText(text, ids, openCitation) {
   return text.split(/(\[[^\]\n]+\])/g).map((part, index) => {
@@ -477,7 +546,7 @@ function App() {
                           {(step.elapsed_ms / 1000).toFixed(2)} s
                         </span>
                       </div>
-                      <p>{step.query}</p>
+                      {structuredStep(step) ? <StructuredStep value={structuredStep(step)} /> : <p>{step.query}</p>}
                       {step.tool === "text_search" && (
                         <small>
                           {step.evidence_ids.length} passages ·{" "}
@@ -513,16 +582,18 @@ function App() {
                 </p>
               </details>
             </div>
-            <aside className="evidence" aria-label="Source passages">
+            <aside className="evidence" aria-label="Supporting evidence">
               <div className="section-top">
                 <h2>Evidence</h2>
-                <span>{sources.length} passages</span>
+                <span>{sources.length} {sources.length === 1 ? "item" : "items"}</span>
               </div>
               <p className="fine-print">
-                Exact retrieved excerpts, with document character offsets.
+                {sources.some((item) => item.kind === "record" || item.kind === "aggregate")
+                  ? "Source excerpts, native records, and counts from your permitted sources."
+                  : "Exact retrieved excerpts, with document character offsets."}
               </p>
               {!sources.length && (
-                <p className="empty">No supporting passages were returned.</p>
+                <p className="empty">No supporting evidence was returned.</p>
               )}
               {sources.map((item) => {
                 const cited = result.answer.citation_ids.indexOf(
@@ -533,17 +604,19 @@ function App() {
                     tabIndex={-1}
                     ref={(el) => { if (el) cards.current[item.citation_id] = el; else delete cards.current[item.citation_id]; }}
                     key={item.citation_id}
-                    className={`source-card ${selected === item.citation_id ? "selected" : ""}`}
+                    className={`source-card ${item.kind || "passage"}-card ${selected === item.citation_id ? "selected" : ""}`}
                   >
                     <div className="source-meta">
-                      <span>{item.chunk.source_type}</span>
+                      <span>{item.kind === "record" ? "Native Jira record" : item.kind === "aggregate" ? "Scoped Jira count" : item.chunk?.source_type || "Source"}</span>
                       <span>
                         {cited >= 0
                           ? `Cited · Source ${cited + 1}`
                           : "Retrieved"}
                       </span>
                     </div>
-                    <h3>{item.chunk.title || "Untitled document"}</h3>
+                    {item.kind === "record" ? <NativeRecord item={item} />
+                      : item.kind === "aggregate" ? <AggregateCount item={item} />
+                      : item.chunk ? <><h3>{item.chunk.title || "Untitled document"}</h3>
                     <blockquote>{item.chunk.text}</blockquote>
                     <details className="source-id">
                       <summary>Document details</summary>
@@ -553,7 +626,7 @@ function App() {
                         · {item.retrieval_method}
                       </p>
                       <p>Citation: {item.citation_id}</p>
-                    </details>
+                    </details></> : <p>Source details are unavailable.</p>}
                   </article>
                 );
               })}
@@ -565,7 +638,7 @@ function App() {
             <span aria-hidden="true">⌕</span>
             <h2>Start with a question</h2>
             <p>
-              Your answer, supporting passages, and search steps will appear
+              Your answer, supporting evidence, and search steps will appear
               here.
             </p>
           </section>
@@ -573,7 +646,7 @@ function App() {
       </main>
       <footer>
         Redwood Inference{" "}
-        <span>Milestone demo · Verify claims against the cited passages</span>
+        <span>Milestone demo · Verify claims against the cited evidence</span>
       </footer>
     </div>
   );

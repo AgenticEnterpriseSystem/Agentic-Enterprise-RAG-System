@@ -1,10 +1,15 @@
 """Shared retrieval infrastructure with isolated benchmark or request scopes."""
 import json
+import hashlib
+import logging
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 from typing import Literal
 from uuid import uuid4
+from weakref import WeakKeyDictionary
 
 from pydantic import ConfigDict, Field, field_validator
 
@@ -16,13 +21,85 @@ from src.retrieval.factory import (RetrievalConfigurationError as RuntimeConfigu
                                    load_store_retriever)
 from src.access.contracts import (AccessDenied, EvidenceValidationError, RequestContext, ResolvedIdentity,
     ScopedUserContext, SnapshotMismatch, guarded_dispatch, validate_grounded_evidence)
-from src.contracts import (Answer, Chunk, Evidence, QueryRequest, QueryResponse,
+from src.contracts import (AggregateEvidence, Answer, Chunk, Evidence, QueryRequest, QueryResponse,
                            PassageEvidence, SearchRequest, SnapshotRef, Trace, TraceStep,
-                           Usage, UserContext, validate_evidence)
+                           StructuredRecord, Usage, UserContext, validate_evidence)
 from src.storage.contracts import ReadFilters, validate_read_more_bounds
 from src.storage.fingerprints import ValidatedCatalog
 from src.generation.generator import (AnthropicConfig, AnthropicProvider, Completion,
                                       GenerationConfig, GroundedGenerator, ProviderError)
+
+
+log = logging.getLogger(__name__)
+
+
+def _canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False,
+                      allow_nan=False).encode('utf-8')
+
+
+def _sha(value):
+    return hashlib.sha256(value).hexdigest()
+
+
+class RuntimeCapture:
+    """Issued, immutable, memory-only input receipt; never an HTTP history DTO.
+
+    Sensitive state is held in a weak issuance registry rather than assignable
+    attributes. Copying or fabricating the visible receipt cannot issue a capture.
+    """
+
+    __slots__ = ('__weakref__',)
+
+    def __new__(cls):
+        raise TypeError('Runtime captures are issued by the authenticated runtime')
+
+    def __init_subclass__(cls, **kwargs):
+        raise TypeError('Runtime captures cannot be subclassed')
+
+    def __copy__(self):
+        raise TypeError('Runtime captures cannot be copied')
+
+    def __deepcopy__(self, memo):
+        raise TypeError('Runtime captures cannot be copied')
+
+    def __reduce_ex__(self, protocol):
+        raise TypeError('Runtime captures cannot be serialized')
+
+    @property
+    def response(self):
+        value = _capture_state(self)['response']
+        return QueryResponse.model_validate(value.model_dump(warnings=False))
+
+    @property
+    def generation_evidence(self):
+        return tuple(type(item).model_validate(item.model_dump(warnings=False))
+                     for item in _capture_state(self)['selected'])
+
+    @property
+    def payload_sha256(self):
+        return _capture_state(self)['payload_sha256']
+
+    @property
+    def binding(self):
+        value = _capture_state(self)['context'].binding
+        return type(value).model_validate(value.model_dump(warnings=False))
+
+    @property
+    def run_id(self):
+        return _capture_state(self)['response'].trace.run_id
+
+
+_CAPTURES = WeakKeyDictionary()
+_CAPTURE_LOCK = Lock()
+
+
+def _capture_state(capture, runtime=None):
+    with _CAPTURE_LOCK:
+        state = _CAPTURES.get(capture) if type(capture) is RuntimeCapture else None
+    if state is None or (runtime is not None and state['runtime'] is not runtime):
+        raise AccessDenied('An issued current runtime capture is required')
+    return state
 
 
 class WebSettings(RetrievalSettings):
@@ -306,10 +383,62 @@ class _ScopedRetriever:
         return result
 
 
+class _RunBoundRegistry:
+    """An aggregate issued to another run is never this request's evidence."""
+
+    def __init__(self, runtime, context, run_id):
+        self.runtime, self.context, self.run_id = runtime, context, run_id
+
+    def resolve(self, artifact_id):
+        import sqlalchemy as sa
+        from src.db import schema
+        from src.db.runtime import DatabaseRoleError
+        from src.access.contracts import PolicyUnavailable
+
+        guard, context = self.runtime.resolver, self.context
+        guard.assert_current(context)
+        try:
+            with self.runtime.database.transaction(context) as connection:
+                bound = connection.execute(sa.select(schema.aggregate_results.c.run_id).where(
+                    schema.aggregate_results.c.artifact_id == artifact_id)).scalar_one_or_none()
+        except (sa.exc.SQLAlchemyError, DatabaseRoleError):
+            raise PolicyUnavailable('Current aggregate evidence is unavailable') from None
+        guard.assert_current(context)
+        if bound != self.run_id:
+            raise AccessDenied('Aggregate evidence is unavailable in this run')
+        result = self.runtime.jira_tool.registry(context, guard=guard).resolve(artifact_id)
+        guard.assert_current(context)
+        return result
+
+
+class _RunJira:
+    def __init__(self, runtime, context, run_id, search, registry):
+        self.runtime, self.context, self.run_id = runtime, context, run_id
+        self.search, self.registry = search, registry
+
+    def execute(self, request):
+        from src.contracts import ToolRequest
+        if not isinstance(request, ToolRequest):
+            raise EvidenceValidationError('A bound structured request is required')
+        ScopedUserContext.require_context(request.user, self.context)
+        if (request.source_type != 'jira' or type(request.limit) is not int
+                or not 1 <= request.limit <= self.search.top_k
+                or (self.search.source_types and 'jira' not in self.search.source_types)
+                or self.search.after is not None or self.search.before is not None):
+            raise AccessDenied('Structured request exceeds its admitted filters')
+        self.runtime.runs.require_pending(self.context, self.run_id)
+        result = self.runtime.jira_tool.execute(request, context=self.context,
+            guard=self.runtime.resolver, run_id=self.run_id)
+        self.runtime._native(self.context, (*result.evidence, *result.records), self.registry)
+        return result
+
+
 class AuthenticatedRuntime:
     """Indexes are shared; identity, scope, bridge and agent belong to one query."""
 
-    def __init__(self, settings, retriever, resolver, *, database, provider=None):
+    def __init__(self, settings, retriever, resolver, *, database, provider=None,
+                 router=None, provider_identity=None, provider_max_output_tokens=1024,
+                 router_attestation=None):
         self.settings = WebSettings.model_validate(settings.model_dump(warnings=False))
         if database is None or getattr(resolver, 'database', None) is not database:
             raise RuntimeConfigurationError('Authenticated runtime requires the shared authentication database.')
@@ -335,6 +464,34 @@ class AuthenticatedRuntime:
         except (ValueError, TypeError):
             raise RuntimeConfigurationError('Authenticated retrieval requires the shared canonical catalogue.') from None
         self.database, self.retriever, self.resolver, self.provider = database, retriever, resolver, provider
+        from src.retrieval.tools import JiraTool
+        from src.storage.runs import RunRepository
+        from src.evaluation.experiment_contracts import ModelProvenance
+        if type(provider_max_output_tokens) is not int or provider_max_output_tokens < 1:
+            raise RuntimeConfigurationError('Provider output limit must be a positive server integer.')
+        if isinstance(provider, AnthropicProvider):
+            actual_identity = ModelProvenance(provider='anthropic', model_id=provider.config.model)
+            if provider_identity is not None and provider_identity != actual_identity:
+                raise RuntimeConfigurationError('Provider identity differs from its configured model.')
+            provider_identity = actual_identity
+            provider_max_output_tokens = provider.config.max_output_tokens
+        elif provider is None:
+            provider_identity = ModelProvenance(provider='disabled', model_id='retrieval-only')
+        elif provider_identity is not None:
+            try:
+                provider_identity = ModelProvenance.model_validate(provider_identity.model_dump(warnings=False))
+            except (ValueError, AttributeError):
+                raise RuntimeConfigurationError('Scripted provider identity must be explicitly typed.') from None
+        self.router, self._provider_identity = router, provider_identity
+        self._provider_max_output_tokens = provider_max_output_tokens
+        self._router_attestation = None
+        if router_attestation is not None:
+            self._router_attestation = self._fixture_route(router_attestation)
+            if not callable(getattr(router, 'export_attestation', None)):
+                raise RuntimeConfigurationError('A fixture router must explicitly attest its current behavior.')
+        self._router_profile()
+        self.jira_tool = JiraTool(database, self.snapshot, catalog=self._catalog)
+        self.runs = RunRepository(database, resolver)
         sources = getattr(retriever, 'source_types', ())
         sources = sources() if callable(sources) else sources
         self._source_types = frozenset(sources)
@@ -345,7 +502,50 @@ class AuthenticatedRuntime:
         return {'mode': self.settings.mode, 'retrieval': self.settings.retrieval,
                 'authentication': 'local', 'generation_enabled': self.provider is not None}
 
+    def _native(self, context, evidence, registry):
+        return validate_grounded_evidence(context, tuple(evidence), self.resolver, registry,
+            record_validator=lambda records: self.jira_tool.validate_records(
+                context, records, guard=self.resolver))
+
+    @staticmethod
+    def _fixture_route(value):
+        if (type(value) is not dict or set(value) != {'kind', 'router_id', 'behavior'}
+                or value.get('kind') != 'scripted_fixture'
+                or not isinstance(value.get('router_id'), str)
+                or not value['router_id'].strip() or len(value['router_id']) > 128
+                or type(value.get('behavior')) is not dict):
+            raise RuntimeConfigurationError('A canonical explicit fixture-route attestation is required.')
+        try:
+            encoded = _canonical(value)
+            if len(encoded) > 16384:
+                raise ValueError()
+            return json.loads(encoded)
+        except (ValueError, TypeError, RecursionError):
+            raise RuntimeConfigurationError('Fixture-route attestation must be bounded finite JSON.') from None
+
+    def _router_profile(self):
+        from src.agents.routing import ModelRouter
+        if self.router is None:
+            return {'kind': 'text_router', 'version': '1'}
+        if type(self.router) is ModelRouter:
+            if self.router.provider is not self.provider:
+                raise RuntimeConfigurationError('The model router must share the attested runtime provider.')
+            return {'kind': 'model_router', 'version': '1'}
+        if self._router_attestation is None:
+            return None
+        try:
+            supplied = self.router.export_attestation()
+        except Exception:
+            raise EvidenceValidationError('Explicit fixture-route attestation is unavailable') from None
+        current = self._fixture_route(supplied)
+        if current != self._router_attestation:
+            raise EvidenceValidationError('Explicit fixture-route behavior changed after server configuration')
+        return current
+
     def query(self, body: QueryRequest, identity: ResolvedIdentity):
+        return self.query_with_capture(body, identity).response
+
+    def query_with_capture(self, body: QueryRequest, identity: ResolvedIdentity):
         if not isinstance(body, QueryRequest):
             raise AccessDenied('A validated question request is required')
         if not isinstance(identity, ResolvedIdentity):
@@ -376,40 +576,220 @@ class AuthenticatedRuntime:
         request = SearchRequest(query=body.question.strip(), user=user, top_k=self.settings.top_k,
                                 source_types=sources, after=body.after, before=body.before)
         bridge = _ScopedRetriever(self.retriever, context, self.resolver, request, self._catalog)
-        with guarded_dispatch(context, self.resolver):
-            if self.provider is not None:
+        # An explicitly attested route must still describe the behavior admitted
+        # now; an entirely unattested injected route remains nonexportable.
+        self._router_profile()
+        from src.agents.routing import ToolSpec
+        from src.storage.runs import RunStepMetadata
+        run_id = str(uuid4())
+        registry = _RunBoundRegistry(self, context, run_id)
+        selected, payload_hash = (), None
+        # Capture code bytes before dispatch; a later operator mapping must bind
+        # to these same runtime modules rather than merely name a Git commit.
+        source_files = self._source_files()
+        try:
+            export_profile = self._scientific_profile(body)
+        except EvidenceValidationError:
+            # Ordinary injected adapters/providers can still execute guarded
+            # queries. They cannot acquire an invented experiment attestation.
+            export_profile = None
+
+        def on_input(evidence, payload):
+            nonlocal selected, payload_hash
+            if not isinstance(payload, dict) or payload.get('question') != request.query:
+                raise EvidenceValidationError('Generation input differs from the admitted question')
+            checked = tuple(type(item).model_validate(item.model_dump(warnings=False)) for item in evidence)
+            bridge._passages(tuple(item for item in checked if isinstance(item, PassageEvidence)), bridge.filters)
+            self._native(context, checked, registry)
+            selected, payload_hash = checked, _sha(_canonical(payload))
+
+        config_sha = _sha(_canonical({'settings': self.settings.model_dump(mode='json', exclude={
+            'frontend_dist', 'allowed_origins'}), 'request': body.model_dump(mode='json', exclude={'question'}),
+            'source_files': source_files, 'effective_profile': export_profile}))
+        self.runs.begin(context, run_id, mode=body.mode, question=request.query, config_sha256=config_sha)
+        try:
+            with guarded_dispatch(context, self.resolver, aggregates=registry,
+                    record_validator=lambda records: self.jira_tool.validate_records(context, records, guard=self.resolver)):
                 generation = GenerationConfig(max_context_chars=self.settings.max_context_chars, retries=0)
+                tools = {'jira': ToolSpec(_RunJira(self, context, run_id, request, registry), 'jira',
+                    'Verified native Jira records and exact counts of canonical source records; native keys may repeat.',
+                    ('lookup', 'filter', 'count'), ('doc_id', 'native_key', 'status', 'priority', 'project_id'))}
                 agent = SearchAgent(bridge, EvidenceCritic(self.provider, generation),
-                    GroundedGenerator(self.provider, generation), config=AgentConfig(
-                        max_rounds=self.settings.max_rounds, max_context_chars=self.settings.max_context_chars,
-                        max_tokens=self.settings.max_tokens, max_seconds=self.settings.max_seconds,
+                    GroundedGenerator(self.provider, generation, on_input=on_input), router=self.router,
+                    tools=tools, config=AgentConfig(max_rounds=self.settings.max_rounds,
+                        max_context_chars=self.settings.max_context_chars, max_tokens=self.settings.max_tokens,
+                        max_seconds=self.settings.max_seconds,
                         max_cost_usd=self.settings.question_budget_usd if self.settings.mode == 'live' else 0))
-                response = agent.run(request, single_pass=body.mode == 'baseline',
-                                     context=context, guard=self.resolver)
-            else:
-                began = time.monotonic()
-                hits = bridge.search(request)
-                elapsed = (time.monotonic() - began) * 1000
-                response = QueryResponse(snapshot=context.binding.snapshot,
-                    answer=Answer(status='insufficient_evidence',
-                        text='Retrieved passages only. Answer generation and critique are disabled in retrieval-only mode.'),
-                    sources=hits, trace=Trace(run_id=str(uuid4()), stop_reason='single_pass',
-                        total_latency_ms=elapsed, usage=Usage(estimated_cost_usd=0),
-                        steps=(TraceStep(round_number=1, query=request.query, tool='text_search',
-                            evidence_ids=tuple(item.citation_id for item in hits), source_types=sources,
-                            elapsed_ms=elapsed, usage=Usage(estimated_cost_usd=0)),)))
-            if not isinstance(response, QueryResponse):
-                raise EvidenceValidationError('Runtime returned an invalid response')
+                response = agent.run(request, single_pass=body.mode == 'baseline', context=context,
+                    guard=self.resolver, run_id=run_id, retrieval_only=self.provider is None,
+                    aggregates=registry, record_validator=lambda records: self.jira_tool.validate_records(
+                        context, records, guard=self.resolver))
+                if not isinstance(response, QueryResponse):
+                    raise EvidenceValidationError('Runtime returned an invalid response')
+                try:
+                    response = QueryResponse.model_validate(response.model_dump(warnings=False))
+                except ValueError:
+                    raise EvidenceValidationError('Runtime returned an invalid response') from None
+                if response.snapshot != context.binding.snapshot or response.trace.run_id != run_id:
+                    raise SnapshotMismatch('Response differs from the request snapshot or server run')
+                bridge._passages(tuple(item for item in response.sources if isinstance(item, PassageEvidence)), bridge.filters)
+                self._native(context, response.sources, registry)
+                if response.trace.stop_reason == 'clarification':
+                    selected, payload_hash = (), None
+                for ordinal, step in enumerate(response.trace.steps, 1):
+                    self.runs.append(context, run_id, ordinal, RunStepMetadata(
+                        tool=step.tool, round_number=step.round_number,
+                        evidence_ids=step.evidence_ids, query_sha256=_sha(step.query.encode('utf-8')),
+                        source_types=step.source_types, elapsed_ms=step.elapsed_ms, usage=step.usage,
+                        input_payload_sha256=payload_hash if step.tool.split(':', 1)[0] == 'generate' else None))
+                self.runs.finish(context, run_id,
+                    status='clarification' if response.trace.stop_reason == 'clarification' else response.answer.status,
+                    usage=response.trace.usage, latency_ms=response.trace.total_latency_ms,
+                    finished_at=datetime.now(timezone.utc))
+                self.resolver.assert_current(context)
+                context.assert_bound()
+        except Exception:
+            # A failed authority check may make even the pending row invisible.
+            # Do not elevate or manufacture a terminal result to repair history.
+            log.warning('Run lifecycle incomplete; current authority did not permit completion')
+            raise
+        capture = object.__new__(RuntimeCapture)
+        state = {'runtime': self, 'context': context, 'response': response, 'selected': selected,
+            'payload_sha256': payload_hash, 'question': request.query, 'body': body,
+            'registry': registry, 'source_files': source_files, 'profile': export_profile}
+        with _CAPTURE_LOCK:
+            _CAPTURES[capture] = state
+        return capture
+
+    def get_run_metadata(self, run_id, identity):
+        if not isinstance(identity, ResolvedIdentity):
+            raise AccessDenied('A current authenticated identity is required')
+        identity = ResolvedIdentity.model_validate(identity.model_dump(warnings=False))
+        return self.runs.get_metadata(self.resolver.resolve(identity), run_id)
+
+    @staticmethod
+    def _source_files():
+        # Bound all application source, including policy/storage/tool validation.
+        # Read only code bytes, never model/index contents or operator secrets.
+        return {path.relative_to(ROOT).as_posix(): _sha(path.read_bytes())
+                for path in sorted((ROOT / 'src').rglob('*.py'))}
+
+    def export_profile(self, capture):
+        state = self._export_state(capture)
+        expected = state['profile']
+        if expected is None or self._scientific_profile(state['body']) != expected:
+            raise EvidenceValidationError('Actual experiment settings are unavailable or changed after capture')
+        return {**json.loads(_canonical(expected)), 'source_files': dict(state['source_files'])}
+
+    def _scientific_profile(self, body):
+        from src.agents.routing import ModelRouter, ROUTER_PROMPT
+        from src.evaluation.experiment_contracts import GenerationBudgets, ModelProvenance
+        from src.retrieval.store import StoreBM25Retriever, StoreDenseRetriever, StoreHybridRetriever
+        if self._provider_identity is None:
+            raise EvidenceValidationError('Export requires the actual provider identity')
+        router_profile = self._router_profile()
+        if router_profile is None:
+            raise EvidenceValidationError('Export requires an explicit attestation of custom router behavior')
+        model_identity, output_limit = self._provider_identity, self._provider_max_output_tokens
+        if isinstance(self.provider, AnthropicProvider):
+            model_identity = ModelProvenance(provider='anthropic', model_id=self.provider.config.model)
+            output_limit = self.provider.config.max_output_tokens
+        backend = self.retriever
+        embedding = None
+        if isinstance(backend, StoreHybridRetriever):
+            method = 'store-hybrid'
+            index = {'bm25': json.loads(backend.bm25._manifest), 'dense': backend.dense.index.manifest}
+            configuration = {'hybrid': backend.config.model_dump(mode='json')}
+            dense = backend.dense
+            if backend.reranker is not None:
+                raise EvidenceValidationError('Export requires an explicitly attested reranker profile')
+        elif isinstance(backend, StoreDenseRetriever):
+            method, index, configuration, dense = 'store-dense', backend.index.manifest, {}, backend
+        elif isinstance(backend, StoreBM25Retriever):
+            method, index, configuration, dense = 'store-bm25', json.loads(backend._manifest), {}, None
+        else:
+            raise EvidenceValidationError('Export requires an attested store-backed retriever')
+        if dense is not None:
+            actual_model = dense.encoder.identity
+            embedding = ModelProvenance(provider='sentence-transformers',
+                model_id=actual_model['name'], revision=actual_model.get('revision')).model_dump(mode='json')
+            configuration['dense_execution'] = {'block_rows': dense.index.block_rows,
+                                                'file_cache_policy': dense.index.file_cache_policy}
+        configuration.update(method=method, top_k=self.settings.top_k,
+            router=router_profile,
+            filters={'source_types': list(body.source_types or self.settings.allowed_sources),
+                     'after': body.after.isoformat() if body.after else None,
+                     'before': body.before.isoformat() if body.before else None})
+        index = json.loads(_canonical(index))
+        budgets = GenerationBudgets(top_k=self.settings.top_k, max_question_chars=8000,
+            max_context_chars=self.settings.max_context_chars, max_output_tokens=output_limit,
+            max_run_tokens=self.settings.max_tokens, max_run_seconds=self.settings.max_seconds,
+            max_run_cost_usd=self.settings.question_budget_usd if self.settings.mode == 'live' else 0, retries=0)
+        return {'generation_model': model_identity.model_dump(mode='json'),
+            'budgets': budgets.model_dump(mode='json'), 'temperature': 0,
+            'workflow': 'fixed' if body.mode == 'baseline' else 'adaptive',
+            'max_rounds': 1 if body.mode == 'baseline' else self.settings.max_rounds,
+            'generator_prompt_sha256': _sha(__import__('src.generation.generator', fromlist=['SYSTEM_PROMPT']).SYSTEM_PROMPT.encode()),
+            'critic_prompt_sha256': _sha(CRITIC_PROMPT.encode()) if body.mode != 'baseline' else None,
+            'router_prompt_sha256': _sha(ROUTER_PROMPT.encode()) if type(self.router) is ModelRouter else None,
+            'retrieval': {'retriever_id': method, 'snapshot': self.snapshot.model_dump(mode='json'),
+                'index_manifest_sha256': _sha(_canonical(index)), 'config_sha256': _sha(_canonical(configuration)),
+                'embedding_model': embedding},
+            'index_manifest': index, 'retrieval_config': configuration}
+
+    def _export_state(self, capture):
+        state = _capture_state(capture, self)
+        context = state['context']
+        self.resolver.assert_current(context)
+        context.assert_bound()
+        if self._source_files() != state['source_files']:
+            raise EvidenceValidationError('Runtime source changed after input capture')
+        self.runs.get_metadata(context, state['response'].trace.run_id)
+        self._native(context, state['selected'], state['registry'])
+        self._native(context, state['response'].sources, state['registry'])
+        return state
+
+    def export_capture(self, capture, *, manifest, verified_inputs, question_id, directory=None):
+        from src.evaluation.experiment_contracts import ExperimentManifest, RuntimeCaseExport, RuntimeFailure
+        from src.evaluation.experiment_inputs import VerifiedInputs
+        from src.evaluation.experiment_io import RunDirectory
+        state = self._export_state(capture)
+        if not isinstance(manifest, ExperimentManifest) or not isinstance(verified_inputs, VerifiedInputs):
+            raise EvidenceValidationError('Export requires verified experiment inputs')
+        manifest = ExperimentManifest.model_validate(manifest.model_dump(warnings=False))
+        checked = verified_inputs.recheck(manifest)
+        if manifest.scope != state['context'].binding or manifest.retrieval.snapshot != self.snapshot:
+            raise AccessDenied('Experiment mapping differs from the current capture scope')
+        question = next((value for value in checked.questions if value.question_id == question_id), None)
+        if question_id not in manifest.question_ids or question is None or question.question != state['question']:
+            raise EvidenceValidationError('Question mapping differs from the captured runtime question')
+        profile = self.export_profile(capture)
+        declared = manifest.model_dump(mode='json')
+        for key in ('generation_model', 'budgets', 'temperature', 'workflow', 'max_rounds',
+                'generator_prompt_sha256', 'critic_prompt_sha256', 'router_prompt_sha256', 'retrieval'):
+            if declared[key] != profile[key]:
+                raise EvidenceValidationError('Experiment settings differ from the actual captured runtime')
+        for relative, digest in state['source_files'].items():
+            path = checked.files.source_repo / relative
             try:
-                response = QueryResponse.model_validate(response.model_dump(warnings=False))
-            except ValueError:
-                raise EvidenceValidationError('Runtime returned an invalid response') from None
-            if response.snapshot != context.binding.snapshot:
-                raise SnapshotMismatch('Response differs from the request snapshot')
-            bridge._passages(response.sources, bridge.filters)
-            self.resolver.assert_current(context)
-            context.assert_bound()
-            return response
+                same = path.is_file() and _sha(path.read_bytes()) == digest
+            except OSError:
+                same = False
+            if not same:
+                raise EvidenceValidationError('Experiment source differs from the captured runtime')
+        response = state['response']
+        case = RuntimeCaseExport(manifest_id=manifest.manifest_id, run_id=response.trace.run_id,
+            question_id=question_id, question=state['question'], question_sha256=_sha(state['question'].encode()),
+            response=response, generation_evidence=state['selected'],
+            error=RuntimeFailure(code='runtime_error', stage='runtime', retryable=False)
+                if response.answer.status == 'error' else None)
+        self._export_state(capture)
+        if directory is not None:
+            if not isinstance(directory, RunDirectory) or directory.manifest != manifest:
+                raise EvidenceValidationError('Export directory differs from the verified manifest')
+            directory.append_case(case)
+            self._export_state(capture)
+        return case
 
 
 def _json_file(path, *, max_bytes):
@@ -491,5 +871,6 @@ def build_runtime(settings, *, database=None, authenticated=False):
     store = PostgresDocumentStore(database, snapshot, retain_catalog=True)
     resolver = PolicyResolver(database, snapshot, source_types=settings.allowed_sources,
                               doc_ids=documents, catalog=store.validated_catalog())
+    from src.agents.routing import ModelRouter
     return AuthenticatedRuntime(settings, load_store_retriever(settings, store), resolver,
-                                database=database, provider=provider)
+        database=database, provider=provider, router=ModelRouter(provider) if provider is not None else None)

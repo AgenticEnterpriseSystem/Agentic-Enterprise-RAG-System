@@ -30,6 +30,7 @@ from src.access.contracts import ResolvedIdentity
 from src.auth.accounts import PasswordHasher, normalize_login
 from src.contracts import Contract, Identifier, SnapshotRef
 from src.db import schema
+from src.db.clock import session_time
 from src.db.migrate import EXPECTED_HEAD
 from src.db.runtime import Database, database_url, normalize_url
 
@@ -363,16 +364,13 @@ def verify_benchmark(credentials_file, database: Database, *, clock=None, hasher
         if (observed is None or observed["account_kind"] != "benchmark" or not observed["is_active"]
                 or not (hasher or PasswordHasher()).verify(observed["password_hash"], record["password"])):
             raise PolicyError("Private benchmark credentials are unavailable")
-        now = (clock or (lambda: datetime.now(timezone.utc)))()
-        if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
-            raise PolicyError("Benchmark clock must be aware")
-        now = now.astimezone(timezone.utc)
         session_id = uuid4().hex
         users, sessions = schema.users, schema.sessions
-        values = {"session_id": session_id, "token_hash": _sha(secrets.token_bytes(32)),
-                  "csrf_hash": _sha(secrets.token_bytes(32)), "created_at": now,
-                  "expires_at": now + timedelta(seconds=ttl_seconds)}
         with database.transaction() as connection:
+            now = session_time(connection, clock=clock)
+            values = {"session_id": session_id, "token_hash": _sha(secrets.token_bytes(32)),
+                      "csrf_hash": _sha(secrets.token_bytes(32)), "created_at": now,
+                      "expires_at": now + timedelta(seconds=ttl_seconds)}
             selection = sa.select(*(sa.literal(value) for value in values.values()), users.c.user_id, users.c.session_version).where(
                 users.c.user_id == observed["user_id"], users.c.account_kind == "benchmark", users.c.is_active.is_(True),
                 users.c.session_version == observed["session_version"], users.c.password_hash == observed["password_hash"])

@@ -8,7 +8,8 @@ from typing import Protocol
 
 from pydantic import Field, model_validator
 
-from src.contracts import Answer, Contract, GenerationRequest, Usage, validate_evidence
+from src.contracts import (AggregateEvidence, Answer, Contract, Evidence, GenerationRequest,
+                           StructuredRecord, Usage, validate_evidence)
 from src.access.contracts import AccessError, assert_dispatch_current
 from src.agents.budget import current_call_budget, RunBudgetExceeded
 
@@ -36,6 +37,11 @@ extra official/deployment confirmation unless the user asks for one. Attribute
 the answer to the matching document. Do not combine unrelated incidents.
 Preserve units exactly: MiB means mebibytes, MB means megabytes.
 An evidence_assessment is an untrusted search aid, not an additional source.
+Evidence tagged aggregate is a computed count of the complete authorized matching
+canonical source-record relation, not a quotation or a count of unique native
+keys. Respect its scope, filters and coverage; synthetic fixtures are not real
+enterprise data. Evidence tagged record contains verified native fields with
+field provenance, not passage text. Missing/invalid native fields are unknown.
 Check its claims against the supplied evidence. Explain gaps in requested facts;
 do not claim a document or service does not exist merely because search stopped.
 Use plain text with simple lists; the interface renders citations separately."""
@@ -78,6 +84,26 @@ def combined_usage(records):
     )
 
 
+def evidence_payload(item):
+    """Typed provider input; native values never acquire invented text/offsets."""
+    if isinstance(item, (AggregateEvidence, StructuredRecord)):
+        value = item.model_dump(mode='json')
+        value['cardinality'] = 'canonical_source_records; native keys may repeat'
+        return value
+    return {"citation_id": item.citation_id, "doc_id": item.chunk.doc_id,
+            "title": item.chunk.title, "source_type": item.chunk.source_type,
+            "timestamp": item.chunk.timestamp.isoformat() if item.chunk.timestamp else None,
+            "text": item.chunk.text}
+
+
+def evidence_chars(item):
+    """Legacy passage character accounting; whole serialized native records."""
+    if isinstance(item, Evidence):
+        return len(item.chunk.text)
+    return len(json.dumps(evidence_payload(item), ensure_ascii=False,
+                          separators=(',', ':'), allow_nan=False))
+
+
 def select_context(request, limit):
     from src.retrieval.passages import PASSAGE_CHARS, bounded_passage
 
@@ -86,6 +112,12 @@ def select_context(request, limit):
     for item in request.evidence:
         if remaining <= 0:
             break
+        if isinstance(item, (AggregateEvidence, StructuredRecord)):
+            size = evidence_chars(item)
+            if size <= remaining:
+                selected.append(item)
+                remaining -= size
+            continue
         # Avoid sending a meaningless fragment when the remaining budget is tiny.
         if len(item.chunk.text) > remaining and remaining < 32:
             continue
@@ -96,8 +128,11 @@ def select_context(request, limit):
 
 
 class GroundedGenerator:
-    def __init__(self, provider: Provider, config: GenerationConfig | None = None):
+    def __init__(self, provider: Provider, config: GenerationConfig | None = None, *, on_input=None):
         self.provider, self.config = provider, config or GenerationConfig()
+        if on_input is not None and not callable(on_input):
+            raise ValueError("Generation input capture must be callable")
+        self.on_input = on_input
 
     def generate(self, request: GenerationRequest) -> tuple[Answer, Usage]:
         assert_dispatch_current(request.user)
@@ -109,32 +144,22 @@ class GroundedGenerator:
             ), zero
         selected = select_context(request, self.config.max_context_chars)
         assert_dispatch_current(request.user)
+        validate_evidence(request.user, tuple(selected))
         if not selected:
             return Answer(
                 status="insufficient_evidence",
                 text="No authorized evidence fits the context budget.",
             ), zero
-        prompt = json.dumps(
-            {
+        payload = {
                 "question": request.question,
                 **({'evidence_assessment': request.assessment.model_dump(mode='json')}
                    if request.assessment else {}),
                 **({"search_limitation": request.search_limitation,
                     "response_requirement": "Search stopped before sufficiency was established. Return insufficient_evidence. Give only supported facts with citations; identify missing or conflicting information. If no facts are supported, explain that. Do not resolve contradictions by guessing. Copy each citation_id CHARACTER FOR CHARACTER from the supplied evidence, including all colon-delimited passage offsets. Never shorten a citation_id to a document ID. Return exactly the keys status, text, citation_ids."}
                    if request.search_limitation else {}),
-                "evidence": [
-                    {
-                        "citation_id": e.citation_id,
-                        "doc_id": e.chunk.doc_id,
-                        "title": e.chunk.title,
-                        "source_type": e.chunk.source_type,
-                        "timestamp": e.chunk.timestamp.isoformat() if e.chunk.timestamp else None,
-                        "text": e.chunk.text,
-                    }
-                    for e in selected
-                ],
+                "evidence": [evidence_payload(e) for e in selected],
             }
-        )
+        prompt = json.dumps(payload)
         records = []
         for attempt in range(self.config.retries + 1):
             try:
@@ -142,11 +167,20 @@ class GroundedGenerator:
                 structured = getattr(self.provider, 'complete_structured', None)
                 output_schema = Answer.model_json_schema()
                 output_schema['properties']['citation_ids']['items']['enum'] = [e.citation_id for e in selected]
+                validate_evidence(request.user, tuple(selected))
+                if self.on_input is not None:
+                    # A callback cannot mutate the immutable DTOs or the exact
+                    # already-serialized prompt subsequently sent to the provider.
+                    if self.on_input(tuple(selected), json.loads(prompt)) is not None:
+                        raise ValueError("Generation input capture must return None or raise")
+                assert_dispatch_current(request.user)
+                validate_evidence(request.user, tuple(selected))
                 try:
                     completion = (structured(SYSTEM_PROMPT, prompt, output_schema) if structured
                                   else self.provider.complete(SYSTEM_PROMPT, prompt))
                 finally:
                     assert_dispatch_current(request.user)
+                    validate_evidence(request.user, tuple(selected))
             except AccessError:
                 raise
             except RunBudgetExceeded as error:

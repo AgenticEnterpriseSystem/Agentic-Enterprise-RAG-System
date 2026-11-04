@@ -26,6 +26,7 @@ from src.access.contracts import (
 )
 from src.contracts import ScopeBinding, SnapshotRef
 from src.db import schema
+from src.db.clock import session_time
 from src.db.runtime import Database, DatabaseRoleError
 from src.storage.contracts import CatalogEntry
 from src.storage.fingerprints import ValidatedCatalog, catalog_fingerprint
@@ -131,7 +132,8 @@ class PolicyResolver:
             raise ValueError("Policy bitmap cache size must be an integer from 0 through 32")
         self.database = database
         self.snapshot = SnapshotRef.model_validate(snapshot.model_dump(warnings=False))
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self._default_clock = lambda: datetime.now(timezone.utc)
+        self.clock = self._default_clock if clock is None else clock
         self._cache_size = cache_size
         self._scope_cache = OrderedDict()
         self._cache_lock = Lock()
@@ -182,11 +184,8 @@ class PolicyResolver:
             while len(self._scope_cache) > self._cache_size:
                 self._scope_cache.popitem(last=False)
 
-    def _now(self):
-        now = self.clock()
-        if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
-            raise ValueError("Policy clock must be an aware datetime")
-        return now.astimezone(timezone.utc)
+    def _now(self, connection):
+        return session_time(connection, clock=None if self.clock is self._default_clock else self.clock)
 
     @contextmanager
     def _transaction(self, context=None):
@@ -235,7 +234,7 @@ class PolicyResolver:
             users.c.session_version.label("account_version")).select_from(sessions.join(users,
             sessions.c.user_id == users.c.user_id)).where(sessions.c.session_id == identity.session_id,
             sessions.c.user_id == identity.user_id)).mappings().one_or_none()
-        now = self._now()
+        now = self._now(connection)
         if (row is None or not row["is_active"] or row["revoked_at"] is not None
                 or row["created_at"] > now or row["expires_at"] <= now or identity.expires_at <= now
                 or row["issued_version"] != identity.session_version or row["account_version"] != identity.session_version):
@@ -244,7 +243,7 @@ class PolicyResolver:
             schema.policy_state.c.singleton_id == 1)).scalar_one_or_none()
         if revision is None:
             raise PolicyUnavailable("Authoritative policy revision is unavailable")
-        now = self._now()
+        now = self._now(connection)
         if row["expires_at"] <= now or identity.expires_at <= now:
             raise SessionExpired("Account or session expired while checking policy")
         if epoch is not None and revision != epoch:

@@ -520,5 +520,54 @@ intersects current grants with the operator-narrowed scope for lookup, filter,
 count and artifact reads. Missing fields and native-key ambiguity are evaluated
 only among visible records. Counts cover the full authorized matching relation,
 retain zero provenance and count canonical records rather than unique live Jira
-issues. This operator setup does not register tools with the live agent; that
-integration and typed-result rendering remain WIRE-01.
+issues.
+
+The authenticated live runtime registers this adapter with the model router as
+`jira`; text retrieval remains available for prose and mixed questions. Each
+request resolves its own current scope and uses one server run ID for tool
+artifacts, trace and persistence. Direct Python callers can inject a trusted
+router for local conformance checks. Retrieval-only mode performs its plan
+without calling the generator or critic. Native fields remain typed records;
+counts remain scoped computed evidence, including verified zero counts. The
+browser renders these forms without inventing passage text or offsets.
+
+### Current-run receipts and operator exports
+
+The runtime stores only a current-run receipt and bounded step metadata. The
+required database `query_runs.question` column contains `sha256:<digest>` of the
+normalized question, not question text. Step payloads contain typed citation
+references, query hashes, usage, timings and, for generation, a canonical JSON
+input-payload hash. Answers, source bodies, native field values, raw prompts and
+arbitrary trace payloads are not persisted as history. `GET /api/runs/{run_id}`
+returns the whitelisted current-owner metadata with `Cache-Control: no-store`;
+it does not extend the idle session or list runs.
+
+Run access retains the exact session, scope, snapshot and policy binding. A
+logout, revocation or policy/scope change can make an old receipt unavailable
+even to the same account after it resolves a new scope. If access changes while
+a query runs, its row may remain pending; completion never uses a privileged
+fallback. Counts lock the same pending parent row as terminal completion, and
+artifacts from a different run cannot become this run's generation evidence.
+
+Trusted operator code can call `runtime.query_with_capture(request, identity)`
+to retain a memory-only issued receipt. Its `generation_evidence` contains the
+exact selected DTOs observed immediately before generation dispatch;
+`payload_sha256` hashes the canonical JSON object sent to generation. The
+capture cannot be constructed, copied, deserialized or transferred to another
+runtime. Ordinary HTTP queries do not save this capture as history.
+
+Use `runtime.export_profile(capture)` to create matching experiment declarations,
+then verify the real input files with `verify_inputs`. Scripted providers must
+declare their synthetic identity explicitly through the trusted constructor;
+an unidentified injected provider cannot attest a scientific export. The
+profile includes actual budgets, prompt hashes, index manifest, retrieval
+configuration and runtime source-file hashes. An operator maps the exact
+question to a verified question ID, then calls
+`runtime.export_capture(capture, manifest=manifest, verified_inputs=verified,
+question_id=question_id, directory=run_directory)`.
+
+Export rechecks the input files, source bytes, scientific settings and current
+run ownership, and reauthorizes all returned and generation facts. It never
+reconstructs model inputs from final sources. References remain in separate
+scoring inputs and never enter the runtime request, capture or model prompt.
+Clarification and retrieval-only cases have no invented generation evidence.
