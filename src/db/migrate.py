@@ -12,7 +12,7 @@ from sqlalchemy.pool import NullPool
 from src.db.runtime import database_url, normalize_url
 
 ROOT = Path(__file__).resolve().parents[2]
-EXPECTED_HEAD = "0002_catalog_import"
+EXPECTED_HEAD = "0003_document_policy"
 
 
 def migration_config():

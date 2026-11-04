@@ -47,6 +47,7 @@ def _build_metadata() -> sa.MetaData:
         sa.Column("password_hash", sa.Text(), nullable=False),
         sa.Column("display_name", sa.Text(), nullable=False),
         sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.true()),
+        sa.Column("account_kind", sa.Text(), nullable=False, server_default=sa.text("'human'")),
         sa.Column("session_version", sa.BigInteger(), nullable=False, server_default=sa.text("0")),
         sa.Column("role", sa.Text()),
         sa.Column("department", sa.Text()),
@@ -58,6 +59,7 @@ def _build_metadata() -> sa.MetaData:
                            name="ck_users_login_normalized"),
         sa.CheckConstraint("array_position(project_ids, NULL) IS NULL",
                            name="ck_users_projects_nonnull"),
+        sa.CheckConstraint("account_kind IN ('human', 'benchmark')", name="ck_users_account_kind"),
         *_nonblank("users", "user_id", "login", "password_hash", "display_name"),
         *_nonnegative("users", "session_version"),
     )
@@ -93,12 +95,22 @@ def _build_metadata() -> sa.MetaData:
         sa.Column("user_id", sa.Text(), nullable=False),
         sa.Column("group_id", sa.Text(), nullable=False),
         sa.Column("origin", sa.Text(), nullable=False, server_default=sa.text("'operator'")),
+        sa.Column("policy_change_id", sa.Text()),
         sa.PrimaryKeyConstraint("user_id", "group_id", name="pk_group_memberships"),
         sa.ForeignKeyConstraint(["user_id"], ["rag.users.user_id"], name="fk_memberships_user"),
         sa.ForeignKeyConstraint(["group_id"], ["rag.groups.group_id"], name="fk_memberships_group"),
+        sa.ForeignKeyConstraint(["policy_change_id"], ["rag.policy_changes.change_id"], name="fk_memberships_policy_change"),
         sa.CheckConstraint("origin IN ('operator', 'synthetic')", name="ck_memberships_origin"),
     )
     sa.Index("ix_memberships_group_user", memberships.c.group_id, memberships.c.user_id)
+    sa.Table("group_requirements", catalog,
+        sa.Column("group_id", sa.Text(), nullable=False),
+        sa.Column("required_group_id", sa.Text(), nullable=False),
+        sa.PrimaryKeyConstraint("group_id", "required_group_id", name="pk_group_requirements"),
+        sa.ForeignKeyConstraint(["group_id"], ["rag.groups.group_id"], name="fk_requirements_group"),
+        sa.ForeignKeyConstraint(["required_group_id"], ["rag.groups.group_id"], name="fk_requirements_required_group"),
+        sa.CheckConstraint("group_id <> required_group_id", name="ck_requirements_not_self"),
+    )
 
     sa.Table("dataset_snapshots", catalog,
         sa.Column("snapshot_id", sa.Text(), nullable=False),
@@ -144,6 +156,51 @@ def _build_metadata() -> sa.MetaData:
         *_nonnegative("catalog_imports", "expected_document_count", "expected_passage_count",
                       "document_cursor", "span_shard", "span_cursor", "passage_cursor",
                       "unique_chunk_count", "max_document_bytes", "max_batch_bytes_observed"),
+    )
+    sa.Table("policy_changes", catalog,
+        sa.Column("change_id", sa.Text(), nullable=False),
+        sa.Column("manifest_id", sa.Text(), nullable=False),
+        sa.Column("manifest_sha256", sa.Text(), nullable=False),
+        sa.Column("action", sa.Text(), nullable=False),
+        sa.Column("snapshot_id", sa.Text(), nullable=False),
+        sa.Column("origin", sa.Text(), nullable=False),
+        sa.Column("reviewed_by", sa.Text(), nullable=False),
+        sa.Column("manifest", pg.JSONB(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
+        sa.PrimaryKeyConstraint("change_id", name="pk_policy_changes"),
+        sa.UniqueConstraint("manifest_id", "action", name="uq_policy_changes_manifest_action"),
+        sa.ForeignKeyConstraint(["snapshot_id"], ["rag.dataset_snapshots.snapshot_id"], name="fk_policy_changes_snapshot"),
+        _sha("policy_changes", "change_id"), _sha("policy_changes", "manifest_sha256"),
+        sa.CheckConstraint("action IN ('apply', 'revoke', 'benchmark')", name="ck_policy_changes_action"),
+        sa.CheckConstraint("origin IN ('operator', 'synthetic')", name="ck_policy_changes_origin"),
+        sa.CheckConstraint("jsonb_typeof(manifest) = 'object'", name="ck_policy_changes_manifest_object"),
+        *_nonblank("policy_changes", "manifest_id", "reviewed_by"),
+    )
+    sa.Table("policy_scopes", catalog,
+        sa.Column("scope_id", sa.Text(), nullable=False),
+        sa.Column("user_id", sa.Text(), nullable=False),
+        sa.Column("session_id", sa.Text(), nullable=False),
+        sa.Column("session_version", sa.BigInteger(), nullable=False),
+        sa.Column("policy_revision", sa.BigInteger(), nullable=False),
+        sa.Column("snapshot_id", sa.Text(), nullable=False),
+        sa.Column("corpus_sha256", sa.Text(), nullable=False),
+        sa.Column("catalog_sha256", sa.Text(), nullable=False),
+        sa.Column("document_count", sa.BigInteger(), nullable=False),
+        sa.Column("allowed_positions", sa.LargeBinary(), nullable=False),
+        sa.Column("bitmap_sha256", sa.Text(), nullable=False),
+        sa.Column("restriction_sha256", sa.Text(), nullable=False),
+        sa.PrimaryKeyConstraint("scope_id", name="pk_policy_scopes"),
+        sa.ForeignKeyConstraint(["user_id"], ["rag.users.user_id"], name="fk_policy_scopes_user"),
+        sa.ForeignKeyConstraint(["session_id"], ["rag.sessions.session_id"], name="fk_policy_scopes_session"),
+        sa.ForeignKeyConstraint(["snapshot_id"], ["rag.dataset_snapshots.snapshot_id"], name="fk_policy_scopes_snapshot"),
+        sa.CheckConstraint("scope_id ~ '^scope:[0-9a-f]{64}$'", name="ck_policy_scopes_scope_id"),
+        sa.CheckConstraint("octet_length(allowed_positions) = (document_count + 7) / 8", name="ck_policy_scopes_bitmap_size"),
+        sa.CheckConstraint("bitmap_sha256 = encode(sha256(allowed_positions), 'hex')", name="ck_policy_scopes_bitmap_hash"),
+        sa.CheckConstraint("CASE WHEN document_count % 8 = 0 THEN true ELSE "
+                           "get_byte(allowed_positions, (document_count / 8)::integer) >> (document_count % 8)::integer = 0 END",
+                           name="ck_policy_scopes_padding"),
+        *(_sha("policy_scopes", name) for name in ("corpus_sha256", "catalog_sha256", "bitmap_sha256", "restriction_sha256")),
+        *_nonnegative("policy_scopes", "session_version", "policy_revision", "document_count"),
     )
     documents = sa.Table("documents", catalog,
         sa.Column("snapshot_id", sa.Text(), nullable=False),
@@ -213,11 +270,13 @@ def _build_metadata() -> sa.MetaData:
         sa.Column("user_id", sa.Text()),
         sa.Column("group_id", sa.Text()),
         sa.Column("origin", sa.Text(), nullable=False, server_default=sa.text("'operator'")),
+        sa.Column("policy_change_id", sa.Text()),
         sa.PrimaryKeyConstraint("grant_id", name="pk_document_grants"),
         sa.ForeignKeyConstraint(["snapshot_id", "doc_id"],
             ["rag.documents.snapshot_id", "rag.documents.doc_id"], name="fk_grants_document"),
         sa.ForeignKeyConstraint(["user_id"], ["rag.users.user_id"], name="fk_grants_user"),
         sa.ForeignKeyConstraint(["group_id"], ["rag.groups.group_id"], name="fk_grants_group"),
+        sa.ForeignKeyConstraint(["policy_change_id"], ["rag.policy_changes.change_id"], name="fk_grants_policy_change"),
         sa.CheckConstraint("(user_id IS NULL) <> (group_id IS NULL)", name="ck_grants_one_subject"),
         sa.CheckConstraint("origin IN ('operator', 'synthetic')", name="ck_grants_origin"),
     )
@@ -353,8 +412,11 @@ users = metadata.tables["rag.users"]
 sessions = metadata.tables["rag.sessions"]
 groups = metadata.tables["rag.groups"]
 group_memberships = metadata.tables["rag.group_memberships"]
+group_requirements = metadata.tables["rag.group_requirements"]
 dataset_snapshots = metadata.tables["rag.dataset_snapshots"]
 catalog_imports = metadata.tables["rag.catalog_imports"]
+policy_changes = metadata.tables["rag.policy_changes"]
+policy_scopes = metadata.tables["rag.policy_scopes"]
 documents = metadata.tables["rag.documents"]
 document_revisions = metadata.tables["rag.document_revisions"]
 chunks = metadata.tables["rag.chunks"]

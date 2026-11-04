@@ -290,7 +290,7 @@ and validate the bounded binary body before returning the exact requested span.
 
 The lazy `PostgresDocumentStore` implements the accepted metadata/excerpt/
 read-more interface with the nonowner runtime pool. Protected body reads still
-default-deny until reviewed ACL policies land. A checked import is not actual
+default-deny without a current registered scope and explicit reviewed grants. A checked import is not actual
 login, permission policy, web integration, or a completed Docker deployment.
 
 ### Local account API
@@ -363,3 +363,71 @@ integration come later. In local-auth mode, `/api/ready` stays503 without corpus
 metadata and even a valid session receives403 for queries until document policy
 is connected. No benchmark identity is used as a fallback; login remains
 responsive while a separate RAG initialization/worker is occupied.
+
+### Reviewed document permissions
+
+Upgrade the operator database to `0003_document_policy` before resolving scopes.
+Keep migration credentials in the separate operator job; the app uses only its
+nonowner runtime pool. Provision human accounts with the interactive account CLI
+above, then review an explicit policy manifest. No role, department or project
+label creates a grant, and unclassified documents remain denied.
+
+The manifest is JSON with these fields:
+
+| Field | Required meaning |
+| --- | --- |
+| `schema_version` | `"1"` |
+| `manifest_id` | Unique reviewed patch ID; changed content needs a new ID |
+| `snapshot` | Exact SnapshotRef object from the verified import report |
+| `origin` | `operator` or explicitly synthetic QA policy |
+| `reviewed_by`, `provenance` | Named reviewer and nonempty object of provenance strings |
+| `groups` | `{group_id, label, requires: []}`; optional flat compound prerequisites |
+| `memberships` | `{user_id, group_id}` using actual provisioned IDs |
+| `grants` | `{doc_ids: [...], user_id: ...}` or `{doc_ids: [...], group_id: ...}` |
+
+For example, a synthetic `finance_exec` group can declare
+`"requires": ["finance", "executive"]`. A user needs all three explicit
+memberships (`finance_exec`, `finance`, `executive`). Membership in a project
+group alone cannot unlock an executive grant. Base groups cannot themselves be
+compound. Use real imported document IDs and the exact snapshot fingerprints;
+the tool rejects missing users, groups and documents.
+
+Run the review and apply steps with the migration job's existing credentials:
+
+```sh
+python -m src.access.repository dry-run --manifest /private/policy.json
+python -m src.access.repository apply --manifest /private/policy.json
+python -m src.access.repository revoke --manifest /private/policy.json
+```
+
+Apply is additive and idempotent; it never overwrites an existing group definition,
+grant origin or membership owner. Revoke removes only rows originally added by
+that exact manifest. It leaves group definitions/prerequisites intact and cannot
+delete a pre-existing real policy through a synthetic/no-op manifest. A revoked
+manifest requires a new review/ID before application. Policy mutations and their
+epoch changes commit or roll back together; stale request contexts must resolve
+again. Authenticated web queries remain denied until application integration.
+
+Full-corpus retrieval experiments use a separate benchmark account. Prepare a
+private JSON file containing only the exact SnapshotRef object from the import
+report, then explicitly review all-document access:
+
+```sh
+python -m src.access.repository benchmark-create retrieval-benchmark \
+  --snapshot /private/snapshot.json \
+  --credentials-file /private/benchmark.private.json \
+  --reviewed-by local-operator --provenance "Reviewed retrieval-only benchmark" \
+  --all-documents
+python -m src.access.repository benchmark-verify \
+  --credentials-file /private/benchmark.private.json
+```
+
+These commands print no credential, raw nonce or identity. Creation requires a
+new path, writes mode0600 exclusively and never replaces an existing file or
+account. Verification uses the runtime credentials, reads a bounded ordinary0600
+file through one non-symlink file descriptor, and produces an internal identity
+for library consumers. Never place this file in source control. Benchmark kind
+is immutable and is rejected by public login and `/me`, even with its correct
+private password or a valid nonce; it cannot become a browser login bypass.
+The `--synthetic` flag labels QA provenance explicitly. No default benchmark or
+human policy is seeded into a deployment.
