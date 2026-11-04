@@ -653,8 +653,8 @@ The next results must establish whether retaining the approximately 2.68 GB raw
 dense cache improves warm latency while fitting the existing memory limits.
 Input checks remain inside the
 measured boundary unless a separately reviewed immutable-deployment receipt
-protocol is explicitly introduced after evidence. Full numerical, serving and
-resource gates remain open until a complete measured protocol passes.
+protocol is explicitly introduced after evidence. Numerical, serving and
+resource acceptance requires the complete protocol; the accepted run is recorded below.
 
 Startup margin also remains an explicit gate. The optimized full-profile run
 at source `51bd422` completed all 120 requests with startup 96.652 seconds,
@@ -667,5 +667,42 @@ SQL scans, model validation and fingerprinting; it does not skip raw input hashe
 model loading or shard checks. The accepted catalogue-only prerequisite built
 all 511,958 entries in 13.227 seconds, with no additional metadata queries for
 three policy resolvers. That component result is not full-runtime acceptance;
-the changed retrieval consumers require fresh full/narrow/empty and independent
-reference measurements under the unchanged limits.
+the changed retrieval consumers required fresh full/narrow/empty and independent
+reference measurements under the unchanged limits. Those subsequent measurements
+passed at source `a51e6a9`.
+
+### Accepted full-corpus retrieval measurement
+
+The November 3 local run at `a51e6a9` passed the complete protocol: 511,958
+documents, 1,746,899 passages and all 26 dense shards. All 200 candidate cases
+matched the independent reference at rank prefixes 5, 10 and 20 for dense and
+hybrid results, with the declared score tolerances and exact document/span
+ordering. Canonical source verification checked 164 distinct excerpts and
+expansions, including exact text and Unicode offsets. No LLM answer generation
+or paid model call was involved.
+
+| Access scope | Process startup | First request | Maximum later request | Maximum paired app + DB sample |
+| --- | ---: | ---: | ---: | ---: |
+| Full | 64.746s | 8.809s | 7.477s | 5.35GiB |
+| Narrow | 55.932s | 3.340s | 2.588s | 5.30GiB |
+| Empty | 54.628s | 2.096s | 0.818s | 5.05GiB |
+
+These are fresh-process/warm-request measurements, without a cold-disk claim.
+Each process used the same six-GiB/no-extra-swap/two-CPU application limit,
+384-MiB PostgreSQL service and unchanged Docker VM allocation. The parent
+sampler began before each process and verified paired app/database coverage;
+all resource proofs passed with zero OOM counter increases. The kernel did not
+provide a true memory high-water counter, so the table reports observed paired
+samples rather than a claimed kernel peak.
+
+Verified read-only Linux index and canonical-source volumes were used; the
+manifest-matched CPU/fp16 BGE model stayed resident and nonempty requests encoded
+their queries again. Empty scopes and unknown-date restrictions skipped encoding
+when no evidence could be admitted. File hashes, model loading, every shard,
+policy/session freshness and protected text reads remained inside their stated
+boundaries. The final comparison manifest SHA256 is
+`0efa0a21215a66cab53e102e48dbbe8ed237c1650c95688f8b5f9ee77865a480`.
+
+This accepts the retrieval component and its measured envelope. Authenticated
+HTTP integration, account UI, packaged full-application Docker delivery and
+recovery remain later application/delivery gates.
