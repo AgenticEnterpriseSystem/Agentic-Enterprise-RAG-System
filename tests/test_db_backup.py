@@ -20,7 +20,9 @@ def test_snapshot_restores_data_revision_and_default_denial(pg_urls):
         pytest.skip("Snapshot restore requires the explicitly labeled disposable Docker server")
     label = subprocess.run(["docker", "inspect", "--format",
         '{{index .Config.Labels "rag.task"}}', container], capture_output=True, text=True, check=True)
-    assert label.stdout.strip() == "DB-01", "Refusing a non-test database container"
+    # Both labels identify explicitly created disposable test servers. The
+    # authoritative full-corpus DOC-01 service is deliberately excluded.
+    assert label.stdout.strip() in {"DB-01", "TOOL-01"}, "Refusing a non-test database container"
 
     with disposable_database(pg_urls) as source, disposable_database(pg_urls) as target:
         upgrade_database(url_string(source.migration))
@@ -37,7 +39,7 @@ def test_snapshot_restores_data_revision_and_default_denial(pg_urls):
         subprocess.run(["docker", "exec", "-i", container, "pg_restore", "--no-password",
             "--exit-on-error", "-U", "rag_migrator", "-d", target.migration.database],
             input=dump, capture_output=True, check=True)
-        assert current_revision(url_string(target.migration)) == "0003_document_policy"
+        assert current_revision(url_string(target.migration)) == "0004_jira_feed"
         upgrade_database(url_string(target.migration))
         owner = engine_for(target.migration)
         try:

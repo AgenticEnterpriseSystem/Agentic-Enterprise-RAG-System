@@ -303,16 +303,88 @@ class GenerationRequest(Contract):
 
 
 class ToolRequest(Contract):
-    user: UserContext
+    # Kept for the existing router/reference adapters. Store-backed tools require
+    # an explicit RequestContext and never treat this compatibility field as authority.
+    user: UserContext = UserContext()
     source_type: Identifier
     operation: Literal["lookup", "filter", "count"]
-    filters: dict[str, str | int | bool] = Field(default_factory=dict)
-    limit: int = Field(default=10, ge=1, le=100)
+    filters: dict[str, StrictStr | StrictInt | StrictBool] = Field(default_factory=dict)
+    limit: int = Field(default=10, strict=True, ge=1, le=100)
+
+
+class RecordSource(Contract):
+    feed_id: Sha256
+    repository: Identifier
+    git_commit: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
+    git_blob: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
+    path: Identifier
+    raw_sha256: Sha256
+    parser_version: Identifier
+
+    @model_validator(mode="after")
+    def relative_jira_source(self):
+        if (not self.path.startswith("generated_data/sources/jira/") or not self.path.endswith(".json")
+                or any(part in {"", ".", ".."} for part in self.path.split("/")) or "\0" in self.path):
+            raise ValueError("Native record provenance requires its relative Jira Git path")
+        return self
+
+
+class RecordField(Contract):
+    field: Literal["native_key", "status", "priority", "project_id"]
+    json_pointer: Identifier
+    state: Literal["verified", "missing", "invalid"]
+
+
+class StructuredRecord(Contract):
+    """Authorized native fields, not an invented canonical-text passage.
+
+    Jira native keys are not unique in the pinned benchmark. record_id is the
+    canonical document UUID. WIRE-01 must explicitly consume this DTO before
+    native fields become generator/UI evidence; they are not PassageEvidence.
+    """
+    scope: ScopeBinding
+    citation_id: Identifier
+    record_id: Identifier
+    doc_id: Identifier
+    revision_id: Sha256
+    native_key: Identifier | None = None
+    status: Identifier | None = None
+    priority: Identifier | None = None
+    project_id: Identifier | None = None
+    source: RecordSource
+    field_provenance: tuple[RecordField, ...]
+
+    @model_validator(mode="after")
+    def canonical_record(self):
+        if self.record_id != self.doc_id or self.citation_id != "jira-record:" + self.source.feed_id + ":" + self.doc_id:
+            raise ValueError("Native record identity differs from its canonical document")
+        pointers = {"native_key": "/key", "status": "/status", "priority": "/priority", "project_id": "/project"}
+        if len(self.field_provenance) != 4 or {item.field for item in self.field_provenance} != pointers.keys():
+            raise ValueError("Native record requires unique complete field provenance")
+        for item in self.field_provenance:
+            if item.json_pointer != pointers[item.field] or ((getattr(self, item.field) is not None) != (item.state == "verified")):
+                raise ValueError("Native field value differs from its declared provenance")
+        return self
 
 
 class ToolResult(Contract):
-    evidence: tuple[Evidence, ...] = ()
+    evidence: tuple[PassageEvidence | AggregateEvidence | Evidence, ...] = ()
     count: int | None = Field(default=None, ge=0)
+    records: tuple[StructuredRecord, ...] = ()
+    coverage: Literal["verified_records", "synthetic_fixture", "unknown"] = "unknown"
+    limitation: str | None = None
+    truncated: bool = False
+    ambiguous: bool = False
+
+    @model_validator(mode="after")
+    def native_result(self):
+        aggregates = [item for item in self.evidence if isinstance(item, AggregateEvidence)]
+        scopes = [item.scope for item in aggregates] + [item.scope for item in self.records]
+        if scopes and (self.coverage == "unknown" or any(scope != scopes[0] for scope in scopes)):
+            raise ValueError("Native tool results require one declared scope and coverage")
+        if aggregates and (len(aggregates) != 1 or self.count != aggregates[0].count or self.coverage != aggregates[0].coverage):
+            raise ValueError("Native count must match its authoritative aggregate evidence")
+        return self
 
 
 class Retriever(Protocol):

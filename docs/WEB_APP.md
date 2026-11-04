@@ -254,7 +254,8 @@ docker compose --profile database --profile migrations run --build --rm migrate
 docker compose --profile database --profile imports run --build --rm import-corpus
 ```
 
-The importer requires the current single migration head `0002_catalog_import`.
+The importer requires the current single migration head `0004_jira_feed`;
+`0002_catalog_import` introduced canonical storage without changing later heads.
 `RAG_SNAPSHOT_ID` names its immutable snapshot. Rerunning with identical files
 verifies/resumes the same import; changed source files reject. Each transaction
 commits its rows and checkpoint together, and incomplete imports stay unavailable.
@@ -431,3 +432,42 @@ is immutable and is rejected by public login and `/me`, even with its correct
 private password or a valid nonce; it cannot become a browser login bypass.
 The `--synthetic` flag labels QA provenance explicitly. No default benchmark or
 human policy is seeded into a deployment.
+
+
+### Native Jira feed
+
+Upgrade through `0004_jira_feed` with the separate migration credentials. The
+native importer uses only the dedicated migrator login; the application keeps
+its nonowner runtime pool. First complete the canonical document import. Then
+provide a local checkout of the project's pinned upstream Jira subtree and the
+same canonical Parquet and SnapshotRef used by that ready database snapshot:
+
+```sh
+python -m src.data.structured --source-repo /private/EnterpriseRAG-Bench \
+  --corpus /private/corpus/documents.parquet --snapshot /private/snapshot.json --preflight
+python -m src.data.structured --source-repo /private/EnterpriseRAG-Bench \
+  --corpus /private/corpus/documents.parquet --snapshot /private/snapshot.json
+```
+
+The importer performs no downloads. Obtain only the pinned Jira files through a
+partial/sparse Git checkout when the raw repository is absent. It verifies the
+actual commit, origin, Git blobs, file hashes and every canonical Jira UUID,
+source path and body revision. Preflight reports operator-only global coverage;
+do not send that manifest to the model or browser. The pinned feed has 6,118
+canonical records, 575 repeated native keys and two excluded noncanonical aliases.
+The native key is therefore a nonunique lookup field, not a record identifier.
+
+Import is idempotent and resumes matching committed batches. A changed source,
+snapshot or native field requires a separately reviewed import design; existing
+ready feeds and records cannot be replaced in place. Incomplete feed or required
+field coverage yields unknown, not a zero count. Supported exact filters are
+`doc_id`, `native_key`, `status`, `priority` and `project_id`; lookup requires one
+of `doc_id` or `native_key`. There are no inferred open-status or date filters.
+
+The adapter requires an explicit resolved context and freshness guard. RLS
+intersects current grants with the operator-narrowed scope for lookup, filter,
+count and artifact reads. Missing fields and native-key ambiguity are evaluated
+only among visible records. Counts cover the full authorized matching relation,
+retain zero provenance and count canonical records rather than unique live Jira
+issues. This operator setup does not register tools with the live agent; that
+integration and typed-result rendering remain WIRE-01.
