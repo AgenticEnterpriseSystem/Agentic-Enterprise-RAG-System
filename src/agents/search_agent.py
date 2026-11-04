@@ -9,8 +9,12 @@ from src.agents.context import ContextBudgetError, select_agent_context
 from src.agents.budget import CallBudget, RunBudgetExceeded, call_budget
 from src.agents.routing import Route, TextRouter
 from src.agents.search_critic import AgentError
+from src.access.contracts import (
+    AccessDenied, AccessError, ScopedUserContext, guarded_dispatch,
+    validate_grounded_evidence,
+)
 from src.contracts import (
-    Answer, Contract, GenerationRequest, QueryResponse, SearchRequest, Trace,
+    Answer, Contract, CriticDecision, GenerationRequest, QueryResponse, SearchRequest, Trace,
     TraceStep, Usage, validate_evidence,
 )
 from src.generation.generator import combined_usage, select_context
@@ -33,9 +37,20 @@ class SearchAgent:
         self.router, self.tools = router or TextRouter(), dict(tools or {})
         self.config, self.clock = config or AgentConfig(), clock
 
-    def run(self, request: SearchRequest, *, single_pass=False) -> QueryResponse:
+    def run(self, request: SearchRequest, *, single_pass=False, context=None, guard=None) -> QueryResponse:
+        scoped = context is not None or guard is not None or isinstance(request.user, ScopedUserContext)
+        if not scoped:
+            return self._run(request, single_pass=single_pass)
+        if context is None or guard is None:
+            raise AccessDenied("Scoped search requires a request context and freshness guard")
+        ScopedUserContext.require_context(request.user, context)
+        with guarded_dispatch(context, guard):
+            return self._run(request, single_pass=single_pass, request_context=context, guard=guard)
+
+    def _run(self, request: SearchRequest, *, single_pass=False, request_context=None, guard=None) -> QueryResponse:
         started = self.clock()
         steps, usages, evidence = [], [], {}
+        trace_evidence = {}
         feedback = None
         context_order = []
         retained = {}
@@ -43,6 +58,32 @@ class SearchAgent:
         initial_ids = set()
         config = self.config
         round_number = 1
+
+        def current():
+            if request_context is not None:
+                ScopedUserContext.require_context(request.user, request_context)
+                guard.assert_current(request_context)
+                request_context.assert_bound()
+
+        def perform(operation, *args, **kwargs):
+            current()
+            try:
+                return operation(*args, **kwargs)
+            finally:
+                current()
+
+        def grounded(hits):
+            current()
+            if request_context is not None:
+                validate_grounded_evidence(request_context, hits, guard)
+            validate_evidence(request.user, hits)
+            for item in hits:
+                chunk = item.chunk
+                if ((request.source_types and chunk.source_type not in request.source_types)
+                        or (request.after and (chunk.timestamp is None or chunk.timestamp < request.after))
+                        or (request.before and (chunk.timestamp is None or chunk.timestamp > request.before))):
+                    raise AccessDenied("Evidence is outside the requested source/date scope")
+            current()
 
         def exhausted():
             usage = combined_usage(usages)
@@ -55,6 +96,14 @@ class SearchAgent:
                                  and usage.estimated_cost_usd >= config.max_cost_usd))))
 
         def model_call(operation, *args):
+            current()
+            if request_context is not None:
+                grounded(tuple(evidence.values()))
+                for value in args:
+                    if isinstance(value, GenerationRequest):
+                        ScopedUserContext.require_context(value.user, request_context)
+                        grounded(value.evidence)
+                        trace_evidence.update((item.citation_id, item) for item in value.evidence)
             usage = combined_usage(usages)
             allowance = CallBudget(
                 remaining_tokens=max(0, config.max_tokens - usage.input_tokens - usage.output_tokens),
@@ -62,7 +111,7 @@ class SearchAgent:
                 remaining_cost_usd=max(0, config.max_cost_usd - (usage.estimated_cost_usd or 0)),
             )
             with call_budget(allowance):
-                return operation(*args)
+                return perform(operation, *args)
 
         def record(tool, began, *, query=None, hits=(), decision=None, usage=None, sources=()):
             usage = usage or Usage(estimated_cost_usd=0)
@@ -74,16 +123,27 @@ class SearchAgent:
             ))
 
         def finish(reason, text, answer=None, sources=None):
-            return QueryResponse(
+            sources = tuple(evidence.values()) if sources is None else tuple(sources)
+            if request_context is not None:
+                grounded(sources)
+                grounded(tuple(trace_evidence.values()))
+                if any(not set(step.evidence_ids) <= trace_evidence.keys() for step in steps):
+                    raise AccessDenied("Trace references evidence outside the accepted request")
+            response = QueryResponse(
+                snapshot=request_context.binding.snapshot if request_context is not None else None,
                 answer=answer or Answer(status="error" if reason == "error" else "insufficient_evidence", text=text),
-                sources=tuple(evidence.values()) if sources is None else tuple(sources),
+                sources=sources,
                 trace=Trace(run_id=run_id, steps=tuple(steps),
                             total_latency_ms=max(0, (self.clock() - started) * 1000),
                             usage=combined_usage(usages), stop_reason=reason),
             )
+            current()
+            return response
 
         def accept(hits, source_scope):
             hits = tuple(hits)
+            if request_context is not None:
+                grounded(hits)
             validate_evidence(request.user, hits)
             checked_chunks = {e.chunk.chunk_id: e.chunk for e in evidence.values()}
             for item in hits:
@@ -105,6 +165,8 @@ class SearchAgent:
                 if item.chunk.chunk_id not in known_chunks:
                     evidence.setdefault(item.citation_id, item)
                     known_chunks.add(item.chunk.chunk_id)
+            if request_context is not None:
+                trace_evidence.update((item.citation_id, item) for item in hits)
             return hits
 
         def partial_answer(reason, limitation):
@@ -161,7 +223,7 @@ class SearchAgent:
                     return finish("no_new_evidence", route.limitation)
                 if anchors and expand is not None:
                     active_tool, began = 'read_more', self.clock()
-                    expanded = tuple(expand(request, anchors, max_chars=3000))
+                    expanded = tuple(perform(expand, request, anchors, max_chars=3000))
                     if any(e.chunk.doc_id not in {a.chunk.doc_id for a in anchors} for e in expanded):
                         raise AgentError('Document expansion returned an unrelated document.')
                     hits = accept(expanded, request.source_types)
@@ -193,13 +255,13 @@ class SearchAgent:
                     if exhausted():
                         return finish("budget", "Search budget reached.")
                     active_tool, began = "text_search", self.clock()
-                    hits = accept(self.retriever.search(search), sources)
+                    hits = accept(perform(self.retriever.search, search), sources)
                     record(active_tool, began, query=search.query, hits=hits, sources=sources)
                 for call, spec, tool_request in calls:
                     if exhausted():
                         return finish("budget", "Search budget reached.")
                     active_tool, began = call.tool, self.clock()
-                    result = spec.adapter.execute(tool_request)
+                    result = perform(spec.adapter.execute, tool_request)
                     # Counts need scoped, citable aggregate evidence from the adapter.
                     if result.count is not None and not result.evidence:
                         raise AgentError("Structured count has no supporting evidence.")
@@ -217,8 +279,10 @@ class SearchAgent:
                 context_order = new_evidence + context_order
                 context = GenerationRequest(question=request.query, user=request.user,
                                             evidence=tuple(context_order))
-                selected = (select_agent_context(context, config.max_context_chars, initial_ids, tuple(retained.values()))
-                            if round_number > 1 else select_context(context, config.max_context_chars))
+                selected = (perform(select_agent_context, context, config.max_context_chars, initial_ids, tuple(retained.values()))
+                            if round_number > 1 else perform(select_context, context, config.max_context_chars))
+                if request_context is not None:
+                    grounded(tuple(selected))
                 context = context.model_copy(update={"evidence": tuple(selected)})
                 if not single_pass:
                     active_tool, began = "critic", self.clock()
@@ -231,16 +295,31 @@ class SearchAgent:
                         # checklist passed to generation, in addition to text.
                         critic_limit = min(config.max_context_chars, max(1, (remaining // 2 - 2500) * 2))
                         critic_pool = GenerationRequest(question=request.query, user=request.user, evidence=tuple(evidence.values()))
-                        context = critic_pool.model_copy(update={"evidence": tuple(select_agent_context(
+                        context = critic_pool.model_copy(update={"evidence": tuple(perform(select_agent_context,
                             critic_pool, critic_limit, initial_ids, tuple(retained.values())))})
                     # An approval applies only to this exact evidence set. Use it
                     # for generation too, including the reduced final-round pool.
                     feedback, usage = model_call(self.critic.assess, context)
-                    record(active_tool, began, hits=context.evidence, decision=feedback, usage=usage)
+                    if request_context is not None:
+                        if not isinstance(feedback, CriticDecision):
+                            raise AgentError("Critic returned an invalid decision.", usage)
+                        try:
+                            feedback = CriticDecision.model_validate(feedback.model_dump(warnings=False))
+                        except AccessError:
+                            raise
+                        except ValueError:
+                            raise AgentError("Critic returned an invalid decision.", usage) from None
                     supplied = {e.citation_id: e for e in context.evidence}
+                    if request_context is not None and not set(feedback.read_more_doc_ids) <= {
+                            item.chunk.doc_id for item in context.evidence}:
+                        raise AgentError("Critic referenced an unknown document.", usage)
                     for fact in feedback.facts:
                         if not set(fact.citation_ids) <= supplied.keys():
-                            raise AgentError('Critic referenced an unknown citation.')
+                            raise AgentError('Critic referenced an unknown citation.', usage)
+                        if request_context is not None and any(claim.citation_id not in supplied for claim in fact.claims):
+                            raise AgentError('Critic referenced an unknown citation.', usage)
+                    record(active_tool, began, hits=context.evidence, decision=feedback, usage=usage)
+                    for fact in feedback.facts:
                         if fact.status == 'supported':
                             retained.update((cid, supplied[cid]) for cid in fact.citation_ids)
                 last_context = context
@@ -273,6 +352,8 @@ class SearchAgent:
                     return finish(reason, "", answer, context.evidence)
                 if round_number == config.max_rounds:
                     return partial_answer("round_limit", "Search round limit reached before evidence was judged sufficient.")
+            except AccessError:
+                raise
             except ContextBudgetError:
                 return finish('budget', 'Supported evidence no longer fits the remaining context budget.')
             except RunBudgetExceeded as exc:
@@ -282,5 +363,6 @@ class SearchAgent:
                 # Preserve accounting without exposing provider messages or source text.
                 record(active_tool + ":error", began,
                        usage=exc.usage if isinstance(exc, AgentError) else Usage(estimated_cost_usd=None))
-                return finish("error", str(exc) if isinstance(exc, AgentError) else "A search component failed.")
+                return finish("error", str(exc) if isinstance(exc, AgentError) and request_context is None
+                              else "A search component failed.")
         return finish("round_limit", "Search limit reached; the evidence is still insufficient.")

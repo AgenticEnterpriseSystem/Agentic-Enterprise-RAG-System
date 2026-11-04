@@ -122,6 +122,25 @@ never commit that file.
 | `retrieval` | Real search excerpts; no generated answers |
 | `live` | Real search, evidence checks and generated answers; API key required |
 
+The settings above select the explicit benchmark demo. For the authenticated
+local backend, set `RAG_AUTH_MODE=local` (or `RAG_AUTH_ENABLED=true`) and
+`RAG_SNAPSHOT_FILE` to the JSON `SnapshotRef` for an imported, ready PostgreSQL
+snapshot. The authentication service and search runtime share the same bounded,
+nonowner database pool. Account provisioning and explicit document grants must
+already exist; role or department labels grant no access. `RAG_DEMO_ACCESS` does
+not substitute for a session, and `RAG_MODE=fixture` is rejected in this profile.
+
+Authenticated retrieval uses metadata-only mmap BM25 and the accepted bounded
+dense backend, with `RAG_DENSE_BLOCK_ROWS=8192` and
+`RAG_DENSE_FILE_CACHE_POLICY=retain` by default. Matching snapshot, catalogue,
+corpus order, complete shards and query-model settings are still checked.
+`RAG_ALLOWED_SOURCES` and `RAG_ALLOWED_DOC_IDS_FILE` can only narrow explicit
+grants; an empty document list denies all documents. Each question resolves its
+own current session and scope, and rechecks them around retrieval, document
+expansion, model dispatch and response release. Readiness exposes no corpus or
+permission counts. The login UI, structured-tool registration and packaged
+full-app deployment are separate integration steps.
+
 ## 4. Start
 
 ```sh

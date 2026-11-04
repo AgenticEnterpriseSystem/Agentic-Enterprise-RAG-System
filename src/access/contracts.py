@@ -6,11 +6,14 @@ trusted store; role labels and browser-supplied metadata never grant authority.
 """
 
 from dataclasses import dataclass, field
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Protocol, Sequence, runtime_checkable
+import weakref
 
-from pydantic import AwareDatetime, model_validator
+from pydantic import AwareDatetime, PrivateAttr, model_validator
 
-from src.contracts import Contract, Identifier
+from src.contracts import Contract, Identifier, UserContext
 from src.contracts import AggregateEvidence, PassageEvidence, Revision, ScopeBinding, SnapshotRef
 
 
@@ -147,6 +150,80 @@ class FreshnessGuard(Protocol):
     """
 
     def assert_current(self, context: RequestContext) -> None: ...
+
+
+class ScopedUserContext(UserContext):
+    """Internal compatibility bridge; serialized copies contain no authority."""
+
+    _seal: object = PrivateAttr(default=None)
+
+    @classmethod
+    def from_context(cls, context: RequestContext):
+        if cls is not ScopedUserContext or not isinstance(context, RequestContext):
+            raise AccessDenied("A resolved request context is required")
+        context.assert_bound()
+        result = cls(user_id=context.identity.user_id)
+        result._seal = (context, weakref.ref(result))
+        return result
+
+    def require_context(self, context: RequestContext) -> None:
+        if type(self) is not ScopedUserContext or not isinstance(context, RequestContext):
+            raise AccessDenied("A bound server user is required")
+        seal = self._seal
+        if (type(seal) is not tuple or len(seal) != 2 or seal[0] is not context
+                or not isinstance(seal[1], weakref.ReferenceType) or seal[1]() is not self
+                or self.user_id != context.identity.user_id or self.allowed_doc_ids
+                or self.role is not None or self.department is not None or self.project_ids):
+            raise AccessDenied("Server user does not match the request context")
+        context.assert_bound()
+
+    def permits(self, doc_id: str) -> bool:
+        seal = self._seal
+        if type(seal) is not tuple or len(seal) != 2:
+            return False
+        try:
+            ScopedUserContext.require_context(self, seal[0])
+        except AccessError:
+            return False
+        return seal[0].scope.permits(doc_id) is True
+
+    def __deepcopy__(self, memo=None):
+        # Never deep-copy a full server catalogue/context. The compatibility
+        # copy is deliberately unissued and cannot confer document access.
+        return type(self).model_construct(**self.model_dump())
+
+
+_DISPATCH_CONTEXT = ContextVar("rag_dispatch_context", default=None)
+
+
+def assert_dispatch_current(user=None) -> None:
+    """Check the current synchronous provider boundary; legacy calls are inert."""
+    state = _DISPATCH_CONTEXT.get()
+    if state is None:
+        if isinstance(user, ScopedUserContext):
+            raise AccessDenied("Scoped model work requires an active dispatch guard")
+        return
+    context, guard = state
+    if user is not None:
+        ScopedUserContext.require_context(user, context)
+    guard.assert_current(context)
+    context.assert_bound()
+
+
+@contextmanager
+def guarded_dispatch(context: RequestContext, guard: FreshnessGuard):
+    """Bind/reset one operation's authority, including exception paths."""
+    if not isinstance(context, RequestContext) or not callable(getattr(guard, "assert_current", None)):
+        raise AccessDenied("Model work requires a request context and freshness guard")
+    token = _DISPATCH_CONTEXT.set((context, guard))
+    try:
+        assert_dispatch_current()
+        yield
+    finally:
+        try:
+            assert_dispatch_current()
+        finally:
+            _DISPATCH_CONTEXT.reset(token)
 
 
 class AggregateRegistry(Protocol):

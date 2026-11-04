@@ -4,21 +4,28 @@ import hmac
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+from functools import partial
+import threading
+import time
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from src.api.runtime import WebSettings, RuntimeConfigurationError, RuntimeErrorResponse, build_runtime
+from src.api.runtime import (AuthenticatedRuntime, WebSettings, RuntimeConfigurationError,
+                             RuntimeErrorResponse, build_runtime)
+from src.access.contracts import (AccessDenied, AccessError, EvidenceValidationError,
+                                 PolicyUnavailable, SessionExpired, SnapshotMismatch, StaleContext)
 from src.contracts import QueryRequest, QueryResponse
 
 log = logging.getLogger(__name__)
 
 
-def create_app(settings=None, runtime_factory=build_runtime, *, auth_settings=None, auth_service=None):
+def create_app(settings=None, runtime_factory=None, *, auth_settings=None, auth_service=None):
     settings = settings or WebSettings.from_env()
+    runtime_factory = build_runtime if runtime_factory is None else runtime_factory
     auth_enabled = settings.auth_mode == 'local' or bool(auth_settings and auth_settings.enabled)
     # Explicit server-side settings override environment; the default app honors
     # either supported enabling flag and never silently falls back to the demo.
@@ -35,7 +42,7 @@ def create_app(settings=None, runtime_factory=build_runtime, *, auth_settings=No
     if auth_enabled:
         from src.auth.settings import AuthSettings
         from src.auth.sessions import AuthService, AuthError
-        from src.api.auth import AuthWorker, create_auth_router
+        from src.api.auth import AuthWorker, create_auth_router, _origin as validate_auth_origin
         from src.db.runtime import Database, DatabaseSettings
         auth_settings = (AuthSettings.model_validate(auth_settings.model_dump()) if auth_settings is not None
                          else AuthSettings.from_env(
@@ -52,20 +59,49 @@ def create_app(settings=None, runtime_factory=build_runtime, *, auth_settings=No
     async def lifespan(app):
         state = app.state
         state.runtime, state.error, state.busy = None, None, False
+        state.closing, state.active_work = False, None
         state.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='rag')
         state.auth_service, state.auth_worker = auth_service, auth_worker
+        loop = asyncio.get_running_loop()
+
+        def submit_work(operation):
+            # Retain the real future: cancelling an HTTP waiter cannot release
+            # admission or close the shared pool while its thread still runs.
+            work = state.executor.submit(operation)
+            state.active_work = work
+
+            def finished(done):
+                if not done.cancelled():
+                    done.exception()
+                def release():
+                    if state.active_work is done:
+                        state.busy = False
+                with suppress(RuntimeError):
+                    loop.call_soon_threadsafe(release)
+            work.add_done_callback(finished)
+            wrapped = asyncio.wrap_future(work, loop=loop)
+            wrapped.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+            return wrapped
+        state.submit_work = submit_work
 
         async def initialize():
-            if auth_enabled and runtime_factory is build_runtime:
-                state.error = 'Document access is not configured yet.'
-                return
             try:
-                state.runtime = await asyncio.get_running_loop().run_in_executor(
-                    state.executor, runtime_factory, settings)
+                operation = (partial(build_runtime, settings, database=auth_service.database,
+                                     authenticated=True)
+                             if auth_enabled and runtime_factory is build_runtime
+                             else partial(runtime_factory, settings))
+                runtime = await asyncio.shield(submit_work(operation))
+                if auth_enabled and (not isinstance(runtime, AuthenticatedRuntime)
+                        or runtime.database is not auth_service.database):
+                    raise RuntimeConfigurationError('An authenticated document runtime is required.')
+                if not state.closing:
+                    state.runtime = runtime
             except Exception as exc:
                 # No provider messages, credential values or source text in HTTP/logs.
                 log.warning('Runtime initialization failed: %s', type(exc).__name__)
-                if isinstance(exc, RuntimeConfigurationError):
+                if auth_enabled:
+                    state.error = 'Document search is unavailable. Check the server configuration.'
+                elif isinstance(exc, RuntimeConfigurationError):
                     state.error = str(exc)
                 elif isinstance(exc, FileNotFoundError):
                     state.error = 'Configured corpus or index artifact is missing. Check RAG_CORPUS and index paths.'
@@ -77,15 +113,30 @@ def create_app(settings=None, runtime_factory=build_runtime, *, auth_settings=No
         try:
             yield
         finally:
-            # Running work retains its resources until it actually exits.
-            try:
+            state.closing = True
+            state.initialization.cancel()
+            with suppress(asyncio.CancelledError):
                 await state.initialization
-            finally:
-                state.executor.shutdown(wait=False, cancel_futures=True)
-                if auth_worker is not None:
-                    await auth_worker.aclose()
-                if owned_auth_database is not None:
+            state.runtime = None
+            state.executor.shutdown(wait=False, cancel_futures=True)
+            if auth_worker is not None:
+                await auth_worker.aclose()
+            if owned_auth_database is not None:
+                def close_when_idle():
+                    # Auth has a separate executor, but uses the same pool.
+                    # This callback remains useful after the ASGI loop closes.
+                    while ((state.active_work is not None and not state.active_work.done())
+                           or (auth_worker is not None and auth_worker.pending)):
+                        time.sleep(.02)
                     owned_auth_database.close()
+                    state.active_work = None
+                if ((state.active_work is None or state.active_work.done())
+                        and (auth_worker is None or not auth_worker.pending)):
+                    close_when_idle()
+                else:
+                    state.database_cleanup = threading.Thread(target=close_when_idle,
+                        name='rag-pool-cleanup', daemon=True)
+                    state.database_cleanup.start()
 
     app = FastAPI(title='Redwood Knowledge Search', version='0.1.0', lifespan=lifespan)
     origins = auth_settings.allowed_origins if auth_enabled else settings.allowed_origins
@@ -103,13 +154,22 @@ def create_app(settings=None, runtime_factory=build_runtime, *, auth_settings=No
 
     @app.get('/api/health')
     async def health():
-        return {'status': 'alive', 'ready': not auth_enabled and app.state.runtime is not None}
+        return JSONResponse(content={'status': 'alive', 'ready': app.state.runtime is not None},
+                            headers={'Cache-Control': 'no-store'} if auth_enabled else None)
 
     @app.get('/api/ready')
     async def ready():
         if auth_enabled:
-            return JSONResponse(status_code=503, content={'status': 'not_ready',
-                'message': 'Document access is not configured yet.'}, headers={'Cache-Control': 'no-store'})
+            if app.state.runtime is None:
+                return JSONResponse(status_code=503, content={'status': 'not_ready',
+                    'message': app.state.error or 'Document search is starting. Please wait.'},
+                    headers={'Cache-Control': 'no-store'})
+            # Public readiness must not reveal corpus/source counts, permissions
+            # or other users' shared spending state.
+            safe = app.state.runtime.info()
+            return JSONResponse(content={'status': 'ready', 'busy': app.state.busy,
+                **{name: safe[name] for name in ('mode', 'retrieval', 'generation_enabled') if name in safe}},
+                headers={'Cache-Control': 'no-store'})
         if app.state.runtime is None:
             return JSONResponse(status_code=503, content={'status': 'not_ready',
                 'mode': settings.mode, 'retrieval': settings.retrieval,
@@ -118,42 +178,72 @@ def create_app(settings=None, runtime_factory=build_runtime, *, auth_settings=No
 
     @app.post('/api/query', response_model=QueryResponse)
     async def query(body: QueryRequest, request: Request):
+        def failure(status, code, message, headers=None):
+            values = dict(headers or {})
+            if auth_enabled:
+                values['Cache-Control'] = 'no-store'
+            return HTTPException(status, detail={'code': code, 'message': message}, headers=values or None)
+
         origin = request.headers.get('origin')
         if origin and origin not in origins:
-            raise HTTPException(403, detail={'code': 'origin_denied', 'message': 'This browser origin is not allowed.'})
+            raise failure(403, 'origin_denied', 'This browser origin is not allowed.')
         if auth_enabled:
             token = request.cookies.get('rag_session')
             if not token:
-                raise HTTPException(401, detail={'code': 'authentication_required', 'message': 'Authentication is required.'})
+                raise failure(401, 'authentication_required', 'Authentication is required.')
             session = await auth_worker.call(auth_service.authenticate, token, touch=False)
+            validate_auth_origin(request, auth_settings, required=True)
             supplied_csrf = request.headers.get('X-CSRF-Token', '')
             if (not origin or origin not in origins or not hmac.compare_digest(
                     session.response.csrf_token.encode('ascii'), supplied_csrf.encode('utf-8'))):
-                raise HTTPException(403, detail={'code': 'csrf_failed', 'message': 'Request verification failed.'})
-            raise HTTPException(403, detail={'code': 'scope_denied', 'message': 'Document access is not configured yet.'})
-        if app.state.runtime is None:
-            raise HTTPException(503, detail={'code': 'not_ready', 'message': app.state.error or 'Retriever is still loading.'})
+                raise failure(403, 'csrf_failed', 'Request verification failed.')
+        if app.state.runtime is None or app.state.closing:
+            raise failure(503, 'not_ready', app.state.error or 'Retriever is still loading.')
         if app.state.busy:
-            raise HTTPException(429, detail={'code': 'busy', 'message': 'A query is still running. Wait before trying again.'}, headers={'Retry-After': '2'})
+            raise failure(429, 'busy', 'A query is still running. Wait before trying again.', {'Retry-After': '2'})
         app.state.busy = True
-        future = asyncio.get_running_loop().run_in_executor(app.state.executor, app.state.runtime.query, body)
-        def finished(work):
+        runtime = app.state.runtime
+
+        def operation():
+            if auth_enabled:
+                # Only an admitted real query counts as activity. Resolution
+                # and all synchronous policy/retrieval work stay off ASGI.
+                admitted = auth_service.authenticate(token, touch=True)
+                return runtime.query(body, admitted.identity)
+            return runtime.query(body)
+        try:
+            future = app.state.submit_work(operation)
+        except RuntimeError:
             app.state.busy = False
-            # Consume late failures after an HTTP timeout/disconnect as well.
-            if not work.cancelled():
-                work.exception()
-        future.add_done_callback(finished)
+            raise failure(503, 'not_ready', 'Document search is unavailable.') from None
         try:
             response = await asyncio.wait_for(asyncio.shield(future), timeout=settings.max_seconds)
         except asyncio.TimeoutError:
-            raise HTTPException(504, detail={'code': 'timeout', 'message': 'Query timed out. Its worker may still be finishing; further queries remain blocked until it exits.'}) from None
+            raise failure(504, 'timeout', 'Query timed out. Its worker may still be finishing; further queries remain blocked until it exits.') from None
         except RuntimeErrorResponse as exc:
-            raise HTTPException(exc.status, detail={'code': exc.code, 'message': exc.message}) from None
+            raise failure(exc.status, exc.code, exc.message) from None
+        except SessionExpired:
+            raise failure(401, 'session_expired', 'This session is unavailable. Sign in again.') from None
+        except PolicyUnavailable:
+            raise failure(503, 'policy_unavailable', 'Document access is temporarily unavailable.') from None
+        except StaleContext:
+            raise failure(409, 'stale_context', 'Access changed. Please retry the question.') from None
+        except AccessDenied:
+            raise failure(403, 'scope_denied', 'The requested information is unavailable in this scope.') from None
+        except SnapshotMismatch:
+            raise failure(503, 'not_ready', 'Document search is temporarily unavailable.') from None
+        except EvidenceValidationError:
+            raise failure(502, 'query_failed', 'Query failed safely. No answer is available.') from None
+        except AccessError:
+            raise failure(403, 'scope_denied', 'The requested information is unavailable in this scope.') from None
         except Exception as exc:
+            if auth_enabled and isinstance(exc, AuthError):
+                raise
             log.warning('Query failed: %s', type(exc).__name__)
-            raise HTTPException(502, detail={'code': 'query_failed', 'message': 'Query failed safely. No answer is available.'}) from None
+            raise failure(502, 'query_failed', 'Query failed safely. No answer is available.') from None
         status = 502 if response.answer.status == 'error' else (429 if response.trace.stop_reason == 'budget' else 200)
-        return JSONResponse(status_code=status, content=response.model_dump(mode='json'))
+        return JSONResponse(status_code=status, content=response.model_dump(mode='json'),
+            headers={'Cache-Control': 'no-store'} if auth_enabled else None)
 
     if (settings.frontend_dist / 'assets').is_dir():
         app.mount('/assets', StaticFiles(directory=settings.frontend_dist / 'assets'), name='assets')
