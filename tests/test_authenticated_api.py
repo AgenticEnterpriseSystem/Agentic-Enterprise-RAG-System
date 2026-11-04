@@ -110,6 +110,18 @@ def test_public_readiness_exposes_no_inventory_permissions_models_or_spending(ap
         assert client.post('/api/query', json={'question': QUESTION}).status_code == 401
 
 
+def test_authentication_profile_remains_explicit_when_search_cannot_start(app_db):
+    bundle = make_runtime(app_db)
+    def unavailable(_settings):
+        raise main_module.RuntimeConfigurationError('Controlled index configuration failure')
+    with TestClient(app_for(app_db, bundle, factory=unavailable), base_url=ORIGIN) as client:
+        profile = client.get('/api/auth/profile')
+        assert profile.status_code == 200 and profile.json() == {'enabled': True}
+        assert 'no-store' in profile.headers['cache-control']
+        assert client.get('/api/ready').status_code == 503
+        assert client.post('/api/query', json={'question': QUESTION}).status_code == 401
+
+
 @pytest.mark.parametrize('selection', ['explicit-settings', 'environment-flag'])
 def test_computed_auth_selection_reaches_default_builder_with_the_shared_database(app_db, monkeypatch, selection):
     bundle = make_runtime(app_db, provider=None, settings=WebSettings(mode='retrieval', auth_mode='benchmark'))

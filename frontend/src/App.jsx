@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { createAuthLifecycle } from "./auth.js";
 import "./style.css";
 
 const stops = {
@@ -13,6 +14,7 @@ const stops = {
 };
 const money = (value) =>
   value == null ? "Unavailable" : `$${value.toFixed(4)}`;
+const platforms = ["slack", "gmail", "linear", "google_drive", "hubspot", "fireflies", "github", "jira", "confluence"];
 
 function citedText(text, ids, openCitation) {
   return text.split(/(\[[^\]\n]+\])/g).map((part, index) => {
@@ -44,29 +46,65 @@ function App() {
     [result, setResult] = useState(null),
     [error, setError] = useState("");
   const [selected, setSelected] = useState("");
-  const cards = useRef({});
+  const [auth, setAuth] = useState({ status: "checking", enabled: null, error: "" });
+  const [login, setLogin] = useState(""), [password, setPassword] = useState("");
+  const cards = useRef({}), authClient = useRef(null), queryController = useRef(null);
+  const querySequence = useRef(0), readySequence = useRef(0);
+  const loginInput = useRef(null), authError = useRef(null), questionInput = useRef(null);
 
   async function refresh() {
+    const client = authClient.current, epoch = client?.generation, sequence = ++readySequence.current;
+    const current = () => client?.isCurrent(epoch) && sequence === readySequence.current;
     try {
-      const response = await fetch("/api/ready");
+      const response = await fetch("/api/ready", { credentials: "same-origin", cache: "no-store" });
       const body = await response.json();
+      if (!current()) return;
       setReady(body);
       setConnection("");
     } catch {
+      if (!current()) return;
       setConnection(
         "Cannot connect to the API. Check that the backend is running, then retry.",
       );
     }
   }
   useEffect(() => {
+    const client = createAuthLifecycle({ onChange: setAuth, onInvalidate: () => {
+      querySequence.current += 1;
+      readySequence.current += 1;
+      queryController.current?.abort();
+      queryController.current = null;
+      setQuestion(""); setSource(""); setResult(null); setSelected(""); setError("");
+      setLoading(false); setLogin(""); setPassword(""); cards.current = {};
+    } });
+    authClient.current = client;
+    client.start();
     refresh();
     const timer = setInterval(refresh, 5000);
-    return () => clearInterval(timer);
+    return () => { clearInterval(timer); client.dispose(); queryController.current?.abort(); };
   }, []);
+  useEffect(() => {
+    if (auth.error) authError.current?.focus();
+    else if (auth.status === "anonymous") loginInput.current?.focus();
+  }, [auth.status, auth.error]);
+  useEffect(() => {
+    if (auth.status === "authenticated" && !auth.error && ready?.status === "ready" && !connection && !loading)
+      questionInput.current?.focus();
+  }, [auth.status, auth.error, ready?.status, connection]);
+  useEffect(() => {
+    if (["authenticated", "benchmark"].includes(auth.status)) refresh();
+  }, [auth.status]);
 
   async function submit(event) {
     event.preventDefault();
-    if (loading || !isReady || ready?.busy || !question.trim()) return;
+    const client = authClient.current, session = client?.snapshot;
+    if (loading || !isReady || ready?.busy || !question.trim()
+      || auth !== session
+      || !["authenticated", "benchmark"].includes(session?.status)) return;
+    const epoch = client.generation, sequence = ++querySequence.current;
+    const current = () => client.isCurrent(epoch) && sequence === querySequence.current;
+    const controller = new AbortController();
+    queryController.current = controller;
     setLoading(true);
     setError("");
     setResult(null);
@@ -74,14 +112,20 @@ function App() {
     try {
       const response = await fetch("/api/query", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin", cache: "no-store", signal: controller.signal,
+        headers: { "Content-Type": "application/json",
+          ...(session.enabled ? { "X-CSRF-Token": session.csrf_token } : {}) },
         body: JSON.stringify({
           question,
           mode,
           source_types: source ? [source] : [],
         }),
       });
-      const body = await response.json();
+      let body = {};
+      try { body = await response.json(); } catch { /* generic failure below */ }
+      if (!current()) return;
+      if (response.status === 401) { client.start(); return; }
+      if (response.status === 403 && body.detail?.code === "csrf_failed") { client.revalidate(); return; }
       if (body.answer && body.trace && Array.isArray(body.sources)) {
         setResult(body);
         if (!response.ok && body.answer.status !== "error")
@@ -100,27 +144,35 @@ function App() {
         );
       }
     } catch {
+      if (!current()) return;
       setError(
         "The request could not finish. Check the connection. The server may still be working; wait before retrying.",
       );
     } finally {
-      setLoading(false);
-      refresh();
+      if (current()) {
+        if (queryController.current === controller) queryController.current = null;
+        setLoading(false);
+        refresh();
+      }
     }
   }
   function openCitation(id) {
+    if (auth !== authClient.current?.snapshot) return;
     setSelected(id);
     cards.current[id]?.scrollIntoView({ behavior: "smooth", block: "center" });
     cards.current[id]?.focus({ preventScroll: true });
   }
-  const sources = result
+  const canAccess = ["authenticated", "benchmark"].includes(auth.status);
+  const sources = result && canAccess
     ? [...result.sources].sort(
         (a, b) =>
           Number(result.answer.citation_ids.includes(b.citation_id)) -
           Number(result.answer.citation_ids.includes(a.citation_id)),
       )
     : [];
-  const isReady = ready?.status === "ready" && !connection;
+  const isReady = ready?.status === "ready" && !connection && canAccess;
+  const authBusy = ["checking", "signing_in", "signing_out"].includes(auth.status);
+  const sourceOptions = auth.enabled ? platforms : ready?.source_types || [];
   const fixture = ready?.mode === "fixture",
     retrievalOnly = ready?.mode === "retrieval";
   const example = fixture
@@ -177,16 +229,39 @@ function App() {
             )}
           </div>
         </section>
-        <div className="scope">
+        {auth.status === "benchmark" && <div className="scope">
           <strong>Benchmark demo identity</strong>
-          <span>
-            No real sign-in.{" "}
-            {isReady
-              ? `${ready.allowed_documents.toLocaleString()} documents permitted by server configuration.`
-              : "Waiting for server scope."}{" "}
-            Use only for the benchmark demonstration.
-          </span>
-        </div>
+          <span>No real sign-in. {typeof ready?.allowed_documents === "number"
+            ? `${ready.allowed_documents.toLocaleString()} documents permitted by server configuration. ` : ""}
+            Use only for the benchmark demonstration.</span>
+        </div>}
+        {auth.status === "authenticated" && <div className="scope account">
+          <div><strong>{auth.user.display_name || auth.user.user_id}</strong>
+            <span>Search only documents available to your account.</span></div>
+          <button type="button" onClick={() => { if (auth === authClient.current?.snapshot) authClient.current.logout(); }}>Sign out</button>
+        </div>}
+        {auth.enabled && auth.status !== "authenticated" && <form className="auth-card" onSubmit={event => {
+          event.preventDefault();
+          if (auth !== authClient.current?.snapshot) return;
+          const submittedLogin = login, submittedPassword = password;
+          setPassword(""); authClient.current.login(submittedLogin, submittedPassword);
+        }} aria-label="Sign in">
+          <h2>{auth.status === "logout_pending" ? "Sign-out is not confirmed" : "Sign in"}</h2>
+          <p>Use your provisioned account to search its permitted documents.</p>
+          <label htmlFor="login">Login</label>
+          <input ref={loginInput} id="login" name="login" value={login} onChange={event => setLogin(event.target.value)}
+            autoComplete="username" maxLength={254} required disabled={authBusy} />
+          <label htmlFor="password">Password</label>
+          <input id="password" name="password" type="password" value={password} onChange={event => setPassword(event.target.value)}
+            autoComplete="current-password" maxLength={1024} required disabled={authBusy} />
+          <button type="submit" disabled={authBusy}>{auth.status === "signing_in" ? "Signing in…" : "Sign in"}</button>
+          {auth.status === "logout_pending" && <button type="button" className="secondary"
+            onClick={() => { if (auth === authClient.current?.snapshot) authClient.current.logout(); }}>Retry sign out</button>}
+        </form>}
+        {auth.status === "checking" && <div className="notice" role="status">Checking sign-in status…</div>}
+        {auth.error && <div className="notice" role="alert" tabIndex={-1} ref={authError}>{auth.error}{" "}
+          {auth.status === "unavailable" && <button type="button" className="text-button"
+            onClick={() => authClient.current.start()}>Retry sign-in status</button>}</div>}
         {(connection || ready?.status === "not_ready") && (
           <div className="notice" role="status">
             {connection || ready.message}{" "}
@@ -198,6 +273,7 @@ function App() {
         <form className="question-card" onSubmit={submit}>
           <label htmlFor="question">What would you like to know?</label>
           <textarea
+            ref={questionInput}
             id="question"
             placeholder="Ask a specific question about your documents…"
             value={question}
@@ -213,11 +289,11 @@ function App() {
             required
             rows={3}
             wrap="soft"
-            disabled={loading}
+            disabled={loading || !canAccess}
           />
           <small id="question-keyboard-help">Text wraps automatically · Enter to ask</small>
           <div className="form-controls">
-            <fieldset disabled={loading}>
+            <fieldset disabled={loading || !canAccess}>
               <legend className="sr-only">Search workflow</legend>
               {[
                 ["baseline", "Fixed RAG"],
@@ -243,10 +319,10 @@ function App() {
               <select
                 value={source}
                 onChange={(e) => setSource(e.target.value)}
-                disabled={loading}
+                disabled={loading || !canAccess}
               >
                 <option value="">All permitted platforms</option>
-                {ready?.source_types?.map((s) => (
+                {sourceOptions.map((s) => (
                   <option key={s} value={s}>
                     {s}
                   </option>
@@ -296,7 +372,7 @@ function App() {
             {error}
           </div>
         )}
-        {result && (
+        {result && canAccess && (
           <div className="results">
             <div className="answer-column">
               <section className="answer-card" aria-labelledby="answer-heading">
@@ -455,7 +531,7 @@ function App() {
                 return (
                   <article
                     tabIndex={-1}
-                    ref={(el) => (cards.current[item.citation_id] = el)}
+                    ref={(el) => { if (el) cards.current[item.citation_id] = el; else delete cards.current[item.citation_id]; }}
                     key={item.citation_id}
                     className={`source-card ${selected === item.citation_id ? "selected" : ""}`}
                   >

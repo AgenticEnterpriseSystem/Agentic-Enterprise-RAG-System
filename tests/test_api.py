@@ -49,6 +49,9 @@ def test_lifecycle_loads_once_and_workflows_return_contracts():
         loaded.append(config)
         return build_runtime(config)
     with TestClient(create_app(settings(), factory)) as client:
+        profile = client.get('/api/auth/profile')
+        assert profile.json() == {'enabled': False}
+        assert 'no-store' in profile.headers['cache-control']
         info = wait_ready(client)
         assert info['mode'] == 'fixture' and info['generation_enabled']
         assert client.get('/api/health').json() == {'status': 'alive', 'ready': True}
