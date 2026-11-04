@@ -89,8 +89,9 @@ requests as well as generation.
   `RAG_ALLOWED_SOURCES` restricts platforms. Client identity/permission claims are
   rejected. Retrieval, generation and final responses enforce this scope.
 - Dates require time zones. Corpus adapters lack reliable structured timestamps,
-  so date filters exclude undated evidence. Structured-tool interfaces exist;
-  real adapters and identity integration remain pending.
+  so date filters exclude undated evidence. A native Jira database adapter
+  provides authorized lookup and exact counts; live agent registration and
+  rendering its typed records remain WIRE-01 work.
 - Citation clicks show the response's exact authorized excerpts. Valid citation
   IDs alone do not establish that a claim is supported. Evidence is untrusted;
   reference answers are never supplied to the running agent.
@@ -294,7 +295,7 @@ and gate evidence.
 ## Relational foundation
 
 The optional database profile and migration job are documented in
-[Setup](WEB_APP.md#database-foundation). The forward Alembic head, `0003_document_policy`, owns18 application tables in
+[Setup](WEB_APP.md#database-foundation). The forward Alembic head, `0004_jira_feed`, owns 19 application tables in
 schema `rag`; the original14-table foundation remains frozen in
 `0001_foundation`. The initial migration is self-contained;
 future metadata changes do not rewrite historical revisions. Destructive
@@ -391,3 +392,45 @@ passwords or known session nonces. Normal accounts remain kind `human`.
 See [operator setup](WEB_APP.md#reviewed-document-permissions). This component
 does not wire authenticated question serving; APP/SEC integration remains a
 separate gate.
+
+### Native Jira records and exact counts
+
+`src/data/structured.py` verifies typed Jira fields from the project's pinned
+upstream Git commit against the complete canonical Jira UUID/path/body-revision
+set. Git paths, blob IDs and raw file SHA256 values remain attached to each
+record. The canonical Parquet intentionally omits these typed fields; status,
+priority and project are never extracted from prose or invented as passage
+citations. Directory names and native-key prefixes do not determine project.
+
+The actual pinned source matches all 6,118 canonical Jira records. Two upstream
+aliases lie outside the canonical path set and are explicitly excluded. There
+are 575 repeated native keys, so canonical document UUIDs identify physical
+records and native-key lookup can return multiple authorized records. Counts
+mean canonical source records in this pinned benchmark, not unique live issues.
+Status/project/priority filters preserve exact source values; no definition of
+"open" is inferred from another status.
+
+The independent immutable `ticket_feeds` manifest records complete record
+coverage and separate verified/missing/invalid counts for each typed field.
+Runtime can read its ready-feed header; the global path/UUID inventory and field
+totals remain operator-only through column privileges.
+Import commits bounded batches and publishes a ready feed only after canonical
+completeness and field counts pass. Interrupted imports remain unavailable and
+resume by verifying existing rows. An empty ticket table does not prove zero.
+
+`JiraTool.execute(request, context=..., guard=...)` uses the nonowner database
+pool, current snapshot/session/policy scope and existing RLS. The compatibility
+`request.user` grants no authority. Lookup ambiguity and missing-field checks
+use only the authorized relation; hidden record counts are never returned.
+Unsupported filters reject. Required missing fields produce unknown coverage,
+while a proven empty matching relation produces a valid zero. Counts ignore
+lookup limits and persist owner/scope-bound aggregate artifacts with exact
+filters, template version and deterministic full-relation lineage. Native
+records are rechecked against their authoritative rows before release; aggregate
+artifacts resolve through the existing evidence registry. Source metadata alone
+cannot authorize a copied or changed result.
+
+The native adapter is separate from SearchAgent registration and web display.
+TOOL-01 acceptance records distinguish a Jira-only real-data snapshot from
+the later import into the complete 511,958-document application snapshot. See
+[operator import](WEB_APP.md#native-jira-feed).
