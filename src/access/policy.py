@@ -28,7 +28,7 @@ from src.contracts import ScopeBinding, SnapshotRef
 from src.db import schema
 from src.db.runtime import Database, DatabaseRoleError
 from src.storage.contracts import CatalogEntry
-from src.storage.fingerprints import catalog_fingerprint
+from src.storage.fingerprints import ValidatedCatalog, catalog_fingerprint
 
 _CATALOG_FIELDS = tuple(CatalogEntry.model_fields)
 _GRANT_POSITIONS_SQL = """
@@ -124,7 +124,7 @@ class PolicyResolver:
     """
 
     def __init__(self, database: Database, snapshot: SnapshotRef, *, source_types=(), doc_ids=None, clock=None,
-                 cache_size=32):
+                 cache_size=32, catalog: ValidatedCatalog | None = None):
         if not isinstance(database, Database) or not isinstance(snapshot, SnapshotRef):
             raise TypeError("Policy resolution requires Database and SnapshotRef")
         if type(cache_size) is not int or not 0 <= cache_size <= 32:
@@ -135,7 +135,15 @@ class PolicyResolver:
         self._cache_size = cache_size
         self._scope_cache = OrderedDict()
         self._cache_lock = Lock()
-        self._catalog = self._load_catalog()
+        if catalog is None:
+            self._catalog = self._load_catalog()
+        else:
+            proof = ValidatedCatalog.require(catalog, self.snapshot, issuer=database)
+            with self._transaction() as connection:
+                self._ready(connection)
+            # Keep a resolver-local identity wrapper so a scope created by a
+            # different resolver cannot replace this one's validated catalogue.
+            self._catalog = _Catalog(self.snapshot, proof.doc_ids, proof.sources, proof.positions)
         if isinstance(source_types, str) or isinstance(doc_ids, str):
             raise ValueError("Operator restrictions must be document/source collections")
         sources = frozenset(source_types)

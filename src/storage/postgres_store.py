@@ -9,6 +9,7 @@ batch or an external freshness check.
 
 from collections.abc import Iterator
 import hashlib
+from threading import Lock
 
 import sqlalchemy as sa
 
@@ -22,7 +23,7 @@ from src.storage.contracts import (
     CatalogEntry, DEFAULT_READ_MORE_CHARS, MAX_CATALOG_BATCH, RankedCandidate,
     ReadFilters, validate_catalog_batch_size, validate_read_more_bounds,
 )
-from src.storage.fingerprints import catalog_fingerprint
+from src.storage.fingerprints import ValidatedCatalog, catalog_fingerprint
 
 _ENTRY_FIELDS = tuple(CatalogEntry.model_fields)
 MAX_BINARY_DOCUMENT_BYTES = 1024 * 1024
@@ -35,20 +36,49 @@ def _entry(row) -> CatalogEntry:
 class PostgresDocumentStore:
     """One ready immutable snapshot; retain its identity, never its body table."""
 
-    def __init__(self, database: Database, snapshot: SnapshotRef):
+    def __init__(self, database: Database, snapshot: SnapshotRef, *, retain_catalog: bool = False):
         if not isinstance(database, Database) or not isinstance(snapshot, SnapshotRef):
             raise TypeError("Document storage requires the runtime Database and SnapshotRef")
+        if type(retain_catalog) is not bool:
+            raise ValueError("Catalogue retention must be a strict boolean")
         self._database = database
         self._snapshot = SnapshotRef.model_validate(snapshot.model_dump(warnings=False))
-        with database.transaction() as connection:
-            self._ready(connection)
-        digest = catalog_fingerprint((entry for batch in self.iter_catalog() for entry in batch),
-                                     expected_count=self._snapshot.document_count)
-        if digest != self._snapshot.catalog_sha256:
-            raise SnapshotMismatch("Stored catalogue differs from the requested snapshot")
+        self._catalog_lock = Lock()
+        self._validated_catalog = None
+        if retain_catalog:
+            self.validated_catalog()
+        else:
+            # Preserve DOC-only streaming memory behavior. Full catalogue
+            # retention is opt-in, never a reason to skip verification.
+            with database.transaction() as connection:
+                self._ready(connection)
+            digest = catalog_fingerprint((entry for batch in self.iter_catalog() for entry in batch),
+                                         expected_count=self._snapshot.document_count)
+            if digest != self._snapshot.catalog_sha256:
+                raise SnapshotMismatch("Stored catalogue differs from the requested snapshot")
 
     def snapshot(self) -> SnapshotRef:
         return self._snapshot
+
+    def validated_catalog(self) -> ValidatedCatalog:
+        """Opt into one retained metadata proof, with live checks on every call.
+
+        The store-local build lock prevents simultaneous full catalogue copies.
+        It is separate from permission-cache locks; no authority/guard is cached.
+        Every database transaction closes before the iterator yields a batch.
+        """
+        with self._catalog_lock:
+            with self._database.transaction() as connection:
+                self._ready(connection)
+            catalog = self._validated_catalog
+            if catalog is None:
+                catalog = ValidatedCatalog.build(self._snapshot,
+                    (entry for batch in self.iter_catalog() for entry in batch), issuer=self._database)
+            ValidatedCatalog.require(catalog, self._snapshot, issuer=self._database)
+            with self._database.transaction() as connection:
+                self._ready(connection)
+            self._validated_catalog = catalog
+            return catalog
 
     def _ready(self, connection) -> None:
         table = schema.dataset_snapshots
