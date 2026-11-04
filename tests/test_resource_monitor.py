@@ -138,18 +138,22 @@ def test_worker_failure_signal_and_missing_completion_are_distinct(tmp_path, cod
 
 
 def test_timeout_terminates_only_its_child_group_and_preserves_last_phase(tmp_path):
-    code = "import time;print('PROFILE_EVENT {\"event\":\"start\",\"phase\":\"waiting\"}',flush=True);time.sleep(30)"
+    code = ("import signal,time;signal.signal(signal.SIGTERM,signal.SIG_DFL);"
+            "print('PROFILE_EVENT {\"event\":\"start\",\"phase\":\"ready\"}',flush=True);time.sleep(30)")
     started = time.monotonic()
-    result = supervise(tmp_path, code, max_seconds=.15)
+    result = supervise(tmp_path, code, max_seconds=1.0)
     assert result["status"] == "timeout" and result["exit_code"] < 0
-    assert result["last_phase"] == "waiting" and time.monotonic() - started < 4
+    assert result["last_phase"] == "ready" and time.monotonic() - started < 4
 
 
 def test_ignoring_term_escalates_to_kill_with_bounded_wait(tmp_path):
-    result = supervise(tmp_path, "import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(30)",
-                       max_seconds=.15)
+    code = ("import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+            "print('PROFILE_EVENT {\"event\":\"start\",\"phase\":\"ready\"}',flush=True);time.sleep(30)")
+    started = time.monotonic()
+    result = supervise(tmp_path, code, max_seconds=1.0)
     assert result["status"] == "timeout" and result["exit_code"] == -signal.SIGKILL
-    assert result["duration_seconds"] < 4
+    assert result["last_phase"] == "ready"
+    assert result["duration_seconds"] < 4 and time.monotonic() - started < 4
 
 
 def test_guard_report_uses_post_cleanup_reap_and_preserves_final_pipe_events(tmp_path, monkeypatch):

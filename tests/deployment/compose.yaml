@@ -1,0 +1,16 @@
+# Explicit disposable CI fixture. Never merge this override into a real stack.
+services:
+  fixture-load:
+    extends:
+      # Paths use the first/base Compose file, as in the CI -f order.
+      file: compose.yaml
+      service: stage-artifacts
+    profiles: [ci-fixture]
+    user: "0:0"
+    entrypoint: []
+    command: [python, /operator/fixture.py, load]
+    environment:
+      RAG_CI_FIXTURE: explicit-five-doc
+    volumes:
+      - "${OPERATOR_DIR:?prepare the explicit CI fixture first}:/operator:ro"
+      - stack-state:/state:rw

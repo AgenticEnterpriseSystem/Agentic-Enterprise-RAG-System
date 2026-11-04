@@ -327,8 +327,19 @@ def test_owned_shared_pool_closes_only_after_real_work_even_after_asgi_loop_exit
         monkeypatch.setattr(app_db.auth,'authenticate',blocked_authenticate)
     # Exercise create_app's OWNED pool path using the fixture's real Database
     # and AuthService, while avoiding a second pool or production password hash.
+    # A constructor proxy preserves meaningful real-Database instance checks
+    # without mutating the original class's inherited allocator/initializer.
+    original_database_type = database_module.Database
+    class ExistingDatabaseMeta(type):
+        def __instancecheck__(cls, value):
+            return isinstance(value, original_database_type)
+    class ExistingDatabase(metaclass=ExistingDatabaseMeta):
+        def __new__(cls, _settings):
+            return app_db.database
+    assert isinstance(app_db.database, ExistingDatabase)
+    assert not isinstance(object(), ExistingDatabase)
     monkeypatch.setattr(database_module.DatabaseSettings,'from_env',classmethod(lambda cls:app_db.database.settings))
-    monkeypatch.setattr(database_module,'Database',lambda _settings:app_db.database)
+    monkeypatch.setattr(database_module,'Database',ExistingDatabase)
     monkeypatch.setattr(sessions_module,'AuthService',lambda database,settings:app_db.auth)
     app=create_app(bundle.settings,lambda _settings:bundle.runtime,auth_settings=app_db.auth.settings)
     async def start_and_shutdown():

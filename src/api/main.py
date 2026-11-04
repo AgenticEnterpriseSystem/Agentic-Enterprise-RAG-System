@@ -5,7 +5,6 @@ import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
-from functools import partial
 import threading
 import time
 
@@ -86,14 +85,21 @@ def create_app(settings=None, runtime_factory=None, *, auth_settings=None, auth_
 
         async def initialize():
             try:
-                operation = (partial(build_runtime, settings, database=auth_service.database,
-                                     authenticated=True)
-                             if auth_enabled and runtime_factory is build_runtime
-                             else partial(runtime_factory, settings))
-                runtime = await asyncio.shield(submit_work(operation))
-                if auth_enabled and (not isinstance(runtime, AuthenticatedRuntime)
-                        or runtime.database is not auth_service.database):
-                    raise RuntimeConfigurationError('An authenticated document runtime is required.')
+                def construct_runtime():
+                    runtime = (build_runtime(settings, database=auth_service.database, authenticated=True)
+                               if auth_enabled and runtime_factory is build_runtime
+                               else runtime_factory(settings))
+                    if auth_enabled:
+                        if (not isinstance(runtime, AuthenticatedRuntime)
+                                or runtime.database is not auth_service.database):
+                            raise RuntimeConfigurationError('An authenticated document runtime is required.')
+                        # One startup operation owns construction and its final
+                        # metadata check. Transient auth admission cannot discard
+                        # a built runtime; live readiness still uses AuthWorker.
+                        runtime.assert_ready()
+                    return runtime
+
+                runtime = await asyncio.shield(submit_work(construct_runtime))
                 if not state.closing:
                     state.runtime = runtime
             except Exception as exc:
@@ -165,13 +171,25 @@ def create_app(settings=None, runtime_factory=None, *, auth_settings=None, auth_
     @app.get('/api/ready')
     async def ready():
         if auth_enabled:
-            if app.state.runtime is None:
+            runtime = app.state.runtime
+            if runtime is None or app.state.closing:
                 return JSONResponse(status_code=503, content={'status': 'not_ready',
                     'message': app.state.error or 'Document search is starting. Please wait.'},
                     headers={'Cache-Control': 'no-store'})
+            try:
+                await auth_worker.call(runtime.assert_ready)
+                if app.state.closing or app.state.runtime is not runtime:
+                    raise PolicyUnavailable('Document readiness changed during its check')
+            except Exception:
+                # Missing metadata, lost connectivity and bounded-worker
+                # admission/timeouts are all not-ready, without public inventory
+                # or underlying SQL/credential details. A later poll can recover.
+                return JSONResponse(status_code=503, content={'status': 'not_ready',
+                    'message': 'Document search is temporarily unavailable.'},
+                    headers={'Cache-Control': 'no-store'})
             # Public readiness must not reveal corpus/source counts, permissions
             # or other users' shared spending state.
-            safe = app.state.runtime.info()
+            safe = runtime.info()
             return JSONResponse(content={'status': 'ready', 'busy': app.state.busy,
                 **{name: safe[name] for name in ('mode', 'retrieval', 'generation_enabled') if name in safe}},
                 headers={'Cache-Control': 'no-store'})

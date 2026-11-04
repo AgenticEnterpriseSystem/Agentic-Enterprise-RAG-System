@@ -3,11 +3,16 @@
 **
 !Dockerfile
 !requirements.txt
+!requirements.lock.txt
 !alembic.ini
 !migrations/
 !migrations/**
 !src/
 !src/**
+!scripts/
+!scripts/docker_dependencies.py
+!scripts/local_data.py
+!scripts/local_stack.py
 !frontend/
 !frontend/package.json
 !frontend/package-lock.json

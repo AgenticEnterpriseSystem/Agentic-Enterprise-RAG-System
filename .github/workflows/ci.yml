@@ -8,6 +8,7 @@ permissions:
 jobs:
   smoke-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # Synthetic credentials for a disposable loopback-only CI database.
     env:
       RAG_TEST_PG_CONTAINER: rag-ci-postgres
@@ -60,44 +61,62 @@ jobs:
       - name: Build web application
         working-directory: frontend
         run: npm ci && npm run build
-      - name: Check Docker application
-        env:
-          RAG_MODE: fixture
-          RAG_ALLOW_PAID: 'false'
-          WEB_PORT: '18080'
+      - name: Exercise tiny real-auth persistent Docker deployment
         run: |
-          docker compose up --build -d
-          python - <<'PY'
-          import json, time, urllib.request, urllib.error
-          base = 'http://127.0.0.1:18080'
-          for attempt in range(30):
-              try:
-                  with urllib.request.urlopen(base + '/api/ready', timeout=2) as response:
-                      assert json.load(response)['mode'] == 'fixture'
-                  break
-              except (urllib.error.URLError, TimeoutError, ConnectionError):
-                  time.sleep(1)
-          else:
-              raise RuntimeError('Docker app never became ready')
-          with urllib.request.urlopen(base) as response:
-              assert b'/assets/' in response.read()
-          for mode in ('baseline', 'agentic'):
-              request = urllib.request.Request(base + '/api/query',
-                  data=json.dumps({'question': 'How long are artifacts retained?', 'mode': mode}).encode(),
-                  headers={'Content-Type': 'application/json', 'Origin': base})
-              with urllib.request.urlopen(request) as response:
-                  body = json.load(response)
-                  assert body['answer']['status'] == 'answered'
-                  assert body['answer']['citation_ids'][0] == body['sources'][0]['citation_id']
-          PY
+          set -euo pipefail
+          umask 077
+          fixture_root="$PWD/.cache/deployment-smoke"
+          python tests/deployment/fixture.py prepare --directory "$fixture_root"
+          compose() {
+            docker compose --env-file "$fixture_root/compose.env" -f compose.yaml -f tests/deployment/compose.yaml "$@"
+          }
+          compose --profile ci-fixture --profile operator config --quiet
+          compose --profile ci-fixture --profile operator build app operator fixture-load
+          compose --profile ci-fixture run --rm fixture-load
+          compose up -d --wait db
+          # No bootstrap identity or fake readiness marker may serve requests.
+          if compose run --rm verify >"$fixture_root/preparation-incomplete.log" 2>&1; then
+            echo 'Unexpected readiness before migration/import'; exit 1
+          fi
+          compose --profile operator run --rm migrate
+          compose --profile operator run --rm import-corpus
+          if compose --profile operator run --rm prepare-state >"$fixture_root/native-incomplete.log" 2>&1; then
+            echo 'Unexpected deployment publication before actual native import'; exit 1
+          fi
+          compose --profile operator run --rm -T operator python /operator/fixture.py native
+          compose --profile operator run --rm prepare-state
+          compose run --rm verify
+          compose --profile operator run --rm -T operator python /operator/fixture.py seed
+          compose up -d --wait app
+          python tests/deployment/fixture.py before --directory "$fixture_root/operator"
+          # A live dependency loss must close readiness/query while health lives.
+          compose stop db
+          python tests/deployment/fixture.py unavailable --directory "$fixture_root/operator"
+          compose up -d --wait db
+          python tests/deployment/fixture.py resume --directory "$fixture_root/operator"
+          # Keep all named volumes and reuse the SAME cookies and human grants.
+          compose stop app
+          compose restart db
+          compose up -d --wait db
+          compose up -d --force-recreate --wait verify app
+          python tests/deployment/fixture.py resume --directory "$fixture_root/operator"
       - name: Show Docker logs on failure
         if: failure()
         run: |
-          docker compose ps -a
-          docker compose logs --no-color --tail=200 app
+          fixture_root="$PWD/.cache/deployment-smoke"
+          if [ -f "$fixture_root/compose.env" ]; then
+            docker compose --env-file "$fixture_root/compose.env" -f compose.yaml -f tests/deployment/compose.yaml ps -a
+            docker compose --env-file "$fixture_root/compose.env" -f compose.yaml -f tests/deployment/compose.yaml logs --no-color --tail=100 app verify db
+          fi
       - name: Stop Docker application
         if: always()
-        run: docker compose down
+        run: |
+          fixture_root="$PWD/.cache/deployment-smoke"
+          if [ -f "$fixture_root/compose.env" ]; then
+            # Only this generated disposable rag-ci-fixture-* project. Never use
+            # volume removal as the ordinary local-stack stop/recovery command.
+            docker compose --env-file "$fixture_root/compose.env" -f compose.yaml -f tests/deployment/compose.yaml down --volumes --remove-orphans
+          fi
       - name: Stop isolated PostgreSQL
         if: always()
         run: docker rm -f rag-ci-postgres

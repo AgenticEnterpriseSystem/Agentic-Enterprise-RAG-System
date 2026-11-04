@@ -1,151 +1,125 @@
 # Agentic RAG for Enterprise Knowledge Search
 
-A FastAPI + React app for answering questions over EnterpriseRAG-Bench documents
-with cited sources. It combines BM25 and BGE-base retrieval using RRF. An LLM
-critic checks the retrieved passages and requests follow-up searches when needed.
+A FastAPI + React application for scoped search over EnterpriseRAG-Bench. Real
+local accounts receive explicit document grants; PostgreSQL RLS and request-time
+checks keep retrieval, native Jira tools, model prompts and responses within the
+current account's permissions. The default deployment uses the full corpus in
+local Docker and runs without paid model calls.
 
-## Run the app
+## Run locally
 
-Follow [Setup](docs/WEB_APP.md) to install dependencies, build the frontend,
-obtain the corpus/index bundle, and configure your local `.env`.
+Follow [Setup](docs/WEB_APP.md) to prepare the complete corpus/index bundle, the
+pinned embedding model cache and the pinned upstream source checkout. These large
+inputs are not in Git. The bundle is in `files_web_app` in the
+[team Drive folder](https://drive.google.com/drive/folders/1ltfTpNLGdl_S9dBnozACJj3Eo1_Cc8i7?usp=sharing).
 
-The corpus and indexes are not in Git. Download everything in the **`files_web_app`**
-folder of the [team Google Drive folder](https://drive.google.com/drive/folders/1ltfTpNLGdl_S9dBnozACJj3Eo1_Cc8i7?usp=sharing): `documents.parquet`,
-`indexes/bm25/`, `indexes/dense-bge-base/` and `questions.jsonl`. [Setup, step 2](docs/WEB_APP.md#get-the-artifacts)
-shows where each one goes.
-Then, from the repository root:
+Once the three input directories are prepared:
 
 ```sh
-source .venv/bin/activate
-python scripts/run_web.py
+python3 scripts/local_stack.py --env-file .env.local init \
+  --artifacts-dir "$PWD/.cache/hybrid-artifacts" \
+  --models-dir "$PWD/.cache/models" \
+  --source-repo-dir "$PWD/.cache/local-source" \
+  --operator-dir "$PWD/.cache/local-operator" --project redwood --port 8000
+python3 scripts/local_stack.py --env-file .env.local bootstrap
 ```
 
-Open <http://127.0.0.1:8000> and wait for **Ready**. Stop with Ctrl+C.
-Hybrid search is the default. `python scripts/run_web.py --check` prints the
-settings the app would use without starting it; a BM25-only baseline needs
-`--retrieval bm25`. Docker is an optional alternative covered in the setup guide.
+The helper generates separate private database role secrets, stages verified
+Linux-volume copies, migrates/imports the data and starts the application. It does
+not seed a login. [Create a human account and apply reviewed grants](docs/WEB_APP.md#local-account-api),
+then open <http://127.0.0.1:8000>. Role/department labels grant no access.
 
-| Mode | Behavior |
-| --- | --- |
-| `fixture` | Scripted demo; no artifacts or API key |
-| `retrieval` | Real search; no generated answers |
-| `live` | Search, evidence critique and cited answers; API key and budget required |
+The Docker target is a 16 GiB host with about 8 GiB available to the VM. Compose
+caps the app at 6 GiB/2 CPUs and PostgreSQL at 384 MiB/1 CPU. Full artifact copies,
+images, database storage and backups need additional disk. See Setup for exact
+preparation, troubleshooting and [safe backup/restore](docs/WEB_APP.md#backup-restore-and-compatible-rollback).
+Never remove database volumes as routine shutdown.
 
-Select **Adaptive agent** for follow-up searches or **Fixed RAG** for one search.
-Neither generates answers in retrieval-only mode.
-
-## Status
-
-Working alpha: full-corpus native hybrid search and a live agent request have
-been verified. A first answer-quality baseline exists: 20 development questions
-answered by GPT-OSS from BM25 evidence and graded 0–2 by an LLM judge (mean
-correctness 1.30, citation support 1.55; see [Answer evaluation](docs/ANSWER_EVALUATION.md)).
-Answer quality of the web configuration (hybrid + Claude) and full-corpus Docker
-validation remain unfinished. Known issues are described in [Setup](docs/WEB_APP.md),
-[System](docs/SYSTEM.md) and the [system card](docs/system_card.md).
-
-An optional [PostgreSQL foundation](docs/WEB_APP.md#database-foundation) now
-provides migrations, constrained storage, and unprivileged connections. Real
-account login and permission-aware application integration remain pending.
-
-The corpus and indexes are downloaded from the `files_web_app` folder of the
-[team Google Drive folder](https://drive.google.com/drive/folders/1ltfTpNLGdl_S9dBnozACJj3Eo1_Cc8i7?usp=sharing).
-Never commit `.env` or API keys.
-
-## Updates since Milestone 2
-
-Milestone 2 delivered two retrieval baselines on the full 511,958-document corpus:
-BM25+ (Recall@10 0.692) and BGE-small + FAISS (0.468). Since then:
-
-- **Model testing:** Added document titles to every dense passage, tested four more
-  dense embedding models, cross-encoder rerankers, and various fusion weights.
-  Replaced BGE-small with BGE-base.
-- **Hybrid search:** BM25+ and BGE-base (title on every passage) combined with
-  weighted rank fusion, BM25+ weight 0.7. Recall@10 is 0.722 on development and
-  0.767 on calibration.
-- **Adaptive agent:** an LLM evidence critic that checks whether the evidence answers
-  the question, up to one round of follow-up searches, then a cited answer. A
-  one-search "Fixed RAG" path is kept as the comparison baseline.
-- **Grounded answers:** answers may cite only the passages they were given, and
-  invalid citations or out-of-scope evidence are rejected.
-- **Web app:** FastAPI + React with clickable citations, source excerpts and search
-  steps, in demo, search-only or live (Claude) mode, with spending caps. The data
-  downloads from the team Drive ([Setup](docs/WEB_APP.md#get-the-artifacts)).
-  Optional Docker setup included.
-- **Answer evaluation:** a 0–2 rubric (correctness, completeness, citation support,
-  abstention) graded by an LLM judge. First baseline, 20 questions with GPT-OSS
-  answers from BM25 evidence: mean correctness 1.30 and citation support 1.55
-  ([Answer evaluation](docs/ANSWER_EVALUATION.md)).
-- **Docs and tests:** a [model card](docs/model_card_hybrid_retriever.md), a
-  [system card](docs/system_card.md), and 206 automated tests in CI.
-
-## How it works
-
-```text
-Question → hybrid search (BM25+ and BGE-base) → critic: "is this enough?"
-         → follow-up searches if needed → answer with cited sources
+```sh
+python3 scripts/local_stack.py --env-file .env.local stop
+python3 scripts/local_stack.py --env-file .env.local up
 ```
 
-## Dataset
+`.env.local` and operator credentials are private and ignored by Git. The Docker
+`.env.example` uses internal service names and named-volume paths; it is not a
+native-host launcher configuration.
 
-[EnterpriseRAG-Bench](https://github.com/onyx-dot-app/EnterpriseRAG-Bench) is a
-synthetic company, "Redwood Inference", with:
+## Application behavior
 
-- **511,958 documents** from 9 sources (Slack, Gmail, Linear, Google Drive,
-  HubSpot, Fireflies, GitHub, Jira, Confluence)
-- **500 questions**, each labeled with the documents that answer it
+- **Retrieval-only default:** BM25+ and bounded BGE-base dense search combined by
+  weighted RRF. It returns scoped sources without generated answers or paid calls.
+- **Fixed RAG / adaptive agent:** fixed retrieval provides a comparison path;
+  adaptive mode can request follow-up search or source expansion. Live generation
+  requires separate explicit provider/model/rate/budget configuration.
+- **Typed evidence:** exact passage excerpts, native Jira record fields with
+  provenance, and aggregate counts including zero. Counts describe authorized
+  canonical source records; Jira keys can be duplicated. Unknown coverage is not
+  treated as zero, and ambiguous native-key lookups request clarification.
+- **Current authority:** login, logout, expiry, account disable and grant changes
+  affect retrieval and release. Evidence is cleared on account/session changes.
+  No browser storage holds passwords, session tokens or source evidence.
+- **Protected run metadata:** run ownership/scope bindings and bounded tool
+  metadata persist without raw question/answer/source-body history. Operator
+  capture/export rechecks ownership and provenance; gold answers stay outside
+  runtime inputs.
 
-We split the questions into **development** (300, for building and comparing),
-**calibration** (100, for tuning later), and **final** (100, untouched until the
-end). The split is in `evaluation/splits.json`.
+The local deployment has one RAG worker and bounded database/auth workers. Public
+readiness checks live dependencies without revealing corpus or permission counts.
+The legacy fixture/benchmark profile is a separate development path, not a user
+identity or fallback for the authenticated product.
 
-## Results so far
+## Validation status
 
-Scored on the 300 development questions (282 have labeled answer documents):
+Authentication, scoped retrieval, native lookup/counts, typed evidence, export
+boundaries and account lifecycle have automated and full-corpus functional
+validation. Permission checks remain independent in the application and database.
+This is a local working application; SSO, distributed admission and model-quality
+claims for the current scoped agent are outside this delivery.
 
-| Method | What it does | Recall@10 | nDCG@10 |
-| --- | --- | ---: | ---: |
-| **BM25+** (baseline) | Keyword search: matches the question's words | 0.692 | **0.604** |
-| **BGE-small + FAISS** (baseline) | Meaning search: matches similar meaning | 0.468 | 0.367 |
-| BGE-base, title on every passage | Larger meaning-search model | 0.487 | 0.416 |
-| **Hybrid: BM25+ and BGE-base** | Combines both rankings (RRF, more weight on BM25+) | **0.722** | **0.604** |
+CI includes a [five-document deployment fixture](tests/deployment/README.md) using
+real human Argon2 login, PostgreSQL, native import formats and unchanged RLS. It
+checks dependency failure and restart persistence without downloading a model.
+This tiny check does not establish full-corpus resource/recovery performance. The
+new packaging/recovery acceptance is recorded separately; historical failing runs
+are retained rather than replaced by later successes.
 
-- **Recall@10**: share of the correct documents found in the top 10 results.
-- **nDCG@10**: also rewards ranking the correct documents near the top (1.0 is perfect).
-- The hybrid was confirmed once on the calibration questions: Recall@10 0.767 vs
-  0.712 for BM25+ alone.
-- Arctic-embed-l-v2.0 beats BGE-base on its own (Recall@10 0.554 vs 0.487), but its hybrid
-  with BM25+ is only marginally better (0.723 vs 0.722), so the team keeps BGE-base for now
-  (see [full-corpus Arctic](docs/FULL_CORPUS.md#full-corpus-arctic-embed-l-v20)).
+## Dataset and earlier retrieval results
 
-What this means:
+[EnterpriseRAG-Bench](https://github.com/onyx-dot-app/EnterpriseRAG-Bench) represents
+synthetic company Redwood Inference: 511,958 documents from nine platforms and
+500 questions with reference documents. `evaluation/splits.json` declares 300
+development, 100 calibration and 100 final questions.
 
-- Keyword search beats BGE in every question type, likely because this dataset is
-  full of project codenames and IDs, which exact word matching handles well.
-- BGE finds some documents that keyword search misses. Combining the two with more
-  weight on keyword search is the best setting so far. Cross-encoder rerankers made
-  results worse as tested, likely because they saw only one short section of long
-  documents (see [retrieval results](docs/FULL_CORPUS.md#hybrid-search-and-reranking)).
+The table below records the earlier unrestricted retrieval protocol on development
+questions (282 have reference documents). It is not a new permission-scoped or
+answer-quality result.
 
-Full results by question type: [docs/FULL_CORPUS.md](docs/FULL_CORPUS.md).
+| Method | Recall@10 | nDCG@10 |
+| --- | ---: | ---: |
+| BM25+ baseline | 0.692 | 0.604 |
+| BGE-small + FAISS baseline | 0.468 | 0.367 |
+| BGE-base, title on every passage | 0.487 | 0.416 |
+| Hybrid BM25+ / BGE-base, BM25 weight 0.7 | 0.722 | 0.604 |
+
+Hybrid Recall@10 was 0.767 on calibration versus 0.712 for BM25+. These results
+motivated the retrieval configuration; current scoped evaluation filters reference
+documents by actual permissions and retains denominator/unknown-label provenance.
+See [Retrieval results](docs/FULL_CORPUS.md) and [Evaluation](docs/EVALUATION.md).
+
+An earlier 20-question GPT-OSS/BM25 answer baseline scored mean correctness 1.30
+and citation support 1.55 on a 0–2 rubric. It does not establish quality for the
+current agent. [Answer evaluation](docs/ANSWER_EVALUATION.md) describes the external
+judge protocol; no paid evaluation is required to run the app.
 
 ## Documentation
 
-- [Setup](docs/WEB_APP.md)
-- [System](docs/SYSTEM.md)
-- [Evaluation](docs/EVALUATION.md)
-- [Answer evaluation](docs/ANSWER_EVALUATION.md): the 20-question GPT-OSS generation and LLM-judge baseline
+- [Setup, accounts, permissions and recovery](docs/WEB_APP.md)
+- [System architecture and trust boundaries](docs/SYSTEM.md)
+- [Scoped retrieval evaluation](docs/EVALUATION.md)
+- [Answer evaluation](docs/ANSWER_EVALUATION.md)
 - [Retrieval results](docs/FULL_CORPUS.md)
 - [Dataset](docs/DATA_CARD.md)
-- [Model card: hybrid retriever](docs/model_card_hybrid_retriever.md)
+- [Hybrid retriever model card](docs/model_card_hybrid_retriever.md)
 - [System card](docs/system_card.md)
 
 Team: Hira Mian, Jane Choi, Alexander Xykis. [MIT License](LICENSE).
-
-The optional PostgreSQL import and exact Unicode/null-preserving document store
-are documented in [setup](docs/WEB_APP.md#canonical-document-import). The web
-runtime is connected in the later integration work.
-
-The explicit local-account profile and interactive provisioning commands are in
-[setup](docs/WEB_APP.md#local-account-api). Query access stays denied until the
-permission and application integration gates pass.

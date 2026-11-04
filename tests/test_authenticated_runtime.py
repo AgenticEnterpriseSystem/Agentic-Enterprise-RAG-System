@@ -2,7 +2,9 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
+import time
 from threading import Event
 from types import SimpleNamespace
 
@@ -51,7 +53,7 @@ class RecordingProvider:
         if self.entered is not None:
             self.entered.set()
         if self.release is not None:
-            assert self.release.wait(10), 'Test did not release the scripted provider'
+            assert self.release.wait(30), 'Test did not release the scripted provider'
         evidence = payload.get('evidence', [])
         if 'Check whether the supplied passages' in system:
             self.critic_calls += 1
@@ -106,8 +108,50 @@ class ObservedRetriever:
 
 
 @pytest.fixture
-def app_db(acl_db):
+def app_db(acl_db, tmp_path):
     seed_explicit_grants(acl_db)
+    # The legacy ACL catalogue has Jira labels but no native upstream fields.
+    # Publish a complete, explicitly synthetic relation with every field
+    # truthfully missing; readiness must not use a fixture-mode bypass.
+    from tests.jira_support import git, commit
+    root = tmp_path / 'readiness-native-source'
+    source = root / 'generated_data/sources/jira/fixture'
+    source.mkdir(parents=True)
+    git(root, 'init', '-q')
+    git(root, 'remote', 'add', 'origin', 'https://example.invalid/app-readiness-fixture.git')
+    entries = tuple(entry for entry in ENTRIES if entry.source_type == 'jira')
+    raw_files = {}
+    for entry in entries:
+        title, content = TEXTS[entry.position].split('\n', 1)
+        raw = json.dumps({'dataset_doc_uuid': entry.doc_id, 'summary': title, 'description': content,
+            'title_field_name': 'summary', 'content_field_names': ['description']}, ensure_ascii=False).encode()
+        relative = 'generated_data/sources/jira/fixture/' + entry.doc_id + '.json'
+        (root / relative).write_bytes(raw)
+        raw_files[entry.doc_id] = (relative, raw)
+    revision = commit(root)
+    source_hash = hashlib.sha256(json.dumps({key: hashlib.sha256(raw).hexdigest()
+        for key, (_path, raw) in raw_files.items()}, sort_keys=True).encode()).hexdigest()
+    feed_id = hashlib.sha256(('app-readiness-fixture:' + acl_db.snapshot.snapshot_id + source_hash).encode()).hexdigest()
+    fields = {'native_key': '/key', 'status': '/status', 'priority': '/priority', 'project_id': '/project'}
+    with acl_db.owner.begin() as connection:
+        connection.execute(schema.ticket_feeds.insert().values(feed_id=feed_id,
+            snapshot_id=acl_db.snapshot.snapshot_id, source_type='jira', coverage='synthetic_fixture',
+            repository='https://example.invalid/app-readiness-fixture.git', git_commit=revision,
+            corpus_sha256=acl_db.snapshot.corpus_sha256, source_set_sha256=source_hash,
+            expected_records=len(entries), field_coverage={field: {'verified': 0, 'missing': len(entries), 'invalid': 0}
+                for field in fields}, source_manifest={'fixture': True,
+                    'note': 'Legacy synthetic catalogue identity; native fields are absent, never inferred from prose.'}))
+        for entry in entries:
+            relative, raw = raw_files[entry.doc_id]
+            connection.execute(schema.tickets.insert().values(snapshot_id=acl_db.snapshot.snapshot_id,
+                ticket_id=entry.doc_id, doc_id=entry.doc_id, revision_id=entry.revision_id,
+                feed_id=feed_id, coverage='synthetic_fixture', field_provenance={
+                    'source': {'repository': 'https://example.invalid/app-readiness-fixture.git',
+                        'git_commit': revision, 'git_blob': hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest(),
+                        'path': relative, 'raw_sha256': hashlib.sha256(raw).hexdigest(), 'parser_version': 'synthetic-missing-fields-v1'},
+                    'fields': [{'field': field, 'json_pointer': pointer, 'state': 'missing'} for field, pointer in fields.items()]}))
+        connection.execute(schema.ticket_feeds.update().where(schema.ticket_feeds.c.feed_id == feed_id)
+            .values(imported_records=len(entries), state='ready'))
     return acl_db
 
 
@@ -222,7 +266,15 @@ def test_live_change_during_scripted_provider_aborts_instead_of_releasing_answer
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(bundle.runtime.query, QueryRequest(question=QUESTION), principal)
         try:
-            assert entered.wait(5)
+            # Mac/Docker PostgreSQL setup and fresh guards are not an SLA.
+            # Surface an early query failure instead of mislabelling it as a
+            # provider scheduling timeout; still require actual dispatch.
+            deadline = time.monotonic() + 30
+            while not entered.wait(.05):
+                if future.done():
+                    result = future.result(timeout=0)
+                    pytest.fail('Query completed before provider dispatch: ' + result.answer.status)
+                assert time.monotonic() < deadline, 'Scripted provider was never entered'
             if mutation == 'grant':
                 with app_db.owner.begin() as connection:
                     connection.execute(schema.document_grants.delete().where(
@@ -240,7 +292,7 @@ def test_live_change_during_scripted_provider_aborts_instead_of_releasing_answer
         finally:
             release.set()
         with pytest.raises(expected):
-            future.result(timeout=5)
+            future.result(timeout=30)
     assert_prompt_scope(bundle.provider, {'general', 'atlas'})
     assert app_db.database.engine.pool.checkedout() == 0
 

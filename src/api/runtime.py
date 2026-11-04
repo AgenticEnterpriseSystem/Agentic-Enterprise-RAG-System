@@ -108,6 +108,7 @@ class WebSettings(RetrievalSettings):
     demo_access: bool = False
     auth_mode: Literal['benchmark', 'local'] = 'benchmark'
     allowed_doc_ids_file: Path | None = None
+    deployment_receipt: Path | None = None
     allowed_sources: tuple[str, ...] = ()
     frontend_dist: Path = ROOT / 'frontend/dist'
     allowed_origins: tuple[str, ...] = ('http://localhost:8000', 'http://127.0.0.1:8000',
@@ -502,6 +503,12 @@ class AuthenticatedRuntime:
         return {'mode': self.settings.mode, 'retrieval': self.settings.retrieval,
                 'authentication': 'local', 'generation_enabled': self.provider is not None}
 
+    def assert_ready(self):
+        """Check live metadata through the same nonowner authentication pool."""
+        from src.api.deployment_check import assert_storage_ready
+        assert_storage_ready(self.database, self.snapshot,
+            jira_documents=len(self.jira_tool._jira_doc_ids), receipt=self.settings.deployment_receipt)
+
     def _native(self, context, evidence, registry):
         return validate_grounded_evidence(context, tuple(evidence), self.resolver, registry,
             record_validator=lambda records: self.jira_tool.validate_records(
@@ -868,9 +875,18 @@ def build_runtime(settings, *, database=None, authenticated=False):
             raise RuntimeConfigurationError('RAG_ALLOWED_DOC_IDS_FILE must contain distinct nonblank document IDs.')
         documents = tuple(documents)
     provider = _provider(settings, allow_fixture=False)
+    from src.api.deployment_check import assert_storage_ready
+    # Fail incompatible metadata before spending memory/time on models. This
+    # does not replace the accepted store/catalog/shard verification below.
+    assert_storage_ready(database, snapshot, receipt=settings.deployment_receipt)
     store = PostgresDocumentStore(database, snapshot, retain_catalog=True)
+    catalog = store.validated_catalog()
+    assert_storage_ready(database, snapshot, jira_documents=catalog.sources.count('jira'),
+                         receipt=settings.deployment_receipt)
     resolver = PolicyResolver(database, snapshot, source_types=settings.allowed_sources,
-                              doc_ids=documents, catalog=store.validated_catalog())
+                              doc_ids=documents, catalog=catalog)
     from src.agents.routing import ModelRouter
-    return AuthenticatedRuntime(settings, load_store_retriever(settings, store), resolver,
+    runtime = AuthenticatedRuntime(settings, load_store_retriever(settings, store), resolver,
         database=database, provider=provider, router=ModelRouter(provider) if provider is not None else None)
+    runtime.assert_ready()
+    return runtime

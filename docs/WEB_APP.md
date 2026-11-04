@@ -1,94 +1,54 @@
-# Run the web app
+# Run the local application
 
-This guide covers local installation, configuration, startup and shutdown.
-Commands below are for macOS/Linux and run from the repository root.
+The default Docker deployment uses real local accounts, PostgreSQL permissions,
+the full corpus, and hybrid retrieval. It starts in retrieval-only mode: no paid
+model calls or generated answers. Commands run from the repository root on
+macOS/Linux. This is a single-process local deployment, not an SSO or public
+multi-server service.
 
-<a id="build-bm25-locally"></a>
+## Prepare the machine
 
-## 1. Install
-
-Requirements: Python 3.11, Node.js 22.12+ and Git. Full-corpus native operation
-has been tested on a 16 GiB Mac; leave memory available for the app.
+Install Git, Python 3.11 and Docker with Compose v2.10 or later. Docker builds the React
+frontend; a host Node installation is needed only for frontend development.
+The target machine has 16 GiB RAM and about 8 GiB available to the Docker VM.
+Compose caps the app at 6 GiB/2 CPUs and PostgreSQL at 384 MiB/1 CPU, with no
+extra swap allowance. Build/import jobs run separately. Leave space for images,
+the original downloads, Linux-volume copies, PostgreSQL, and a separate recovery
+copy. Build/staging headroom checks are minimum reserves, not total capacity estimates.
 
 ```sh
-python3.11 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-npm --prefix frontend ci
-npm --prefix frontend run build
-test -f .env || cp .env.example .env
+docker compose version
+docker system df
+df -h .
 ```
 
-If `.venv` already exists, skip creating it.
+Keep large files out of cloud-synced folders that may replace them with online
+placeholders. Do not commit `.env*`, downloaded data, operator receipts or tokens.
 
 <a id="get-the-artifacts"></a>
 <a id="hybrid-handoff"></a>
 
-## 2. Add the search data
+## Get the artifacts
 
-The corpus and indexes are too large for Git (about 4 GB). Download them from the
-team's shared Google Drive folder:
-<https://drive.google.com/drive/folders/1ltfTpNLGdl_S9dBnozACJj3Eo1_Cc8i7?usp=sharing>
-
-1. Open the link and find the folder **`files_web_app`**. If Drive asks for
-   permission, request access from the team. It contains:
-
-   | Item | What it is |
-   | --- | --- |
-   | `documents.parquet` | All 511,958 documents |
-   | `indexes/bm25/` | BM25+ keyword index (8 files) |
-   | `indexes/dense-bge-base/` | BGE-base meaning-search index (54 files: `manifest.json`, `doc_ids.json`, and `shard_00000` to `shard_00025` as `.npy` and `.parquet`) |
-   | `questions.jsonl` | The 500 benchmark questions (evaluation scripts only) |
-
-2. Right-click `files_web_app` and choose **Download**. Drive zips the folder and may
-   split it into several zip files.
-3. Unzip every zip file into the same place, for example `~/Downloads`. If unzipping
-   creates a second copy (such as `files_web_app 2`), merge it into the first:
-
-   ```sh
-   cp -R ~/Downloads/"files_web_app 2"/. ~/Downloads/files_web_app/
-   ```
-
-4. From the repository root, move the folder into the project as
-   `.cache/hybrid-artifacts`, and copy the questions file where the evaluation
-   scripts look for it:
-
-   ```sh
-   mkdir -p .cache/corpus
-   mv ~/Downloads/files_web_app .cache/hybrid-artifacts
-   cp .cache/hybrid-artifacts/questions.jsonl .cache/corpus/
-   ```
-
-   Change `~/Downloads` if you unzipped elsewhere.
-
-5. Check the result. The two counts should be `8` and `54`:
-
-   ```sh
-   ls .cache/hybrid-artifacts/indexes/bm25 | wc -l
-   ls .cache/hybrid-artifacts/indexes/dense-bge-base | wc -l
-   ```
-
-The finished layout:
+Download the complete `files_web_app` bundle from the
+[team Drive folder](https://drive.google.com/drive/folders/1ltfTpNLGdl_S9dBnozACJj3Eo1_Cc8i7?usp=sharing).
+Merge all split ZIP downloads into one directory without replacing different
+files. Use this layout:
 
 ```text
 .cache/hybrid-artifacts/
   documents.parquet
-  questions.jsonl
   indexes/
     bm25/
     dense-bge-base/
-.cache/corpus/
-  questions.jsonl
 ```
 
-Keep all index files and manifests together and unchanged: at startup the app
-checks that both indexes were built from this exact `documents.parquet` and refuses
-to start otherwise. Evaluation result files cannot replace the indexes. Git ignores
-`.cache/`, so these files are never committed. Keep the repository out of iCloud
-Drive or other synced folders, which can replace large files with placeholders.
-
-If you instead received the older split download (five `rag-dense` folders), place
-them in the repository root and assemble once:
+Keep every manifest, document-ID file, and declared dense `.npy`/`.parquet` shard.
+Use the manifest inventory, not a hard-coded file count. `questions.jsonl` is
+needed for evaluation, not serving. Setup checks corpus hashes, index inventories
+and completeness; result JSON or partial downloads cannot substitute for indexes.
+If you have the older five-part download, assemble it first in a prepared Python
+environment:
 
 ```sh
 python -m src.data.assemble_artifacts \
@@ -96,478 +56,331 @@ python -m src.data.assemble_artifacts \
   --output .cache/hybrid-artifacts
 ```
 
-## 3. Configure
-
-Edit the existing entries in `.env` to match these values:
-
-```dotenv
-RAG_MODE=retrieval
-RAG_RETRIEVAL=hybrid
-RAG_DEMO_ACCESS=true
-RAG_ALLOW_PAID=false
-ARTIFACTS_DIR=./.cache/hybrid-artifacts
-RAG_DENSE_INDEX=/data/indexes/dense-bge-base
-RAG_FP16=
-```
-
-The launcher reads `.env` and translates `/data` paths to the local artifact
-folder. Hybrid is the default; a conflicting BM25 setting stops startup instead
-of silently changing retrieval. Other exported shell settings take precedence.
-Keep credentials in `.env`;
-never commit that file.
-
-| Mode | Result |
-| --- | --- |
-| `fixture` | Scripted demo; no search data or API key needed |
-| `retrieval` | Real search excerpts; no generated answers |
-| `live` | Real search, evidence checks and generated answers; API key required |
-
-The settings above select the explicit benchmark demo. For the authenticated
-local backend, set `RAG_AUTH_MODE=local` (or `RAG_AUTH_ENABLED=true`) and
-`RAG_SNAPSHOT_FILE` to the JSON `SnapshotRef` for an imported, ready PostgreSQL
-snapshot. The authentication service and search runtime share the same bounded,
-nonowner database pool. Account provisioning and explicit document grants must
-already exist; role or department labels grant no access. `RAG_DEMO_ACCESS` does
-not substitute for a session, and `RAG_MODE=fixture` is rejected in this profile.
-
-Authenticated retrieval uses metadata-only mmap BM25 and the accepted bounded
-dense backend, with `RAG_DENSE_BLOCK_ROWS=8192` and
-`RAG_DENSE_FILE_CACHE_POLICY=retain` by default. Matching snapshot, catalogue,
-corpus order, complete shards and query-model settings are still checked.
-`RAG_ALLOWED_SOURCES` and `RAG_ALLOWED_DOC_IDS_FILE` can only narrow explicit
-grants; an empty document list denies all documents. Each question resolves its
-own current session and scope, and rechecks them around retrieval, document
-expansion, model dispatch and response release. Readiness exposes no corpus or
-permission counts. The account lifecycle below uses that authenticated backend;
-structured-tool registration and packaged full-app deployment remain separate
-integration steps.
-
-## 4. Start
+The native Jira adapter also needs the source tree at the corpus's pinned commit.
+It imports actual fields and Git provenance; it does not infer fields from prose.
 
 ```sh
-python scripts/run_web.py
+git clone https://github.com/onyx-dot-app/EnterpriseRAG-Bench.git .cache/local-source
+git -C .cache/local-source checkout --detach d36685e273713975ee20299bbf1ab64165575b3c
 ```
 
-Leave the terminal open. Visit <http://127.0.0.1:8000> and wait for **Ready**.
-Initial startup loads the indexes and may download model weights.
-
-Use `python scripts/run_web.py --check` to inspect effective settings without
-starting. For a deliberate BM25 baseline only, use `--retrieval bm25`.
-
-Check <http://127.0.0.1:8000/api/ready>: HTTP 200 with `retrieval: hybrid` means
-hybrid search is ready. HTTP 503 means loading or a configuration error.
-
-To stop, press Ctrl+C and wait for exit. To restart, run the same command again.
-Do not start a second instance while the first is running.
-
-## 5. Enable generated answers
-
-Once retrieval works, update these entries in `.env`. Replace placeholders with
-your API key, model ID, spending cap and the model's current token prices:
-
-```dotenv
-RAG_MODE=live
-RAG_ALLOW_PAID=true
-ANTHROPIC_API_KEY=YOUR_KEY
-RAG_MODEL=YOUR_MODEL_ID
-RAG_BUDGET_USD=YOUR_SESSION_CAP
-RAG_QUESTION_BUDGET_USD=0.10
-RAG_INPUT_PRICE=USD_PER_MILLION_INPUT_TOKENS
-RAG_OUTPUT_PRICE=USD_PER_MILLION_OUTPUT_TOKENS
-```
-
-Restart and refresh the browser. Select **Adaptive agent** for follow-up searches
-or **Fixed RAG** for one search. Inspect the answer's citations and source excerpts.
-Restarting resets the app's session cap, not actual provider spending.
-
-## Docker alternative
-
-Docker is optional. Install Docker with Compose v2, prepare the same search data
-and `.env`, and add `INSTALL_HYBRID=true`. Stop any native instance first.
+Prepare a model cache matching the dense manifest before staging. An existing
+verified team cache can be placed at `.cache/models`. To populate it yourself,
+this explicit preparation job downloads the registered pinned embedding model.
+It does not call a paid generation provider. Serving later uses the cache offline.
 
 ```sh
-docker compose up -d --build
+mkdir -p .cache/models
+docker build --build-arg INSTALL_HYBRID=true --target app -t redwood-rag:models .
+docker run --rm --user "$(id -u):$(id -g)" \
+  --mount "type=bind,src=$PWD/.cache/hybrid-artifacts/indexes/dense-bge-base,dst=/index,readonly" \
+  --mount "type=bind,src=$PWD/.cache/models,dst=/app/.cache/models" \
+  -e HF_HUB_OFFLINE=0 -e TRANSFORMERS_OFFLINE=0 \
+  -e HF_HOME=/tmp/hf -e XDG_CACHE_HOME=/tmp/cache \
+  redwood-rag:models python -c \
+  "from pathlib import Path; from src.retrieval.corpus_dense import EmbeddingModel; model = EmbeddingModel.for_index(Path('/index'), device='cpu', batch_size=1); print(model.identity)"
 ```
 
-Use the same URL and readiness check. Apply settings changes with the same
-command. Stop with `docker compose down`; this preserves the search data and
-model cache. Inspect errors with `docker compose logs --tail=50 app`.
+## Initialize and import
 
-The legacy hybrid loader accumulates roughly5GiB of float32 vectors alongside
-full corpus text, BM25 and the query model. It exceeded the measured profiling
-budget. Bounded dense and lazy storage components are being integrated; complete
-Docker serving fit and latency still require their explicit acceptance gate.
-
-## Troubleshooting
-
-| Problem | Action |
-| --- | --- |
-| Port 8000 already in use | Stop the existing native or Docker app before restarting. |
-| Not ready | Read `/api/ready` and the terminal/logs; check artifact paths, missing files and available RAM. |
-| Wrong mode | Check `.env` and exported `RAG_*` settings, then restart and refresh. |
-| Missing frontend | Run `npm --prefix frontend run build`, then restart. |
-| Busy or budget limit | Wait for the current request, or review the configured spending limits. |
-
-See [System](SYSTEM.md) for architecture and limits, and
-[Evaluation](EVALUATION.md) for tests and known quality limitations.
-
-## Database foundation
-
-The optional PostgreSQL service provides schema and connection infrastructure.
-The benchmark query profile retains its explicit demo identity. The local
-account API below provides real sign-in; document policy and authenticated query
-wiring remain gated integration work.
-
-Set three different local secrets in `.env`: `RAG_DB_BOOTSTRAP_PASSWORD`,
-`RAG_DB_MIGRATOR_PASSWORD`, and `RAG_DB_RUNTIME_PASSWORD`. Leave them out of Git.
-Then initialize a **new, dedicated** database volume and run the migration job:
+The helper creates an exclusive mode-600 configuration with three different
+database role secrets. It does not create an application account. Use a new
+project name for a separate installation; never point another server at an
+existing database volume.
 
 ```sh
-docker compose --profile database --profile migrations build migrate
-docker compose --profile database --profile migrations run --rm migrate
+python3 scripts/local_stack.py --env-file .env.local init \
+  --artifacts-dir "$PWD/.cache/hybrid-artifacts" \
+  --models-dir "$PWD/.cache/models" \
+  --source-repo-dir "$PWD/.cache/local-source" \
+  --operator-dir "$PWD/.cache/local-operator" \
+  --project redwood --port 8000
+python3 scripts/local_stack.py --env-file .env.local plan
+python3 scripts/local_stack.py --env-file .env.local bootstrap
 ```
 
-The database has no published host port. It persists in `postgres-data`; the
-migration job waits for database health and exits after upgrading. Repeating the
-migration is safe. The init hook runs only on a new volume and rejects preexisting
-application roles or a non-pristine database; changing environment secrets does
-not rotate passwords in an existing volume. The bootstrap role creates separate
-non-superuser migration and runtime roles. Application login accounts are not
-seeded by this infrastructure setup.
+`bootstrap` builds the lean operator image, hashes/copies artifacts and models
+into named Linux volumes, builds the application image, migrates the database,
+imports canonical documents and native Jira records, publishes a verified
+deployment receipt, and starts the app. It never substitutes a demo identity.
+Staging checks source bytes and independently hashes destination bytes. Published
+data is immutable; receipts and locks live in the separate state volume.
 
-The runtime pool defaults to two connections with no overflow. Server-resolved
-request identity is transaction-local, and rollback plus `DISCARD ALL` clears
-session state before reuse. Runtime credentials are checked against both the
-actual login principal and active SQL identity; owner, superuser, replication,
-role-creation, database-creation, and RLS-bypass authority are rejected. Passwords
-in DSN query parameters are rejected because URL representations can expose them;
-structured `RAG_DB_HOST/PORT/NAME/USER/PASSWORD` settings support special characters.
-Migration credentials are used only by the separate migration job.
+The app reads corpus/index/model/state volumes read-only and receives only the
+nonowner `rag_runtime` login. Migration/import/account jobs use the separate
+`rag_migrator` login. PostgreSQL has no published host port. Loopback HTTP is the
+explicit local cookie exception; HTTPS requires secure cookies, disabling the
+loopback exception, and exact HTTPS origins.
 
-The schema covers accounts/sessions, groups/grants, immutable catalog/text,
-tickets, runs/steps, and aggregate provenance. Protected text, ticket, run, and
-aggregate tables start with RLS enabled and no allow policies. Published snapshot
-content cannot change; ready state requires a complete catalog and canonical
-bodies. Policy/session counters cannot decrease, and saved run bindings cannot
-be reassigned. Actual account and permission adapters must pass their later gates
-before authenticated queries are enabled.
-
-Real PostgreSQL tests use explicitly configured `RAG_TEST_ADMIN_URL`,
-`RAG_TEST_MIGRATION_URL`, and `RAG_TEST_RUNTIME_URL` on an isolated disposable
-server with a `rag_test_*` database. They skip when those settings are absent and
-refuse ordinary database names. CI starts its own loopback-only server. The
-snapshot-restore check additionally uses `RAG_TEST_PG_CONTAINER`, labeled
-`rag.task=DB-01`; its dump/restore commands run inside that disposable container.
-These tiny fixtures do not establish full-corpus import or recovery performance.
-
-
-### Canonical document import
-
-The optional import job stores the full corpus and every matching dense passage
-span in PostgreSQL. It uses the dedicated migration login and a separate bounded
-connection, never elevated runtime credentials. It does not connect the web
-application to this store yet. With the database passwords configured as above
-and the complete unchanged artifacts in `.cache/hybrid-artifacts`, run:
+The individual steps are also available:
 
 ```sh
-docker compose --profile database --profile migrations run --build --rm migrate
-docker compose --profile database --profile imports run --build --rm import-corpus
+python3 scripts/local_stack.py --env-file .env.local build
+python3 scripts/local_stack.py --env-file .env.local stage
+python3 scripts/local_stack.py --env-file .env.local migrate
+python3 scripts/local_stack.py --env-file .env.local import-corpus
+python3 scripts/local_stack.py --env-file .env.local import-jira
+python3 scripts/local_stack.py --env-file .env.local prepare-state
+python3 scripts/local_stack.py --env-file .env.local up
 ```
 
-The importer requires the current single migration head `0004_jira_feed`;
-`0002_catalog_import` introduced canonical storage without changing later heads.
-`RAG_SNAPSHOT_ID` names its immutable snapshot. Rerunning with identical files
-verifies/resumes the same import; changed source files reject. Each transaction
-commits its rows and checkpoint together, and incomplete imports stay unavailable.
-A published snapshot is never overwritten. Correct a bad source and use a new
-snapshot ID rather than deleting existing data.
+After an interrupted unpublished copy, investigate the failed job and any stale
+lock first. `stage --adopt-existing` explicitly verifies existing bytes; it does
+not overwrite a published different bundle. A changed corpus needs a separate
+snapshot/data target. Editing `.env.local` secrets does not rotate roles inside
+an existing PostgreSQL volume.
 
-For a read-only verification of the actual source files, canonical bodies,
-ordered catalog and all indexed spans:
+The artifact/model staging CLI `scripts/local_data.py` accepts an explicit
+`--min-free-gib` reserve: default8 GiB, minimum4 GiB. Its disk check requires the
+bytes still to copy **plus** that floor. A reviewed one-shot Compose command
+override can pass a different reserve to the two staging jobs; `bootstrap` keeps
+the default. The reserve is not a total-capacity promise: budget separately for
+models/indexes, PostgreSQL and WAL, images, recovery copies and other activity.
+The independent host-build and import headroom checks remain in force. Reducing a
+reserve does not delete data or make a full serving/resource check pass.
+
+<a id="database-foundation"></a>
+<a id="canonical-document-import"></a>
+<a id="native-jira-feed"></a>
+
+## Database and import guarantees
+
+The forward migration head is `0004_jira_feed`. Canonical imports bind the raw
+corpus, ordered catalogue, immutable revisions and exact Unicode offsets to one
+snapshot. Source changes or incomplete catalogues fail closed. Rare embedded NUL
+characters use a checked binary fallback without altering hashes or offsets.
+Repeated identical imports can resume; ready text is not overwritten.
+
+Native Jira records form a separate complete feed bound to the same snapshot and
+pinned Git tree. A source-record ID identifies a physical record; Jira keys can
+be duplicated. Missing or invalid native fields remain unavailable. Readiness
+requires a complete ready feed when the catalogue includes Jira documents; it
+does not claim that every native field is populated.
+
+The deployment receipt is published by a runtime-credential job only after live
+schema/snapshot/feed checks. It is an integrity declaration, not an access grant.
+Application startup still validates the real indexes, shards and embedding model.
+
+<a id="local-account-api"></a>
+
+## Provision local accounts
+
+Create a real human account through the operator service. Password entry needs
+an interactive terminal and confirmation; passwords never go in command flags.
 
 ```sh
-docker compose --profile database --profile imports run --rm import-corpus \
-  python -m src.data.import_catalog \
-  --corpus /data/documents.parquet \
-  --dense-directory /data/indexes/dense-bge-base \
-  --snapshot-id enterprise-bge-base-canonical --verify-only
+python3 scripts/local_stack.py --env-file .env.local operator -- \
+  python -m src.auth.accounts create jane --display-name Jane --role employee
 ```
 
-Change that ID if you configured another. Reports go to standard output; the
-library/CLI also supports an exclusive `--report` file. No credential CLI flags
-or model calls are used. Default batches target500 rows and8MiB of canonical
-UTF-8 payload, with at most128 Arrow rows prefetched; one oversized document is
-preserved and reported. These limits are not process RSS. The import container
-has a768MiB ceiling and the database384MiB; full-stack serving fit is a separate
-gate. The named database volume persists across container restarts.
-
-The source contains37 documents with null characters. They use an exclusive
-bounded `canonical_utf8` binary representation; other documents retain TEXT.
-The original bytes, SHA256 revisions, Unicode lengths and citation coordinates
-are preserved. No row or character is dropped. Binary payloads are capped at1MiB
-and strictly UTF-8 validated; current source documents are at most42,339 UTF-8
-bytes. Normal excerpts use SQL Unicode substrings. Rare binary excerpts fetch
-and validate the bounded binary body before returning the exact requested span.
-
-The lazy `PostgresDocumentStore` implements the accepted metadata/excerpt/
-read-more interface with the nonowner runtime pool. Protected body reads still
-default-deny without a current registered scope and explicit reviewed grants. A checked import is not actual
-login, permission policy, web integration, or a completed Docker deployment.
-
-### Local account API
-
-Set up the database and run migrations first. From an interactive terminal,
-provision an account with the separate migration job:
+Keep the returned user ID for the permission manifest. Role, department and
+project labels grant no access. A new account can sign in but cannot read any
+documents until an operator applies explicit grants. Reset and disable invalidate
+existing sessions through the account version:
 
 ```sh
-docker compose --profile database --profile migrations run --build --rm migrate \
-  python -m src.auth.accounts create jane --display-name "Jane" --role employee
+python3 scripts/local_stack.py --env-file .env.local operator -- \
+  python -m src.auth.accounts reset-password jane
+python3 scripts/local_stack.py --env-file .env.local operator -- \
+  python -m src.auth.accounts disable jane
 ```
 
-Passwords are prompted twice, never accepted as command-line flags. Non-TTY
-password creation/reset refuses to read input. The same CLI has `reset-password`
-and `disable`; both invalidate existing sessions through the account version.
-Role/department/project labels describe identity and grant no document rights.
-There is no signup, email reset, SSO or default seeded login.
+<a id="reviewed-document-permissions"></a>
 
-For explicit loopback HTTP development, configure:
+## Apply reviewed document permissions
 
-```dotenv
-RAG_AUTH_MODE=local
-RAG_AUTH_SECURE_COOKIES=false
-RAG_AUTH_ALLOW_INSECURE_LOOPBACK=true
-RAG_AUTH_ALLOWED_ORIGINS=http://127.0.0.1:8000,http://localhost:8000
+Place an operator-reviewed `policy.json` in `.cache/local-operator/`. It contains
+the exact imported `SnapshotRef`, explicit existing document/user IDs, provenance,
+and review identity. Do not invent IDs or derive permissions from document text.
+The operator container reads `/state/snapshot.json`; `/operator` is the private
+host exchange directory. The manifest shape is:
+
+```json
+{
+  "schema_version": "1",
+  "manifest_id": "reviewed-project-access-001",
+  "snapshot": {"snapshot_id": "<actual>", "corpus_sha256": "<actual>", "catalog_sha256": "<actual>", "document_count": 0},
+  "origin": "operator",
+  "reviewed_by": "<reviewer>",
+  "provenance": {"approval": "<reviewed access request>"},
+  "groups": [],
+  "memberships": [],
+  "grants": [{"doc_ids": ["<actual authorized document ID>"], "user_id": "<created user ID>"}]
+}
 ```
 
-Start the already migrated database and app with
-`docker compose --profile database up --build`. The app receives only runtime
-credentials; account administration retains a separate owner login. HTTPS
-profiles keep secure cookies enabled and list explicit HTTPS origins.
-`RAG_AUTH_ALLOWED_ORIGINS` overrides the shared `RAG_ALLOWED_ORIGINS` fallback.
-The optional `RAG_AUTH_ENABLED=true` alias also enables protected local mode;
-invalid/conflicting mode flags fail startup, rather than silently serving demo
-queries. Explicit factory-injected settings take precedence over environment.
-
-| Endpoint | Behavior |
-| --- | --- |
-| `GET /api/auth/profile` | Public, no-store `{enabled: boolean}` selects the account UI even while search initializes |
-| `GET /api/auth/csrf` | Short-lived signed pre-login cookie and CSRF value |
-| `POST /api/auth/login` | JSON login/password plus matching bootstrap CSRF header and allowed Origin; renew session token |
-| `GET /api/auth/me` | Current public identity and session CSRF after authoritative checks; does not extend idle expiry |
-| `POST /api/auth/logout` | Session CSRF plus allowed Origin; revoke session and expire cookie |
-
-The CSRF header is `X-CSRF-Token`. Session cookies are host-only, HttpOnly and
-SameSite=Strict; raw session tokens stay out of response JSON and PostgreSQL.
-Mutations require an exact configured Origin. Authentication responses are
-no-store and credential errors never echo request inputs. The HTTP body limit is
-16KiB even for a misleading Content-Length.
-
-Passwords use the pinned Argon2id RFC9106 low-memory profile (64MiB,3 iterations,
-4 lanes); encoded parameters are checked before verification. A separate single
-auth worker has bounded waiting admission, global/per-login/per-IP throttles and
-bounded process-local counters. Timeouts/disconnects retain admission until the
-actual worker exits. These controls are for the documented single-process app;
-they are not a distributed rate limiter. [Argon2 parameter guidance](https://argon2-cffi.readthedocs.io/en/stable/parameters.html).
-
-Idle and absolute lifetimes are checked after row-lock waits and before release.
-They use the current server-configured policy; changing lifetime settings is an
-administrative policy change, not permanent token revocation. Before increasing
-limits where existing deadlines must remain fixed, invalidate the affected
-sessions with the account reset/disable operation. Ordinary unchanged-policy
-restarts preserve valid sessions.
-Logout cannot be undone by a racing session touch. Account disable/password reset
-is rechecked after password hashing without holding a database transaction across
-that work. Runtime users remain SELECT-only on accounts; PostgreSQL row-lock
-privileges are not broadened for authentication. [PostgreSQL locking privileges](https://www.postgresql.org/docs/17/sql-select.html).
-
-The original AUTH-01 backend kept questions denied until APP-01 connected the
-document policy. The accepted authenticated runtime now handles permitted
-questions after startup; `/api/ready` remains503 while it initializes. No
-benchmark identity is used as a fallback. Login remains responsive while a
-separate RAG initialization/worker is occupied.
-
-### Browser account lifecycle
-
-The existing search screen now restores a session with `/api/auth/me`, offers
-provisioned-account sign-in and sign-out, and sends the session CSRF header with
-each question. Passwords are cleared from the form after submission. The browser
-does not read the HttpOnly session cookie or save credentials, CSRF values,
-questions, answers, sources or traces in web storage. Session state is in memory.
-
-Logout, expiry, account/session rotation and tab revalidation clear the question,
-answer, evidence, trace and source selection. Every asynchronous search result
-and cleanup callback is tagged with the current identity generation and request,
-so an older response cannot repaint another account's screen. Aborting a fetch
-does not stop or free the backend worker; the existing readiness/busy behavior
-still controls admission. A failed sign-out leaves search closed until the
-server confirms expiry/logout or a new sign-in succeeds.
-
-Same-origin tabs use payload-free BroadcastChannel notifications and recheck
-`/me` on focus/visibility restoration. The server remains authoritative; UI
-clearing cannot recall already-displayed information or already-dispatched
-model input. The explicit public profile signal selects local versus benchmark
-UI; a failed `/me` request never enables the benchmark identity. The local source
-selector lists supported platform filters rather than exposing a global document
-catalogue; filters can only narrow the server-enforced account scope.
-
-Baseline/agent selection, cited excerpts and search traces keep their existing
-behavior. This UI adds no role selector, signup, stored chat history, aggregate
-rendering or streaming. HTTPS uses secure cookies; loopback HTTP development
-still requires the explicit server-side insecure-loopback setting described
-above.
-
-### Reviewed document permissions
-
-Upgrade the operator database to `0003_document_policy` before resolving scopes.
-Keep migration credentials in the separate operator job; the app uses only its
-nonowner runtime pool. Provision human accounts with the interactive account CLI
-above, then review an explicit policy manifest. No role, department or project
-label creates a grant, and unclassified documents remain denied.
-
-The manifest is JSON with these fields:
-
-| Field | Required meaning |
-| --- | --- |
-| `schema_version` | `"1"` |
-| `manifest_id` | Unique reviewed patch ID; changed content needs a new ID |
-| `snapshot` | Exact SnapshotRef object from the verified import report |
-| `origin` | `operator` or explicitly synthetic QA policy |
-| `reviewed_by`, `provenance` | Named reviewer and nonempty object of provenance strings |
-| `groups` | `{group_id, label, requires: []}`; optional flat compound prerequisites |
-| `memberships` | `{user_id, group_id}` using actual provisioned IDs |
-| `grants` | `{doc_ids: [...], user_id: ...}` or `{doc_ids: [...], group_id: ...}` |
-
-For example, a synthetic `finance_exec` group can declare
-`"requires": ["finance", "executive"]`. A user needs all three explicit
-memberships (`finance_exec`, `finance`, `executive`). Membership in a project
-group alone cannot unlock an executive grant. Base groups cannot themselves be
-compound. Use real imported document IDs and the exact snapshot fingerprints;
-the tool rejects missing users, groups and documents.
-
-Run the review and apply steps with the migration job's existing credentials:
+Replace every placeholder, including `document_count`, with actual snapshot
+values. Preview before applying:
 
 ```sh
-python -m src.access.repository dry-run --manifest /private/policy.json
-python -m src.access.repository apply --manifest /private/policy.json
-python -m src.access.repository revoke --manifest /private/policy.json
+python3 scripts/local_stack.py --env-file .env.local operator -- \
+  python -m src.access.repository dry-run --manifest /operator/policy.json
+python3 scripts/local_stack.py --env-file .env.local operator -- \
+  python -m src.access.repository apply --manifest /operator/policy.json
 ```
 
-Apply is additive and idempotent; it never overwrites an existing group definition,
-grant origin or membership owner. Revoke removes only rows originally added by
-that exact manifest. It leaves group definitions/prerequisites intact and cannot
-delete a pre-existing real policy through a synthetic/no-op manifest. A revoked
-manifest requires a new review/ID before application. Policy mutations and their
-epoch changes commit or roll back together; stale request contexts must resolve
-again. Authenticated web queries remain denied until application integration.
-
-Full-corpus retrieval experiments use a separate benchmark account. Prepare a
-private JSON file containing only the exact SnapshotRef object from the import
-report, then explicitly review all-document access:
+Revoking this manifest removes only links it originally created, preserving
+pre-existing grants. Removing one patch does not prove the subject has no other
+access; review all relevant current policy.
 
 ```sh
-python -m src.access.repository benchmark-create retrieval-benchmark \
-  --snapshot /private/snapshot.json \
-  --credentials-file /private/benchmark.private.json \
-  --reviewed-by local-operator --provenance "Reviewed retrieval-only benchmark" \
-  --all-documents
-python -m src.access.repository benchmark-verify \
-  --credentials-file /private/benchmark.private.json
+python3 scripts/local_stack.py --env-file .env.local operator -- \
+  python -m src.access.repository revoke --manifest /operator/policy.json
 ```
 
-These commands print no credential, raw nonce or identity. Creation requires a
-new path, writes mode0600 exclusively and never replaces an existing file or
-account. Verification uses the runtime credentials, reads a bounded ordinary0600
-file through one non-symlink file descriptor, and produces an internal identity
-for library consumers. Never place this file in source control. Benchmark kind
-is immutable and is rejected by public login and `/me`, even with its correct
-private password or a valid nonce; it cannot become a browser login bypass.
-The `--synthetic` flag labels QA provenance explicitly. No default benchmark or
-human policy is seeded into a deployment.
+A compound group such as `finance_exec` requires explicit membership in the
+compound group **and** every declared base group. Neither a CEO label nor base
+memberships alone imply compound access. Runtime restrictions only narrow grants.
+PostgreSQL RLS independently checks live grants, session, policy revision,
+snapshot and the registered scope bitmap.
 
+## Use and restart the application
 
-### Native Jira feed
+Open <http://127.0.0.1:8000>, sign in, and wait for Ready. `/api/health` reports
+liveness; `/api/ready` returns generic 503 while dependencies or deployment
+identity are unavailable. It exposes no corpus/permission counts. Readiness checks
+are live and bounded; a running process alone is not readiness.
 
-Upgrade through `0004_jira_feed` with the separate migration credentials. The
-native importer uses only the dedicated migrator login; the application keeps
-its nonowner runtime pool. First complete the canonical document import. Then
-provide a local checkout of the project's pinned upstream Jira subtree and the
-same canonical Parquet and SnapshotRef used by that ready database snapshot:
+Search is scoped to the account. Source/date controls narrow that scope. Passage
+cards show exact excerpts. Native record cards distinguish verified and unavailable
+fields. Aggregate counts include zero and count **canonical Jira source records**,
+not unique Jira keys or global absence. Duplicate keys request clarification;
+unknown coverage is not converted to zero. Retrieval-only mode returns sources
+without generated answers. Live generation is a separate explicit provider/model/
+rate/budget opt-in; it is unnecessary for this setup.
+
+Each request rechecks session and policy around retrieval, expansion, tools, model
+dispatch and release. Sign out/account changes clear displayed evidence. The local
+service admits one RAG request at a time; busy returns 429. HTTP timeout does not
+free the slot while its worker is still running.
 
 ```sh
-python -m src.data.structured --source-repo /private/EnterpriseRAG-Bench \
-  --corpus /private/corpus/documents.parquet --snapshot /private/snapshot.json --preflight
-python -m src.data.structured --source-repo /private/EnterpriseRAG-Bench \
-  --corpus /private/corpus/documents.parquet --snapshot /private/snapshot.json
+python3 scripts/local_stack.py --env-file .env.local stop
+python3 scripts/local_stack.py --env-file .env.local up
+python3 scripts/local_stack.py --env-file .env.local verify-data
 ```
 
-The importer performs no downloads. Obtain only the pinned Jira files through a
-partial/sparse Git checkout when the raw repository is absent. It verifies the
-actual commit, origin, Git blobs, file hashes and every canonical Jira UUID,
-source path and body revision. Preflight reports operator-only global coverage;
-do not send that manifest to the model or browser. The pinned feed has 6,118
-canonical records, 575 repeated native keys and two excluded noncanonical aliases.
-The native key is therefore a nonunique lookup field, not a record identifier.
+Stop/start preserves named volumes, accounts, grants and unexpired sessions.
+`up` reruns the deployment gate. Never remove volumes as routine shutdown. Keep
+`.env.local` private and available: regenerating it does not recover/rotate an
+existing database's passwords.
 
-Import is idempotent and resumes matching committed batches. A changed source,
-snapshot or native field requires a separately reviewed import design; existing
-ready feeds and records cannot be replaced in place. Incomplete feed or required
-field coverage yields unknown, not a zero count. Supported exact filters are
-`doc_id`, `native_key`, `status`, `priority` and `project_id`; lookup requires one
-of `doc_id` or `native_key`. There are no inferred open-status or date filters.
+## Backup, restore and compatible rollback
 
-The adapter requires an explicit resolved context and freshness guard. RLS
-intersects current grants with the operator-narrowed scope for lookup, filter,
-count and artifact reads. Missing fields and native-key ambiguity are evaluated
-only among visible records. Counts cover the full authorized matching relation,
-retain zero provenance and count canonical records rather than unique live Jira
-issues.
+Use the pinned PostgreSQL 17 client in the database container. Store archives
+outside the database volume with restrictive permissions, alongside the exact
+source commit/image digest and artifact/snapshot receipts. Stop the app before
+the operator backup; do not copy a live PostgreSQL data directory.
 
-The authenticated live runtime registers this adapter with the model router as
-`jira`; text retrieval remains available for prose and mixed questions. Each
-request resolves its own current scope and uses one server run ID for tool
-artifacts, trace and persistence. Direct Python callers can inject a trusted
-router for local conformance checks. Retrieval-only mode performs its plan
-without calling the generator or critic. Native fields remain typed records;
-counts remain scoped computed evidence, including verified zero counts. The
-browser renders these forms without inventing passage text or offsets.
+```sh
+umask 077
+mkdir -p .cache/local-backups
+docker compose --env-file .env.local stop app
+docker compose --env-file .env.local exec -T db sh -c \
+  'exec pg_dump --username="$POSTGRES_USER" --dbname="$POSTGRES_DB" --format=custom --no-owner --schema=rag' \
+  > .cache/local-backups/rag.dump
+shasum -a 256 .cache/local-backups/rag.dump > .cache/local-backups/rag.dump.sha256
+```
 
-### Current-run receipts and operator exports
+Keep the source volume untouched. Restore into a **new** Compose project and
+fresh volume using a new private config, separate port, and
+`RAG_DB_NAME=rag_restore_<nonce>`. Use `local_stack.py init` with the same verified
+artifact/model/source inputs and a different `--project`; then edit only the new
+config's database name. Build compatible images and stage the same inputs. Start
+only its database, whose init hook creates separate roles. Do not migrate or start
+the app into this empty target before restoring the schema.
 
-The runtime stores only a current-run receipt and bounded step metadata. The
-required database `query_runs.question` column contains `sha256:<digest>` of the
-normalized question, not question text. Step payloads contain typed citation
-references, query hashes, usage, timings and, for generation, a canonical JSON
-input-payload hash. Answers, source bodies, native field values, raw prompts and
-arbitrary trace payloads are not persisted as history. `GET /api/runs/{run_id}`
-returns the whitelisted current-owner metadata with `Cache-Control: no-store`;
-it does not extend the idle session or list runs.
+```sh
+python3 scripts/local_stack.py --env-file .env.restore build
+python3 scripts/local_stack.py --env-file .env.restore stage
+docker compose --env-file .env.restore up -d --wait db
+docker compose --env-file .env.restore exec -T db sh -c \
+  'exec pg_restore --username="$POSTGRES_USER" --dbname="$POSTGRES_DB" --no-owner --role=rag_migrator --single-transaction --exit-on-error' \
+  < .cache/local-backups/rag.dump
+python3 scripts/local_stack.py --env-file .env.restore operator --database rag_restore_example -- \
+  python -m src.db.recovery --expected-database rag_restore_example
+```
 
-Run access retains the exact session, scope, snapshot and policy binding. A
-logout, revocation or policy/scope change can make an old receipt unavailable
-even to the same account after it resolves a new scope. If access changes while
-a query runs, its row may remain pending; completion never uses a privileged
-fallback. Counts lock the same pending parent row as terminal completion, and
-artifacts from a different run cannot become this run's generation evidence.
+Replace `rag_restore_example` in both places with the exact new configured name.
+Quarantine refuses other names, incompatible schema/owner, and privileged/wrong
+logins. It atomically disables restored accounts, increments active account
+versions, and revokes every old session, including expired or future-created
+sessions. It preserves documents, grants, groups and run history. A second
+successful run changes zero rows.
 
-Trusted operator code can call `runtime.query_with_capture(request, identity)`
-to retain a memory-only issued receipt. Its `generation_evidence` contains the
-exact selected DTOs observed immediately before generation dispatch;
-`payload_sha256` hashes the canonical JSON object sent to generation. The
-capture cannot be constructed, copied, deserialized or transferred to another
-runtime. Ordinary HTTP queries do not save this capture as history.
+Keep users disabled while reconciling current approved access against restored
+grants. Revoke obsolete owned patches and apply reviewed current policy; preserve
+provenance. Only then reset each approved account's password and explicitly
+reactivate that account:
 
-Use `runtime.export_profile(capture)` to create matching experiment declarations,
-then verify the real input files with `verify_inputs`. Scripted providers must
-declare their synthetic identity explicitly through the trusted constructor;
-an unidentified injected provider cannot attest a scientific export. The
-profile includes actual budgets, prompt hashes, index manifest, retrieval
-configuration and runtime source-file hashes. An operator maps the exact
-question to a verified question ID, then calls
-`runtime.export_capture(capture, manifest=manifest, verified_inputs=verified,
-question_id=question_id, directory=run_directory)`.
+```sh
+python3 scripts/local_stack.py --env-file .env.restore operator -- \
+  python -m src.auth.accounts reset-password jane --reactivate \
+  --reviewed-by reviewer-name --policy-reconciliation approved-access-review-001
+```
 
-Export rechecks the input files, source bytes, scientific settings and current
-run ownership, and reauthorizes all returned and generation facts. It never
-reconstructs model inputs from final sources. References remain in separate
-scoring inputs and never enter the runtime request, capture or model prompt.
-Clarification and retrieval-only cases have no invented generation evidence.
+This requires a disabled human account, a new confirmed password and both review
+attestations. Retain its content-free completion receipt in the private operator
+record. It does not grant documents or independently verify the reconciliation.
+Do not enable all restored users or reuse old cookies.
+
+With identical artifact bytes, `import-corpus` verifies the existing ready import
+and republishes its snapshot into the fresh state volume. Then run `prepare-state`
+and `verify-data` with the restored config. Open the app only after quarantine,
+policy review and required account operations are complete. The original stack
+remains available independently. The helper rejects the project's protected
+authoritative source volume and a second running server on its target volume.
+
+For application rollback, retain the previous immutable image digest and matching
+source/artifact receipts. A previous image is usable only if it supports the
+current migration head and data contracts. Point the config's `RAG_APP_IMAGE` and
+`RAG_OPERATOR_IMAGE` at compatible local images, then run `up`. There is no
+destructive migration downgrade. For incompatible schema, restore a verified
+backup into a new target rather than modifying the source database.
+
+## Validation and troubleshooting
+
+The CI [tiny deployment fixture](../tests/deployment/README.md) uses five explicitly
+synthetic documents, genuine BM25/import formats, real Argon2 human accounts,
+PostgreSQL and unchanged RLS. It checks closed preparation, complete native feed,
+two account scopes, DB-loss closure and restart persistence with the same cookies.
+It downloads no embedding model and is not a full-corpus performance test.
+
+Full-corpus scoped retrieval, native record/count paths, authentication and privacy
+have separate recorded acceptance evidence. The new packaging/recovery gate must
+also pass root-executed checks; tiny CI does not establish full-stack capacity or
+model quality. Historical failing runs remain part of the record.
+
+Inspect failed jobs and bounded app/verify logs privately. Do not print resolved
+Compose environments, connection URLs, cookies or passwords. Common causes are
+missing shards/model cache, changed source hashes, incomplete native feeds,
+incompatible schema, insufficient disk, or incorrect role secrets. Fix the
+underlying dependency and rerun the gate; never replace a failed receipt or
+use demo fallback. Exit 137 alone does not establish OOM: check `OOMKilled`,
+cgroup counters and disk. The historical stopped container had `OOMKilled=false`;
+its failure cause remains unproven.
+
+<a id="build-bm25-locally"></a>
+
+## Native development and evaluation
+
+The Docker `.env.example` uses internal service names and named-volume paths; it
+is not a working native-host configuration. Native development needs Python 3.11,
+`pip install -r requirements.txt`, Node 22, `npm --prefix frontend ci`, and
+`npm --prefix frontend run build`, plus separately configured real database
+credentials, snapshot/index/model paths and local auth settings. Never point a
+native server at an incomplete import or fall back to benchmark mode for users.
+
+To build a BM25 artifact in a prepared Python environment:
+
+```sh
+python -m src.retrieval.corpus_bm25 \
+  --corpus .cache/hybrid-artifacts/documents.parquet \
+  --output .cache/hybrid-artifacts/indexes/bm25
+```
+
+Build into a new unpublished target, not a sealed production directory. The
+legacy benchmark/demo profile is separate from the authenticated product. Scoped
+evaluation requires explicit private credentials and bound artifacts; see
+[Evaluation](EVALUATION.md) and [Answer evaluation](ANSWER_EVALUATION.md). Runtime
+exports exclude gold answers; an external judge consumes separate scoring input.
