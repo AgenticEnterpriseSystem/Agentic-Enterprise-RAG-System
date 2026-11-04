@@ -36,7 +36,7 @@ from src.access.contracts import (
 )
 from src.contracts import ScopeBinding, SnapshotRef
 from src.storage.contracts import CatalogEntry, RankedCandidate, ReadFilters
-from src.storage.fingerprints import catalog_fingerprint
+from src.storage.fingerprints import ValidatedCatalog, catalog_fingerprint
 
 _COLUMNS = ("doc_index", "start_char", "end_char")
 _DTYPES = (np.dtype("float16"), np.dtype("float32"))
@@ -158,7 +158,7 @@ class ShardedDense:
 
     @classmethod
     def load(cls, directory: str | Path, *, snapshot: SnapshotRef,
-             catalog: Iterable[CatalogEntry], block_rows: int = 8192,
+             catalog: Iterable[CatalogEntry] | ValidatedCatalog, block_rows: int = 8192,
              file_cache_policy: str = "discard") -> ShardedDense:
         _positive(block_rows, "block_rows")
         if not isinstance(file_cache_policy, str) or file_cache_policy not in {"discard", "retain"}:
@@ -197,26 +197,36 @@ class ShardedDense:
                 or any(not isinstance(doc_id, str) or not doc_id.strip() for doc_id in ids)
                 or len(set(ids)) != len(ids)):
             raise ValueError("Dense document IDs are invalid or duplicated")
-        entries = []
+        catalog_handle = None
+        if isinstance(catalog, ValidatedCatalog):
+            catalog_handle = ValidatedCatalog.require(catalog, snapshot)
+            if tuple(ids) != catalog_handle.doc_ids:
+                raise SnapshotMismatch("Dense document order differs from the catalogue")
+            entries, doc_ids = catalog_handle.entries, catalog_handle.doc_ids
+        else:
+            entries = []
 
-        def checked_catalog():
-            for position, supplied in enumerate(catalog):
-                if not isinstance(supplied, CatalogEntry):
-                    raise ValueError("Dense catalogue requires CatalogEntry records")
-                entry = CatalogEntry.model_validate(supplied.model_dump(warnings=False))
-                if position >= len(ids) or entry.doc_id != ids[position]:
-                    raise SnapshotMismatch("Dense document order differs from the catalogue")
-                entries.append(entry)
-                yield entry
+            def checked_catalog():
+                for position, supplied in enumerate(catalog):
+                    if not isinstance(supplied, CatalogEntry):
+                        raise ValueError("Dense catalogue requires CatalogEntry records")
+                    entry = CatalogEntry.model_validate(supplied.model_dump(warnings=False))
+                    if position >= len(ids) or entry.doc_id != ids[position]:
+                        raise SnapshotMismatch("Dense document order differs from the catalogue")
+                    entries.append(entry)
+                    yield entry
 
-        fingerprint = catalog_fingerprint(checked_catalog(), expected_count=snapshot.document_count)
-        if fingerprint != snapshot.catalog_sha256:
-            raise SnapshotMismatch("Dense catalogue differs from the snapshot")
+            fingerprint = catalog_fingerprint(checked_catalog(), expected_count=snapshot.document_count)
+            if fingerprint != snapshot.catalog_sha256:
+                raise SnapshotMismatch("Dense catalogue differs from the snapshot")
+            entries = tuple(entries)
+            doc_ids = tuple(entry.doc_id for entry in entries)
         result = cls()
         result._directory, result._snapshot = directory, snapshot
         result._manifest = deepcopy(manifest)
-        result._catalog = tuple(entries)
-        result._doc_ids = tuple(entry.doc_id for entry in entries)
+        result._catalog_handle = catalog_handle
+        result._catalog = entries
+        result._doc_ids = doc_ids
         result._lengths = np.fromiter((entry.text_length for entry in entries), dtype=np.int64,
                                      count=len(entries))
         result._block_rows = block_rows
@@ -244,6 +254,10 @@ class ShardedDense:
     @property
     def catalog(self) -> tuple[CatalogEntry, ...]:
         return self._catalog
+
+    @property
+    def catalog_handle(self) -> ValidatedCatalog | None:
+        return self._catalog_handle
 
     @property
     def doc_ids(self) -> tuple[str, ...]:

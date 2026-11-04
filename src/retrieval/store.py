@@ -29,7 +29,7 @@ from src.storage.contracts import (
     CatalogEntry, DocumentStore, RankedCandidate, ReadFilters,
     validate_read_more_bounds,
 )
-from src.storage.fingerprints import catalog_fingerprint
+from src.storage.fingerprints import ValidatedCatalog, catalog_fingerprint
 
 
 def _query(query, top_k):
@@ -112,12 +112,18 @@ def reciprocal_rank_candidates(
 
 
 class _StoreReader:
-    def __init__(self, store: DocumentStore, catalog: Iterable[CatalogEntry] | None = None):
+    def __init__(self, store: DocumentStore, catalog: Iterable[CatalogEntry] | ValidatedCatalog | None = None):
         self.store = store
         snapshot = store.snapshot()
         if not isinstance(snapshot, SnapshotRef):
             raise EvidenceValidationError("Document store requires a snapshot")
         self.snapshot = SnapshotRef.model_validate(snapshot.model_dump(warnings=False))
+        self._catalog_handle = None
+        if isinstance(catalog, ValidatedCatalog):
+            proof = ValidatedCatalog.require(catalog, self.snapshot)
+            self._catalog_handle = proof
+            self.catalog, self.doc_ids, self._positions = proof.entries, proof.doc_ids, proof.positions
+            return
         if catalog is None:
             catalog = (entry for batch in store.iter_catalog() for entry in batch)
         entries = []
@@ -141,6 +147,10 @@ class _StoreReader:
         self._positions = {doc_id: index for index, doc_id in enumerate(self.doc_ids)}
         if len(self._positions) != len(self.doc_ids):
             raise EvidenceValidationError("Document catalogue contains duplicate IDs")
+
+    @property
+    def catalog_handle(self) -> ValidatedCatalog | None:
+        return self._catalog_handle
 
     def source_types(self) -> tuple[str, ...]:
         """Internal platform metadata; never an authorized public source list."""
@@ -288,7 +298,7 @@ class _StoreReader:
 class StoreBM25Retriever(_StoreReader):
     """Existing mmap BM25 scores, with all canonical bodies supplied lazily."""
 
-    def __init__(self, index, store: DocumentStore, *, catalog: Iterable[CatalogEntry] | None = None):
+    def __init__(self, index, store: DocumentStore, *, catalog: Iterable[CatalogEntry] | ValidatedCatalog | None = None):
         super().__init__(store, catalog)
         self.index = index
         if tuple(index.doc_ids) != self.doc_ids:
@@ -337,7 +347,8 @@ class StoreDenseRetriever(_StoreReader):
     """
 
     def __init__(self, index, encoder, store: DocumentStore):
-        super().__init__(store, index.catalog)
+        handle = getattr(index, "catalog_handle", None)
+        super().__init__(store, handle if handle is not None else index.catalog)
         if index.snapshot != self.snapshot or tuple(index.doc_ids) != self.doc_ids:
             raise SnapshotMismatch("Dense index differs from the store")
         self.index, self.encoder = index, encoder

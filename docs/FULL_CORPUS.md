@@ -474,6 +474,22 @@ before materializing final winners (or explicit reranker candidates), retaining
 document deduplication, dense-passage preference and deterministic ties. An
 optional shared catalog avoids retaining duplicate dense catalog objects.
 
+Full-hybrid construction can now share one sealed `ValidatedCatalog` from
+`PostgresDocumentStore(..., retain_catalog=True)`. Its `validated_catalog()`
+getter checks live snapshot readiness before and after returning the retained
+metadata. The default remains `retain_catalog=False`, preserving streaming
+verification for storage/import jobs that do not need the full metadata table.
+The capsule contains no bodies or permissions. Exact issuance and complete
+snapshot identity are checked before its entries, IDs or read-only position map
+are reused; ordinary iterables still take the full validation/fingerprint path.
+
+`ShardedDense.load(catalog=handle, ...)` keeps the existing tuple `index.catalog`
+and exposes the issued handle as `index.catalog_handle`. Both store-backed
+retrievers share that handle's entries, IDs and positions. Policy resolvers use
+their own small identity wrappers over the same immutable metadata, preserving
+scope/issuer/freshness checks. Manifest/document order and every shard's vectors,
+finite values, spans, dimensions and counts are still validated during loading.
+
 Materialization streams exact overlapping3000-character windows with the existing
 query-match/tie heuristic, retaining only the current/best window. This preserves
 legacy hybrid output without requiring a full Arrow body table. It can perform
@@ -573,6 +589,10 @@ the10-second warm limit. Records carry a contiguous process-wide request_index.
 Startup uses Linux process age (driver-entry fallback outside procfs). These
 are first-process/warm measurements, not a cold-disk claim. Reference setup with
 three workload resolvers is recorded as harness overhead and is not app readiness.
+Candidate setup explicitly retains one store-issued catalogue; the reference's
+three resolver-local wrappers share the same capsule. Manifests report one
+retained catalogue and the separate resolver count. The independent reference
+keeps its own metadata/oracle validation and scoring path.
 Nested startup events and `startup_components` separate input verification,
 database/identity/store/policy setup, imports, catalogue retrieval, dense/BM25
 loading, model loading and adapter initialization. Request events and component
@@ -635,3 +655,17 @@ Input checks remain inside the
 measured boundary unless a separately reviewed immutable-deployment receipt
 protocol is explicitly introduced after evidence. Full numerical, serving and
 resource gates remain open until a complete measured protocol passes.
+
+Startup margin also remains an explicit gate. The optimized full-profile run
+at source `51bd422` completed all 120 requests with startup 96.652 seconds,
+first request 12.716 seconds and maximum later request 9.648 seconds. A fresh
+empty-scope process of the same source took 138.474 seconds to initialize and
+therefore failed the 120-second startup target, despite correctly skipping
+encoding and evidence for denied requests. A passing full profile does not
+override that failure. Reusing the validated catalogue removes repeated metadata
+SQL scans, model validation and fingerprinting; it does not skip raw input hashes,
+model loading or shard checks. The accepted catalogue-only prerequisite built
+all 511,958 entries in 13.227 seconds, with no additional metadata queries for
+three policy resolvers. That component result is not full-runtime acceptance;
+the changed retrieval consumers require fresh full/narrow/empty and independent
+reference measurements under the unchanged limits.

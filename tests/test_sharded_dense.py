@@ -21,10 +21,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from src.access.contracts import LegacySetScope, StaleContext
+from src.access.contracts import EvidenceValidationError, LegacySetScope, SnapshotMismatch, StaleContext
 from src.contracts import ScopeBinding, SnapshotRef
 from src.storage.contracts import CatalogEntry, ReadFilters
-from src.storage.fingerprints import catalog_fingerprint
+from src.storage.fingerprints import ValidatedCatalog, catalog_fingerprint
 from src.retrieval.sharded_dense import ShardedDense, _top_candidates
 
 
@@ -398,6 +398,107 @@ def test_catalog_is_single_pass_and_snapshot_fingerprint_and_order_are_verified(
         (data.catalog[0].model_copy(update={"text_length": 2}), *data.catalog[1:])):
         with pytest.raises((ValueError, TypeError)):
             ShardedDense.load(data.directory, snapshot=data.snapshot, catalog=bad_catalog, block_rows=2)
+
+
+@pytest.mark.parametrize("dtype", [np.float16, np.float32])
+@pytest.mark.parametrize("file_cache_policy", ["discard", "retain"])
+def test_issued_catalog_shares_metadata_without_revalidation_and_preserves_exact_candidates(tmp_path, monkeypatch, dtype, file_cache_policy):
+    import src.retrieval.sharded_dense as module
+    data = artifact(tmp_path, dtype=dtype)
+    baseline = load(data, file_cache_policy=file_cache_policy)
+    handle = ValidatedCatalog.build(data.snapshot, data.catalog, issuer=object())
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("Issued catalogue was revalidated or fingerprinted again")
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "catalog_fingerprint", unexpected)
+        patch.setattr(CatalogEntry, "model_validate", classmethod(unexpected))
+        shared = ShardedDense.load(data.directory, snapshot=data.snapshot, catalog=handle,
+            block_rows=data.block_rows, file_cache_policy=file_cache_policy)
+    assert baseline.catalog_handle is None and shared.catalog_handle is handle
+    assert shared.catalog is handle.entries and shared.doc_ids is handle.doc_ids
+    assert type(shared.catalog) is tuple
+    assert all(left is right for left, right in zip(shared.catalog, handle.entries))
+    assert shared.manifest == baseline.manifest and shared.scoring_provenance == baseline.scoring_provenance
+    for vector in ([1, 0, 0], [1.7, 0, 0], [0, 0, 0]):
+        for allowed, filters in ((data.doc_ids, ReadFilters()), (("alpha",), ReadFilters()),
+                ((), ReadFilters()), (data.doc_ids, ReadFilters(source_types=("jira",))),
+                (data.doc_ids, ReadFilters(after=datetime(2026, 10, 2, tzinfo=timezone.utc)))):
+            permission = scope(data, allowed)
+            assert shared.candidates_vector(vector, 4, scope=permission, filters=filters) == baseline.candidates_vector(
+                vector, 4, scope=permission, filters=filters)
+        assert shared.rank_vector(vector, 4) == baseline.rank_vector(vector, 4)
+
+
+@pytest.mark.parametrize("forgery", ["unissued", "copied-fields"])
+def test_unissued_exact_catalog_type_cannot_enter_dense_fast_path(tmp_path, forgery):
+    data = artifact(tmp_path)
+    forged = object.__new__(ValidatedCatalog)
+    if forgery == "copied-fields":
+        issued = ValidatedCatalog.build(data.snapshot, data.catalog, issuer=object())
+        for slot in ValidatedCatalog.__slots__:
+            if slot != "__weakref__":
+                object.__setattr__(forged, slot, getattr(issued, slot))
+    with pytest.raises(EvidenceValidationError):
+        ShardedDense.load(data.directory, snapshot=data.snapshot, catalog=forged, block_rows=2)
+
+
+@pytest.mark.parametrize("field", ["snapshot_id", "corpus_sha256", "catalog_sha256", "document_count"])
+def test_issued_dense_catalog_must_match_every_snapshot_field(tmp_path, field):
+    data = artifact(tmp_path)
+    rows = data.catalog
+    changes = {"snapshot_id": "other-snapshot"} if field == "snapshot_id" else {"corpus_sha256": "f" * 64}
+    if field == "catalog_sha256":
+        rows = (rows[0].model_copy(update={"source_type": "other-source"}), *rows[1:])
+        changes = {"catalog_sha256": catalog_fingerprint(rows, expected_count=len(rows))}
+    elif field == "document_count":
+        rows = rows[:-1]
+        changes = {"document_count": len(rows), "catalog_sha256": catalog_fingerprint(rows, expected_count=len(rows))}
+    snapshot = data.snapshot.model_copy(update=changes)
+    handle = ValidatedCatalog.build(snapshot, rows, issuer=object())
+    with pytest.raises(SnapshotMismatch):
+        ShardedDense.load(data.directory, snapshot=data.snapshot, catalog=handle, block_rows=2)
+
+
+def test_dense_catalog_lookalike_uses_full_iterable_validation_and_cannot_self_attest(tmp_path):
+    data = artifact(tmp_path)
+    class Lookalike:
+        consumed = False
+        validated = True
+        entries = data.catalog
+        def require(self, *_args, **_kwargs):
+            pytest.fail("A catalogue lookalike attested its own validity")
+        def __iter__(self):
+            self.consumed = True
+            yield data.catalog[0].model_copy(update={"text_length": True})
+            yield from data.catalog[1:]
+    fake = Lookalike()
+    with pytest.raises(ValueError):
+        ShardedDense.load(data.directory, snapshot=data.snapshot, catalog=fake, block_rows=2)
+    assert fake.consumed
+
+
+@pytest.mark.parametrize("corruption", ["incomplete", "ids", "span", "nonfinite", "corpus", "model"])
+def test_trusted_catalog_never_skips_dense_artifact_validation(tmp_path, corruption):
+    data = artifact(tmp_path)
+    handle = ValidatedCatalog.build(data.snapshot, data.catalog, issuer=object())
+    if corruption in {"incomplete", "corpus", "model"}:
+        manifest = dict(data.manifest)
+        if corruption == "incomplete": manifest["complete"] = False
+        elif corruption == "corpus": manifest["corpus_sha256"] = "f" * 64
+        else: manifest["model"] = {**manifest["model"], "normalize": False}
+        _json(data.directory / "manifest.json", manifest)
+    elif corruption == "ids":
+        _json(data.directory / "doc_ids.json", list(reversed(data.doc_ids)))
+    elif corruption == "span":
+        records = list(data.records[0])
+        records[0] = (0, 0, 101)
+        _write_metadata(data.directory / "shard_00000.parquet", records)
+    else:
+        vectors = data.vectors[0].copy()
+        vectors[0, 0] = np.nan
+        np.save(data.directory / "shard_00000.npy", vectors, allow_pickle=False)
+    with pytest.raises(ValueError):
+        ShardedDense.load(data.directory, snapshot=data.snapshot, catalog=handle, block_rows=2)
 
 
 @pytest.mark.parametrize("file_cache_policy", ["discard", "retain"])

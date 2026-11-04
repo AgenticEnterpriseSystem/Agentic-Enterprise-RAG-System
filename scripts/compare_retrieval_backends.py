@@ -645,11 +645,11 @@ def _runtime(args, snapshot, *, scope, timings=None):
         with _timed(timings, "identity", events=True):
             identity = verify_benchmark(args.credentials_file, database)
         with _timed(timings, "store", events=True):
-            store = PostgresDocumentStore(database, snapshot)
+            store = PostgresDocumentStore(database, snapshot, retain_catalog=True)
         shared, _ = load_artifact(args.shared)
         restricted = None if scope == "full" else shared["matrix"]["narrow_doc_ids"] if scope == "narrow" else ()
         with _timed(timings, "policy", events=True):
-            resolver = PolicyResolver(database, snapshot, doc_ids=restricted)
+            resolver = PolicyResolver(database, snapshot, doc_ids=restricted, catalog=store.validated_catalog())
         return database, identity, store, resolver
     except BaseException:
         database.close()
@@ -702,11 +702,12 @@ def _candidate(args):
             from src.retrieval.sharded_dense import ShardedDense
             from src.retrieval.store import StoreBM25Retriever, StoreDenseRetriever, StoreHybridRetriever, reciprocal_rank_candidates
             from src.retrieval.hybrid import HybridConfig
+            from src.storage.fingerprints import ValidatedCatalog
             import numpy as np
         with _timed(startup_timings, "catalog", events=True):
-            catalog = tuple(entry for batch in store.iter_catalog() for entry in batch)
+            catalog_handle = ValidatedCatalog.require(store.validated_catalog(), snapshot)
         with _timed(startup_timings, "dense_load", events=True):
-            dense = ShardedDense.load(Path(args.dense_directory), snapshot=snapshot, catalog=catalog,
+            dense = ShardedDense.load(Path(args.dense_directory), snapshot=snapshot, catalog=catalog_handle,
                 block_rows=args.block_rows, file_cache_policy=args.file_cache_policy)
         catalog = dense.catalog
         with _timed(startup_timings, "bm25_load", events=True):
@@ -753,7 +754,7 @@ def _candidate(args):
         config = HybridConfig(candidate_k=50, rerank_k=50, rrf_k=60, bm25_weight=.7, dense_weight=1 - .7)
         guard = TimedGuard()
         with _timed(startup_timings, "adapters", events=True):
-            hybrid = StoreHybridRetriever(TimedBM25(lexical_capture, store, catalog=catalog),
+            hybrid = StoreHybridRetriever(TimedBM25(lexical_capture, store, catalog=catalog_handle),
                 StoreDenseRetriever(dense_capture, encoder, store), config=config)
         startup = time.perf_counter() - started
     emit("measurement", "startup", scope=args.scope, seconds=startup, components=startup_timings,
@@ -810,7 +811,8 @@ def _candidate(args):
             "startup_boundary": "Linux process start; driver entry fallback on systems without procfs",
             "first_request_policy": "request_index0 only; every later request is warm regardless of question/case/iteration",
             "coverage": {"documents": len(catalog), "passages": dense.total_vectors, "shards": dense.manifest["shards"]},
-            "catalog_instances": 1, "component": "full hybrid, BM25 mmap + bounded dense + resident BGE + PostgreSQL policy/store",
+            "catalog_instances": 1, "catalog_reuse": "one issued store metadata capsule shared by policy/dense/BM25",
+            "policy_resolvers": 1, "component": "full hybrid, BM25 mmap + bounded dense + resident BGE + PostgreSQL policy/store",
             "cache_condition": "first process request and warm repeats; no cold-disk claim", "block_rows": args.block_rows}
         _write_artifact(output, manifest, records)
     finally:
@@ -832,13 +834,15 @@ def _reference(args):
             from src.storage.contracts import RankedCandidate
             from src.access.policy import PolicyResolver
             from src.retrieval.faiss_reference import reference_configuration
+            from src.storage.fingerprints import ValidatedCatalog
             database, identity, store, full = _runtime(args, snapshot, scope="full")
-            catalog = tuple(entry for batch in store.iter_catalog() for entry in batch)
-            positions = {entry.doc_id: entry.position for entry in catalog}
-            resolvers = {"full": full, "narrow": PolicyResolver(database, snapshot, doc_ids=shared["matrix"]["narrow_doc_ids"]),
-                         "empty": PolicyResolver(database, snapshot, doc_ids=())}
+            catalog_handle = ValidatedCatalog.require(store.validated_catalog(), snapshot)
+            catalog, positions = catalog_handle.entries, catalog_handle.positions
+            resolvers = {"full": full, "narrow": PolicyResolver(database, snapshot,
+                             doc_ids=shared["matrix"]["narrow_doc_ids"], catalog=catalog_handle),
+                         "empty": PolicyResolver(database, snapshot, doc_ids=(), catalog=catalog_handle)}
             contexts = {name: resolver.resolve(identity) for name, resolver in resolvers.items()}
-            base_masks = {name: np.array(context.scope.mask_for(snapshot, tuple(positions)), dtype=bool) for name, context in contexts.items()}
+            base_masks = {name: np.array(context.scope.mask_for(snapshot, catalog_handle.doc_ids), dtype=bool) for name, context in contexts.items()}
             masks = dict(base_masks)
             for question in shared["questions"]:
                 for case in ("source", "unknown_date"):
@@ -849,7 +853,7 @@ def _reference(args):
                 masks=masks, top_k=shared["matrix"]["candidate_k"], block_rows=args.block_rows)
         with phase("reference_bm25_load"):
             lexical = CorpusBM25.load(Path(args.bm25_directory), corpus_path=None, mmap=True)
-            if tuple(lexical.doc_ids) != tuple(positions) or lexical.manifest["corpus_sha256"] != snapshot.corpus_sha256:
+            if tuple(lexical.doc_ids) != catalog_handle.doc_ids or lexical.manifest["corpus_sha256"] != snapshot.corpus_sha256:
                 raise ParityError("Reference BM25 identity differs from the canonical snapshot")
         records = []
         for query_index, question in enumerate(shared["questions"]):
@@ -901,7 +905,9 @@ def _reference(args):
             "elapsed_seconds": time.perf_counter() - started, "source_hashes": _code(), "packages": _packages(),
             "native_reference": reference_configuration(total_vectors=reference.passages, dimension=reference.dimension),
             "component": "independent global-kernel FAISS + native BM25 + independent RRF; no model resident",
-            "catalog_instances": 3, "setup_is_harness_overhead_not_app_readiness": True}, records)
+            "catalog_instances": 1, "policy_resolvers": 3,
+            "catalog_reuse": "three resolver-local wrappers over one issued store metadata capsule",
+            "setup_is_harness_overhead_not_app_readiness": True}, records)
     finally:
         if database is not None:
             database.close()

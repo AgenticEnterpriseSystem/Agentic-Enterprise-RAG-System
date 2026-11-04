@@ -29,7 +29,7 @@ from src.retrieval.faiss_reference import (
     UnsupportedReferenceConfiguration, iter_scores, reference_configuration,
 )
 from src.storage.contracts import CatalogEntry, ReadFilters
-from src.storage.fingerprints import canonical_revision_id, catalog_fingerprint
+from src.storage.fingerprints import ValidatedCatalog, canonical_revision_id, catalog_fingerprint
 from src.storage.testing import FixtureDocument, InMemoryDocumentStore
 from scripts.compare_retrieval_backends import (
     RankHit, compare_hits, exhaustive_faiss as harness_reference, latency_gate,
@@ -1042,6 +1042,7 @@ def test_candidate_cache_and_nested_timing_wrappers_keep_every_guard_and_exact_r
     """Exercise real tiny adapters with model/DB doubles, not a performance run."""
     from src.retrieval.corpus_bm25 import CorpusBM25
     from src.retrieval.corpus_dense import EmbeddingModel
+    from src.retrieval.store import StoreBM25Retriever
     data = cli_artifacts(tmp_path)
     shared, _ = load_artifact(data.shared)
     vectors = np.load(data.shared / "query_vectors.npy", allow_pickle=False)
@@ -1081,6 +1082,32 @@ def test_candidate_cache_and_nested_timing_wrappers_keep_every_guard_and_exact_r
             return ()
 
     resolver, database = Resolver(), DatabaseDouble()
+    handle = ValidatedCatalog.build(data.data.snapshot, data.data.catalog, issuer=database)
+    getter_calls, loaded, lexical_readers, dense_readers = [], [], [], []
+    def get_catalog():
+        getter_calls.append(True)
+        return handle
+    def unexpected_catalog_scan(*_args, **_kwargs):
+        pytest.fail("Candidate rescanned the store instead of using its issued metadata")
+    native_load = ShardedDense.load
+    native_bm25, native_dense = StoreBM25Retriever.__init__, StoreDenseRetriever.__init__
+    def capture_load(cls, *args, catalog, **kwargs):
+        assert catalog is handle
+        result = native_load(*args, catalog=catalog, **kwargs)
+        loaded.append(result)
+        return result
+    def capture_bm25(self, index, store, *, catalog=None):
+        assert catalog is handle
+        native_bm25(self, index, store, catalog=catalog)
+        lexical_readers.append(self)
+    def capture_dense(self, index, encoder, store):
+        native_dense(self, index, encoder, store)
+        dense_readers.append(self)
+    monkeypatch.setattr(data.data.store, "validated_catalog", get_catalog, raising=False)
+    monkeypatch.setattr(data.data.store, "iter_catalog", unexpected_catalog_scan)
+    monkeypatch.setattr(ShardedDense, "load", classmethod(capture_load))
+    monkeypatch.setattr(StoreBM25Retriever, "__init__", capture_bm25)
+    monkeypatch.setattr(StoreDenseRetriever, "__init__", capture_dense)
     encoder = Encoder(data.data.query)
     monkeypatch.setattr(harness, "_shared", lambda _args: (shared, data.data.snapshot, vectors))
     monkeypatch.setattr(harness, "_runtime", lambda *_args, **_kwargs:
@@ -1093,6 +1120,11 @@ def test_candidate_cache_and_nested_timing_wrappers_keep_every_guard_and_exact_r
     harness._candidate(args)
     manifest, records = load_artifact(output)
     assert database.closed and manifest["file_cache_policy"] == policy
+    assert getter_calls == [True] and len(loaded) == len(lexical_readers) == len(dense_readers) == 1
+    assert loaded[0].catalog_handle is lexical_readers[0].catalog_handle is dense_readers[0].catalog_handle is handle
+    assert loaded[0].catalog is lexical_readers[0].catalog is dense_readers[0].catalog is handle.entries
+    assert lexical_readers[0]._positions is dense_readers[0]._positions is handle.positions
+    assert manifest["catalog_instances"] == 1
     assert "inclusive" in manifest["component_timing_policy"] and "do not sum" in manifest["component_timing_policy"]
     for component in ("input_verification", "imports", "catalog", "dense_load", "bm25_load", "model_load", "adapters"):
         assert manifest["startup_components"][component + "_calls"] == 1
