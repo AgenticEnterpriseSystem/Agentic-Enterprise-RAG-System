@@ -5,6 +5,7 @@ import json
 import subprocess
 import time
 from pathlib import Path
+from math import ceil
 from statistics import median
 
 from src.config import CORPUS_DIR, ROOT, RetrievalSettings, runtime_versions
@@ -119,7 +120,7 @@ def build_summary(rows, latencies, *, method, split, top_k, index, load_seconds,
         "timing_seconds": {
             "index_load": round(load_seconds, 2),
             "query_median": round(median(ordered), 4),
-            "query_p95": round(ordered[int(0.95 * (len(ordered) - 1))], 4),
+            "query_p95": round(ordered[ceil(0.95 * len(ordered)) - 1], 4),
             "total_queries": round(sum(ordered), 2),
         },
         "overall": metrics["overall"],

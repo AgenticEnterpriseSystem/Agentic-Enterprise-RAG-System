@@ -398,6 +398,19 @@ def test_summary_uses_exact_snapshot_override_without_git_or_legacy_corpus_file(
     assert not (tmp_path / 'evaluation').exists()
 
 
+def test_two_query_smoke_reports_p95_above_median(monkeypatch):
+    from src.evaluation import run_retrieval
+    monkeypatch.setattr(run_retrieval, 'git_state', lambda: {'available': False})
+    monkeypatch.setattr(run_retrieval, 'runtime_versions', lambda: {'test_fixture': True})
+    rows = [{'question_id': name, 'question_type': 'single_hop', 'source_types': [],
+             'relevant_doc_ids': ['general'], 'retrieved_doc_ids': ['general'], 'error': None}
+            for name in ('first', 'second')]
+    summary = run_retrieval.build_summary(rows, [.1, .3], method='bm25', split='development',
+        top_k=20, index={}, load_seconds=.1, corpus={'documents': 1})
+    assert summary['timing_seconds']['query_median'] == .2
+    assert summary['timing_seconds']['query_p95'] == .3
+
+
 @pytest.mark.parametrize('module', ['src.evaluation.run_retrieval', 'src.evaluation.run_hybrid'])
 def test_cli_help_loads_no_native_model_database_or_full_corpus_modules(module):
     code = '''import builtins, runpy, sys

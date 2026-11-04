@@ -90,7 +90,8 @@ session change fails closed rather than mixing successful permissions.
 Latency includes identity/scope resolution and actual work. Hybrid variants each
 include shared candidate-search time plus their own materialization/rerank/read
 cost, not the sum of other variants. OS caches are not cleared, so first-process
-timings are not cold-disk claims. Full-resident FAISS is reserved for the deliberate
+timings are not cold-disk claims. Latency p95 uses the empirical nearest-rank
+percentile; for a two-question smoke it is the slower query. Full-resident FAISS is reserved for the deliberate
 separate `scripts/compare_retrieval_backends.py` reference under its memory guards.
 
 ## Retrieval results
