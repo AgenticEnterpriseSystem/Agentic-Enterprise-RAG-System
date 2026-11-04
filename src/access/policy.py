@@ -7,6 +7,7 @@ get_bit(bytea, position), and are registered before any protected SQL can use
 their opaque ID. One catalogue map is shared by scopes, never copied per user.
 """
 
+from collections import OrderedDict
 from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -14,6 +15,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from types import MappingProxyType
+from threading import Lock
 
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -113,17 +115,26 @@ class PolicyResolver:
     """A runtime-pool resolver and FreshnessGuard for one ready snapshot.
 
     doc_ids=None means unrestricted; an explicit empty collection denies all.
-    No authorization decision is cached across identity, session, epoch,
-    snapshot or operator-restriction changes. Registry reuse excludes moving
-    idle expiry: live session deadlines are checked separately on every use.
+    A bounded LRU may reuse only an immutable bitmap decision for the exact
+    user/session/version, live epoch, snapshot and operator restriction. Every
+    resolve checks live authority before lookup and validates the registry and
+    live authority again before release. Identities, request contexts and guard
+    checks are never cached. Moving idle expiry does not identify a bitmap;
+    each returned context carries the current validated incoming identity.
     """
 
-    def __init__(self, database: Database, snapshot: SnapshotRef, *, source_types=(), doc_ids=None, clock=None):
+    def __init__(self, database: Database, snapshot: SnapshotRef, *, source_types=(), doc_ids=None, clock=None,
+                 cache_size=32):
         if not isinstance(database, Database) or not isinstance(snapshot, SnapshotRef):
             raise TypeError("Policy resolution requires Database and SnapshotRef")
+        if type(cache_size) is not int or not 0 <= cache_size <= 32:
+            raise ValueError("Policy bitmap cache size must be an integer from 0 through 32")
         self.database = database
         self.snapshot = SnapshotRef.model_validate(snapshot.model_dump(warnings=False))
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self._cache_size = cache_size
+        self._scope_cache = OrderedDict()
+        self._cache_lock = Lock()
         self._catalog = self._load_catalog()
         if isinstance(source_types, str) or isinstance(doc_ids, str):
             raise ValueError("Operator restrictions must be document/source collections")
@@ -139,6 +150,29 @@ class PolicyResolver:
                 bits[position // 8] |= 1 << (position % 8)
         self._operator_bitmap = bytes(bits)
         self._restriction_sha256 = hashlib.sha256(self._operator_bitmap).hexdigest()
+
+    def _cache_key(self, identity, epoch):
+        return (identity.user_id, identity.session_id, identity.session_version, epoch,
+                self.snapshot.snapshot_id, self.snapshot.corpus_sha256, self.snapshot.catalog_sha256,
+                self.snapshot.document_count, self._restriction_sha256)
+
+    def _cached_scope(self, key):
+        if not self._cache_size:
+            return None
+        with self._cache_lock:
+            scope = self._scope_cache.get(key)
+            if scope is not None:
+                self._scope_cache.move_to_end(key)
+            return scope
+
+    def _remember_scope(self, key, scope):
+        if not self._cache_size:
+            return
+        with self._cache_lock:
+            self._scope_cache[key] = scope
+            self._scope_cache.move_to_end(key)
+            while len(self._scope_cache) > self._cache_size:
+                self._scope_cache.popitem(last=False)
 
     def _now(self):
         now = self.clock()
@@ -213,27 +247,34 @@ class PolicyResolver:
         if not isinstance(identity, ResolvedIdentity):
             raise EvidenceValidationError("Policy resolution requires a trusted identity")
         identity = ResolvedIdentity.model_validate(identity.model_dump(warnings=False))
-        bits = bytearray(len(self._operator_bitmap))
         with self._transaction() as connection:
             epoch = self._identity(connection, identity)
-            # Direct and group branches use their separate subject/snapshot
-            # indexes. Repeated documents set the same bit, avoiding a broad
-            # DISTINCT sort and per-grant correlated group qualification.
-            result = connection.execution_options(stream_results=True).execute(sa.text(_GRANT_POSITIONS_SQL),
-                {"snapshot": self.snapshot.snapshot_id, "user_id": identity.user_id})
-            try:
-                while rows := result.fetchmany(1000):
-                    for row in rows:
-                        position = row[0]
-                        if not 0 <= position < self.snapshot.document_count:
-                            raise EvidenceValidationError("Grant position differs from the canonical catalogue")
-                        bit = 1 << (position % 8)
-                        if self._operator_bitmap[position // 8] & bit:
-                            bits[position // 8] |= bit
-            finally:
-                result.close()
-                connection.execution_options(stream_results=False)
-            self._identity(connection, identity, epoch=epoch)
+            cache_key = self._cache_key(identity, epoch)
+            cached_scope = self._cached_scope(cache_key)
+            if cached_scope is None:
+                bits = bytearray(len(self._operator_bitmap))
+                # Direct and group branches use their separate subject/snapshot
+                # indexes. Repeated documents set the same bit, avoiding a broad
+                # DISTINCT sort and per-grant correlated group qualification.
+                result = connection.execution_options(stream_results=True).execute(sa.text(_GRANT_POSITIONS_SQL),
+                    {"snapshot": self.snapshot.snapshot_id, "user_id": identity.user_id})
+                try:
+                    while rows := result.fetchmany(1000):
+                        for row in rows:
+                            position = row[0]
+                            if not 0 <= position < self.snapshot.document_count:
+                                raise EvidenceValidationError("Grant position differs from the canonical catalogue")
+                            bit = 1 << (position % 8)
+                            if self._operator_bitmap[position // 8] & bit:
+                                bits[position // 8] |= bit
+                finally:
+                    result.close()
+                    connection.execution_options(stream_results=False)
+                self._identity(connection, identity, epoch=epoch)
+        if cached_scope is not None:
+            context = RequestContext(identity, cached_scope)
+            self.assert_current(context)
+            return context
         bitmap = bytes(bits)
         metadata = {"user_id": identity.user_id, "session_id": identity.session_id,
             "session_version": identity.session_version, "policy_revision": epoch,
@@ -255,6 +296,7 @@ class PolicyResolver:
                 raise EvidenceValidationError("Registered scope differs from its frozen decision")
             self._identity(connection, identity, epoch=epoch)
         self.assert_current(context)
+        self._remember_scope(cache_key, scope)
         return context
 
     def assert_current(self, context: RequestContext) -> None:

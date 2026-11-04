@@ -293,11 +293,41 @@ def _build_metadata() -> sa.MetaData:
         sa.CheckConstraint("singleton_id = 1", name="ck_policy_state_singleton"),
         *_nonnegative("policy_state", "revision"),
     )
+    sa.Table("ticket_feeds", catalog,
+        sa.Column("feed_id", sa.Text(), nullable=False),
+        sa.Column("snapshot_id", sa.Text(), nullable=False),
+        sa.Column("source_type", sa.Text(), nullable=False),
+        sa.Column("coverage", sa.Text(), nullable=False),
+        sa.Column("state", sa.Text(), nullable=False, server_default=sa.text("'importing'")),
+        sa.Column("repository", sa.Text(), nullable=False),
+        sa.Column("git_commit", sa.Text(), nullable=False),
+        sa.Column("corpus_sha256", sa.Text(), nullable=False),
+        sa.Column("source_set_sha256", sa.Text(), nullable=False),
+        sa.Column("expected_records", sa.BigInteger(), nullable=False),
+        sa.Column("imported_records", sa.BigInteger(), nullable=False, server_default=sa.text("0")),
+        sa.Column("field_coverage", pg.JSONB(), nullable=False, server_default=sa.text("'{}'::jsonb")),
+        sa.Column("source_manifest", pg.JSONB(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
+        sa.PrimaryKeyConstraint("feed_id", name="pk_ticket_feeds"),
+        sa.UniqueConstraint("snapshot_id", "source_type", name="uq_ticket_feeds_snapshot_source"),
+        sa.UniqueConstraint("feed_id", "snapshot_id", name="uq_ticket_feeds_binding"),
+        sa.ForeignKeyConstraint(["snapshot_id"], ["rag.dataset_snapshots.snapshot_id"], name="fk_ticket_feeds_snapshot"),
+        *(_sha("ticket_feeds", name) for name in ("feed_id", "corpus_sha256", "source_set_sha256")),
+        sa.CheckConstraint("source_type = 'jira'", name="ck_ticket_feeds_source"),
+        sa.CheckConstraint("coverage IN ('verified_records', 'synthetic_fixture')", name="ck_ticket_feeds_coverage"),
+        sa.CheckConstraint("state IN ('importing', 'ready')", name="ck_ticket_feeds_state"),
+        sa.CheckConstraint("git_commit ~ '^[0-9a-f]{40}$'", name="ck_ticket_feeds_commit"),
+        sa.CheckConstraint("jsonb_typeof(field_coverage) = 'object' AND jsonb_typeof(source_manifest) = 'object'", name="ck_ticket_feeds_objects"),
+        sa.CheckConstraint("imported_records <= expected_records", name="ck_ticket_feeds_counts"),
+        *_nonnegative("ticket_feeds", "expected_records", "imported_records"),
+    )
     tickets = sa.Table("tickets", catalog,
         sa.Column("snapshot_id", sa.Text(), nullable=False),
         sa.Column("ticket_id", sa.Text(), nullable=False),
         sa.Column("doc_id", sa.Text(), nullable=False),
         sa.Column("revision_id", sa.Text(), nullable=False),
+        sa.Column("feed_id", sa.Text()),
+        sa.Column("native_key", sa.Text()),
         sa.Column("status", sa.Text()),
         sa.Column("priority", sa.Text()),
         sa.Column("project_id", sa.Text()),
@@ -307,6 +337,9 @@ def _build_metadata() -> sa.MetaData:
         sa.ForeignKeyConstraint(["snapshot_id", "doc_id", "revision_id"],
             ["rag.document_revisions.snapshot_id", "rag.document_revisions.doc_id",
              "rag.document_revisions.revision_id"], name="fk_tickets_revision"),
+        sa.ForeignKeyConstraint(["feed_id", "snapshot_id"], ["rag.ticket_feeds.feed_id", "rag.ticket_feeds.snapshot_id"], name="fk_tickets_feed"),
+        sa.CheckConstraint("coverage <> 'verified_records' OR feed_id IS NOT NULL", name="ck_tickets_verified_feed"),
+        sa.CheckConstraint("feed_id IS NULL OR ticket_id = doc_id", name="ck_tickets_canonical_record_id"),
         sa.CheckConstraint("jsonb_typeof(field_provenance) = 'object'",
                            name="ck_tickets_provenance_object"),
         sa.CheckConstraint("coverage IN ('verified_records', 'synthetic_fixture')",
@@ -315,6 +348,9 @@ def _build_metadata() -> sa.MetaData:
     )
     sa.Index("ix_tickets_revision", tickets.c.snapshot_id, tickets.c.doc_id, tickets.c.revision_id)
     sa.Index("ix_tickets_status_project", tickets.c.snapshot_id, tickets.c.status, tickets.c.project_id)
+    sa.Index("ix_tickets_native_key", tickets.c.snapshot_id, tickets.c.native_key, tickets.c.doc_id)
+    sa.Index("uq_tickets_feed_document", tickets.c.feed_id, tickets.c.doc_id, unique=True,
+             postgresql_where=tickets.c.feed_id.is_not(None))
 
     runs = sa.Table("query_runs", catalog,
         sa.Column("run_id", sa.Text(), nullable=False),
@@ -423,6 +459,7 @@ chunks = metadata.tables["rag.chunks"]
 document_grants = metadata.tables["rag.document_grants"]
 policy_state = metadata.tables["rag.policy_state"]
 tickets = metadata.tables["rag.tickets"]
+ticket_feeds = metadata.tables["rag.ticket_feeds"]
 query_runs = metadata.tables["rag.query_runs"]
 run_steps = metadata.tables["rag.run_steps"]
 aggregate_results = metadata.tables["rag.aggregate_results"]
