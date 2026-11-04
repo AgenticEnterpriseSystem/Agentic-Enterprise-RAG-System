@@ -37,7 +37,7 @@ def test_snapshot_restores_data_revision_and_default_denial(pg_urls):
         subprocess.run(["docker", "exec", "-i", container, "pg_restore", "--no-password",
             "--exit-on-error", "-U", "rag_migrator", "-d", target.migration.database],
             input=dump, capture_output=True, check=True)
-        assert current_revision(url_string(target.migration)) == "0002_catalog_import"
+        assert current_revision(url_string(target.migration)) == "0003_document_policy"
         upgrade_database(url_string(target.migration))
         owner = engine_for(target.migration)
         try:

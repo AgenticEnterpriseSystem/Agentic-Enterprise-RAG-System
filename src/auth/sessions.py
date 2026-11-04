@@ -183,7 +183,7 @@ class AuthService:
             verified = self.hasher.verify(observed["password_hash"] if observed else self._dummy_hash, password)
         except Exception:
             raise _unavailable() from None
-        if not verified or observed is None or not observed["is_active"]:
+        if not verified or observed is None or not observed["is_active"] or observed["account_kind"] != "human":
             raise _invalid_credentials()
         raw, session_id, now = secrets.token_urlsafe(32), uuid4().hex, self._now()
         csrf = _csrf(raw)
@@ -193,7 +193,7 @@ class AuthService:
                   "created_at": now, "expires_at": expires}
         columns = tuple(values) + ("user_id", "session_version")
         selection = sa.select(*(sa.literal(value) for value in values.values()), users.c.user_id, users.c.session_version).where(
-            users.c.user_id == observed["user_id"], users.c.is_active.is_(True),
+            users.c.user_id == observed["user_id"], users.c.is_active.is_(True), users.c.account_kind == "human",
             users.c.session_version == observed["session_version"], users.c.password_hash == observed["password_hash"])
         with self._transaction() as connection:
             inserted = connection.execute(sessions.insert().from_select(columns, selection).returning(sessions.c.session_id)).scalar_one_or_none()
@@ -216,11 +216,11 @@ class AuthService:
         return connection.execute(sa.select(sessions.c.session_id, sessions.c.user_id, sessions.c.csrf_hash,
             sessions.c.created_at, sessions.c.expires_at, sessions.c.revoked_at,
             sessions.c.session_version.label("issued_version"), users.c.session_version.label("account_version"),
-            users.c.is_active, users.c.password_hash).select_from(sessions.join(users, sessions.c.user_id == users.c.user_id))
+            users.c.is_active, users.c.password_hash, users.c.account_kind).select_from(sessions.join(users, sessions.c.user_id == users.c.user_id))
             .where(sessions.c.token_hash == _digest(raw)).with_for_update(of=sessions)).mappings().one_or_none()
 
     def _valid(self, row, now, raw):
-        if (row is None or row["revoked_at"] is not None or not row["is_active"]
+        if (row is None or row["revoked_at"] is not None or not row["is_active"] or row["account_kind"] != "human"
                 or row["issued_version"] != row["account_version"] or row["created_at"] > now
                 or row["expires_at"] <= now
                 or row["created_at"] + timedelta(seconds=self.settings.absolute_seconds) <= now
@@ -230,6 +230,7 @@ class AuthService:
     def _account(self, connection, row):
         users = schema.users
         account = connection.execute(sa.select(users).where(users.c.user_id == row["user_id"], users.c.is_active.is_(True),
+            users.c.account_kind == "human",
             users.c.session_version == row["issued_version"], users.c.password_hash == row["password_hash"])).mappings().one_or_none()
         if account is None:
             raise _expired()
@@ -247,7 +248,7 @@ class AuthService:
                 expires = min(now + timedelta(seconds=self.settings.idle_seconds),
                               row["created_at"] + timedelta(seconds=self.settings.absolute_seconds))
                 account_current = sa.exists(sa.select(users.c.user_id).where(users.c.user_id == row["user_id"],
-                    users.c.is_active.is_(True), users.c.session_version == row["issued_version"],
+                    users.c.is_active.is_(True), users.c.account_kind == "human", users.c.session_version == row["issued_version"],
                     users.c.password_hash == row["password_hash"]))
                 changed = connection.execute(sessions.update().where(sessions.c.session_id == row["session_id"],
                     sessions.c.revoked_at.is_(None), sessions.c.expires_at > now, account_current)

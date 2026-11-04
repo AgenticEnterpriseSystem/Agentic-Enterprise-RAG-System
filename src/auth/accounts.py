@@ -92,7 +92,7 @@ def create_account(login, password, *, display_name, url=None, user_id=None,
     encoded = (hasher or PasswordHasher()).hash(password)
     try:
         with _administrator(url) as connection:
-            connection.execute(schema.users.insert().values(login=login, password_hash=encoded, **public.model_dump()))
+            connection.execute(schema.users.insert().values(login=login, password_hash=encoded, account_kind="human", **public.model_dump()))
     except sa.exc.IntegrityError:
         raise AccountError("Account could not be provisioned") from None
     return public
@@ -102,7 +102,8 @@ def reset_password(login, password, *, url=None, hasher=None) -> None:
     login, password = normalize_login(login), password_value(password, provisioning=True)
     encoded = (hasher or PasswordHasher()).hash(password)
     with _administrator(url) as connection:
-        changed = connection.execute(schema.users.update().where(schema.users.c.login == login).values(
+        changed = connection.execute(schema.users.update().where(schema.users.c.login == login,
+            schema.users.c.account_kind == "human").values(
             password_hash=encoded, session_version=schema.users.c.session_version + 1).returning(schema.users.c.user_id)).scalar_one_or_none()
         if changed is None:
             raise AccountError("Account is unavailable")

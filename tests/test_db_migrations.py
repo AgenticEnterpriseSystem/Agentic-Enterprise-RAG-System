@@ -21,6 +21,7 @@ EXPECTED_TABLES = {
     "users", "sessions", "groups", "group_memberships", "dataset_snapshots", "documents",
     "document_revisions", "chunks", "document_grants", "policy_state", "tickets",
     "query_runs", "run_steps", "aggregate_results", "catalog_imports",
+    "group_requirements", "policy_scopes", "policy_changes",
 }
 
 
@@ -51,7 +52,7 @@ def test_database_helper_normalizes_only_an_explicit_test_target():
 
 def test_migration_history_has_one_expected_head():
     from src.db.migrate import migration_heads
-    assert migration_heads() == ("0002_catalog_import",)
+    assert migration_heads() == ("0003_document_policy",)
 
 
 def test_fresh_database_upgrade_and_repeat_upgrade_preserve_schema_and_seed(pg_urls):
@@ -59,14 +60,14 @@ def test_fresh_database_upgrade_and_repeat_upgrade_preserve_schema_and_seed(pg_u
     with disposable_database(pg_urls) as fresh:
         assert current_revision(url_string(fresh.migration)) is None
         upgrade_database(url_string(fresh.migration))
-        assert current_revision(url_string(fresh.migration)) == "0002_catalog_import"
+        assert current_revision(url_string(fresh.migration)) == "0003_document_policy"
         engine = engine_for(fresh.migration)
         try:
             with engine.begin() as connection:
                 from src.db import schema
                 data = seed_catalog(connection)
             upgrade_database(url_string(fresh.migration))
-            assert current_revision(url_string(fresh.migration)) == "0002_catalog_import"
+            assert current_revision(url_string(fresh.migration)) == "0003_document_policy"
             with engine.connect() as connection:
                 assert set(sa.inspect(connection).get_table_names(schema="rag")) == EXPECTED_TABLES | {"alembic_version"}
                 assert connection.execute(sa.select(schema.document_revisions.c.canonical_text).where(
@@ -79,7 +80,7 @@ def test_fresh_runtime_can_read_migration_revision_but_cannot_change_version_tab
     from src.db.migrate import current_revision, upgrade_database
     with disposable_database(pg_urls) as fresh:
         upgrade_database(url_string(fresh.migration))
-        assert current_revision(url_string(fresh.runtime)) == "0002_catalog_import"
+        assert current_revision(url_string(fresh.runtime)) == "0003_document_policy"
         runtime = engine_for(fresh.runtime)
         try:
             with runtime.connect() as connection, connection.begin():
@@ -90,12 +91,12 @@ def test_fresh_runtime_can_read_migration_revision_but_cannot_change_version_tab
                 # remove version state even if an incorrect grant slips through.
                 with rejected(connection, sqlstate="42501"):
                     connection.execute(sa.text("DELETE FROM rag.alembic_version WHERE false"))
-            assert current_revision(url_string(fresh.runtime)) == "0002_catalog_import"
+            assert current_revision(url_string(fresh.runtime)) == "0003_document_policy"
         finally:
             runtime.dispose()
 
 
-def test_migrated_tables_match_core_metadata_and_initial_rls_denies_all(db_engine):
+def test_migrated_tables_match_core_metadata_and_protected_tables_keep_rls(db_engine):
     from alembic.autogenerate import compare_metadata
     from alembic.runtime.migration import MigrationContext
     from src.db import schema
@@ -114,13 +115,13 @@ def test_migrated_tables_match_core_metadata_and_initial_rls_denies_all(db_engin
         """)).all()
         enabled = {name for name, active in protected if active}
         assert set(schema.PROTECTED_TABLES) <= enabled
+        # Explicit ACL policies now exist. Functional nonowner/default-denial
+        # cases exercise them; metadata parity must not demand no policies.
         policies = connection.execute(sa.text("""
             SELECT tablename, qual, with_check FROM pg_policies WHERE schemaname='rag'
         """)).all()
-        # The foundation deliberately installs no permitting policy. A future
-        # ACL migration supplies reviewed policies rather than a demo bypass.
-        assert all(qual in (None, "false") and check in (None, "false")
-                   for table, qual, check in policies if table in schema.PROTECTED_TABLES)
+        assert not any(qual == "true" or check == "true"
+                       for table, qual, check in policies if table in schema.PROTECTED_TABLES)
 
 
 def test_unique_normalized_logins_membership_fk_and_catalog_position(db_engine):
@@ -368,3 +369,42 @@ def test_run_provenance_is_frozen_before_any_aggregate_but_outcome_can_progress(
         stored = connection.execute(sa.select(schema.query_runs).where(target)).mappings().one()
         assert all(stored[field] == original[field] for field in changes)
         assert stored["status"] == "answered" and stored["input_tokens"] == 10
+
+
+def test_frozen_initial_revision_installs_no_allow_policy_and_denies_runtime(pg_urls):
+    from alembic import command
+    from src.db.migrate import migration_config
+    with disposable_database(pg_urls) as fresh:
+        owner = engine_for(fresh.migration)
+        try:
+            with owner.begin() as connection:
+                connection.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS rag")
+                config = migration_config()
+                config.attributes["connection"] = connection
+                command.upgrade(config, "0001_foundation")
+                canonical = "Frozen\ntext"
+                revision = hashlib.sha256(canonical.encode()).hexdigest()
+                connection.execute(sa.text("INSERT INTO rag.dataset_snapshots "
+                    "(snapshot_id,corpus_sha256,document_count) VALUES ('frozen',:corpus,1)"),
+                    {"corpus": "a" * 64})
+                connection.execute(sa.text("INSERT INTO rag.documents "
+                    "(snapshot_id,doc_id,position,revision_id,source_type,text_length) "
+                    "VALUES ('frozen','frozen-doc',0,:revision,'jira',:length)"),
+                    {"revision": revision, "length": len(canonical)})
+                connection.execute(sa.text("INSERT INTO rag.document_revisions "
+                    "(snapshot_id,doc_id,revision_id,title,canonical_text) "
+                    "VALUES ('frozen','frozen-doc',:revision,'Frozen',:body)"),
+                    {"revision": revision, "body": canonical})
+                assert connection.execute(sa.text(
+                    "SELECT count(*) FROM rag.document_revisions")).scalar_one() == 1
+                assert connection.execute(sa.text(
+                    "SELECT count(*) FROM pg_policies WHERE schemaname='rag'")).scalar_one() == 0
+            runtime = engine_for(fresh.runtime)
+            try:
+                with runtime.connect() as connection:
+                    assert connection.execute(sa.text(
+                        "SELECT count(*) FROM rag.document_revisions")).scalar_one() == 0
+            finally:
+                runtime.dispose()
+        finally:
+            owner.dispose()

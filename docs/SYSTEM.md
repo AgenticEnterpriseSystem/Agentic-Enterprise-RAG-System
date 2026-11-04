@@ -294,7 +294,7 @@ and gate evidence.
 ## Relational foundation
 
 The optional database profile and migration job are documented in
-[Setup](WEB_APP.md#database-foundation). The current Alembic head, `0002_catalog_import`, owns15 application tables in
+[Setup](WEB_APP.md#database-foundation). The forward Alembic head, `0003_document_policy`, owns18 application tables in
 schema `rag`; the original14-table foundation remains frozen in
 `0001_foundation`. The initial migration is self-contained;
 future metadata changes do not rewrite historical revisions. Destructive
@@ -302,9 +302,9 @@ downgrade is refused. Runtime can read migration version metadata for compatible
 readiness checks, but cannot change it.
 
 Catalog metadata contains no document bodies or titles and is internal to the
-server. Text/revisions, chunks, tickets, runs/steps and aggregates have default
-deny RLS. Later ACL work supplies the explicit policies; a role label does not
-grant access. Database service roles are separate from application accounts.
+server. Text/revisions, chunks, tickets, runs/steps and aggregates use RLS that
+denies absent, expired or stale context. Reviewed grants and a registered scope
+are required; a role label does not grant access. Database service roles are separate from application accounts.
 Published snapshot identity/content and stored aggregate provenance are immutable.
 Derived chunks may append against a fixed revision within canonical bounds.
 
@@ -320,7 +320,7 @@ freshness and grant decisions remain explicit AUTH/ACL responsibilities.
 
 ### Canonical storage and import lifecycle
 
-The current head `0002_catalog_import` adds immutable-source checkpoints to the
+Revision `0002_catalog_import` adds immutable-source checkpoints to the
 14-table foundation and supports exact null-containing canonical bodies. Operator
 import verifies every source hash, document order/revision and indexed span in
 bounded transactions. `PostgresDocumentStore` exposes lazy metadata and exact
@@ -331,7 +331,7 @@ Exactly one canonical body representation is present: ordinary TEXT or original
 UTF-8 BYTEA for null-containing documents. Original hashes/offsets remain exact;
 binary data is validated and capped at1MiB. See [import setup](WEB_APP.md#canonical-document-import)
 for batch limits, rare binary physical reads and restart/verification commands.
-Default-deny RLS still applies. This ticket does not add login or activate the new
+Default-deny behavior still applies without current reviewed authority. This ticket does not add login or activate the new
 store-backed web runtime.
 
 ### Local account implementation
@@ -347,3 +347,47 @@ local-profile query as fallback. See [account setup](WEB_APP.md#local-account-ap
 These changes require no new migration or DOC schema dependency. Authenticated
 queries remain deny-all until ACL and application/store integration pass their
 own gates. This is actual local login, not enterprise SSO or completed user UI.
+
+### Reviewed document permissions
+
+`PolicyResolver(database, snapshot, source_types=(), doc_ids=None)` resolves a
+trusted `ResolvedIdentity` into a frozen `RequestContext` and acts as its
+freshness guard. A direct user grant or an explicitly joined group grants a
+document. Compound groups require membership in the compound group and every
+declared base group; nesting, self-reference and cycles are rejected. Roles,
+department, projects and document prose grant nothing. Unknown documents deny.
+`doc_ids=None` imposes no operator document limit; an empty collection denies all.
+
+Each scope retains an immutable compact bitmap and shares a validated catalogue
+map. Bit position0 is the least-significant bit of byte0, matching PostgreSQL.
+An immutable `policy_scopes` record binds the bitmap to user/session version,
+policy epoch, complete snapshot and operator restriction identity. Its stable ID
+excludes the moving idle deadline, allowing reuse after authenticated activity.
+Both Python and SQL enforce the narrowed bitmap. SQL also rechecks actual grants,
+active user/session, current epoch and statement-time expiry. No protected read
+works through an empty pooled context. Runs/steps/aggregates additionally require
+the matching owner and scope binding. These are invoker policies, without an
+owner or SECURITY DEFINER bypass.
+
+Reviewed operator patches use `PolicyRepository.dry_run/apply/revoke`. The
+`PolicyManifest` requires schema_version `"1"`, a unique manifest_id, exact
+SnapshotRef, origin (`operator` or `synthetic`), reviewed_by, nonempty provenance,
+and optional group/membership/grant arrays. Group records contain group_id,
+label and optional requires; memberships contain user_id/group_id; each grant
+contains explicit doc_ids and exactly one user_id or group_id. Application is
+additive and never relabels existing policy. Immutable `policy_changes` records
+and row ownership ensure revocation removes only the originating patch's rows.
+Group definitions/prerequisites remain intact. Actual grant/membership/requirement
+changes bump the global epoch atomically using statement transition tables;
+no-op writes do not bump it, rollback restores both state and epoch, and policy
+TRUNCATE is refused.
+
+Benchmark principals have immutable account_kind `benchmark`. Their reviewed
+all-document grant is issued only by the separate operator operation, with an
+exclusive0600 credential file. Private credential verification yields an internal
+`ResolvedIdentity`; it emits no browser cookie or raw nonce. Public login and
+session authentication always reject benchmark accounts, including valid private
+passwords or known session nonces. Normal accounts remain kind `human`.
+See [operator setup](WEB_APP.md#reviewed-document-permissions). This component
+does not wire authenticated question serving; APP/SEC integration remains a
+separate gate.
