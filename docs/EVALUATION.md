@@ -7,29 +7,91 @@ calibration and comparable BGE-base hybrid answer evaluation remain pending.
 
 ## Match the web retriever
 
-The web runtime, pilot and retrieval evaluations share `RetrievalSettings` and
-manifest-aware loading. Hybrid defaults are BM25 weight 0.7, dense weight 0.3,
-50 candidates per retriever, a fused/rerank pool of 50, RRF k=60, CPU encoding,
-manifest-selected precision and no reranker. CLI evaluations do not read `.env`;
-pass the same artifact paths and any web overrides explicitly:
+The authenticated web runtime and both retrieval evaluation commands use the
+same store-backed bounded factory and current PostgreSQL policy. The older pilot
+remains a separate development profile. Hybrid defaults are BM25 weight 0.7,
+dense weight 0.3, 50 candidates per retriever, a fused/rerank pool of 50, RRF k=60,
+CPU encoding, manifest-selected precision and no reranker. CLI evaluations do not
+read `.env`: provide runtime-only database environment settings, a ready imported
+snapshot, an explicit authenticated principal and matching artifact paths.
 
 ```sh
 python -m src.evaluation.run_hybrid \
-  --corpus .cache/hybrid-artifacts/documents.parquet \
   --bm25-index .cache/hybrid-artifacts/indexes/bm25 \
   --dense-index .cache/hybrid-artifacts/indexes/dense-bge-base \
+  --snapshot-file /path/ready-snapshot.json \
+  --credentials-file /path/private/benchmark-credentials.json \
+  --principal-kind benchmark \
   --questions .cache/corpus/questions.jsonl --split development \
   --output-dir .cache/evaluation/hybrid-development
 ```
 
-Use a fresh output directory. The questions file (`questions.jsonl` in the team Drive's `files_web_app` folder; see
-[Setup](WEB_APP.md#get-the-artifacts)) is separate from the assembled
-web bundle. Web `RAG_CANDIDATE_K`, `RAG_RERANK_K`, `RAG_RRF_K` and `RAG_FP16`
+The benchmark credential is the existing private `rag-benchmark-v1` file from
+reviewed operator provisioning; public login still refuses it. For an existing
+human session, use `--principal-kind session` and an ordinary 0600 JSON file with
+exactly `{"format":"rag-session-v1","token":"..."}`. The token is an existing
+session secret, not a password or role claim. Never put a token, database URL or
+password in CLI arguments. The runner calls the accepted AuthService and shares
+one nonowner Database pool; it creates no accounts/grants and has no demo fallback.
+Model loading is forced offline; pre-stage the exact manifest-pinned model cache.
+
+Result directories are exclusive and never overwrite saved runs. The questions
+file (`questions.jsonl` in the team Drive's `files_web_app` folder; see
+[Setup](WEB_APP.md#get-the-artifacts)) is separate from the assembled web bundle.
+Pass artifact paths explicitly; these commands read canonical bodies from the
+store and do not load the raw corpus into Arrow or resident full FAISS.
+Web settings `RAG_CANDIDATE_K`, `RAG_RERANK_K`, `RAG_RRF_K` and `RAG_FP16`
 correspond to `--candidate-k`, `--rerank-k`, `--rrf-k` and `--fp16/--no-fp16`.
-For hybrid evaluation, `--bm25-weights` accepts a comma-separated sweep; rerankers
-are opt-in with `--rerankers`. Existing notebooks pass their experiment settings
-explicitly. Retrieval metrics still request 20 results to score Recall@20;
-the web app's default answer context starts with five results.
+Dense defaults are 8192 rows per block and explicit retain-cache advice; neither
+setting disables shard/model/snapshot validation.
+
+`--bm25-weights` accepts a comma-separated sweep, sharing only one question's
+candidate metadata across variants. Bodies are not cached across the split.
+Rerankers are opt-in with
+`--rerankers bge-reranker-base@EXACT_40_HEX_REVISION`; at most one pinned offline
+reranker is allowed per invocation. Compare other rerankers in separate processes.
+Best-development weight selection uses a second bounded pass instead of keeping
+all-question candidates. Calibration/final reranking requires a fixed numeric
+`--rerank-bm25-weight`. Existing notebook/library helpers retain their historical
+development behavior; these command entry points have no legacy FAISS fallback.
+Metrics still request 20 results for Recall@20, while the web answer context
+starts with five.
+
+`run_retrieval --method dense` scores only the dense rankings while loading the
+accepted paired bundle; provide its matching BM25 metadata index as well as the
+dense directory. This shares the validated catalogue without another loader.
+
+`--allowed-doc-ids-file` and `--source-types` only narrow current explicit grants;
+an empty document list denies everything. `--after`/`--before` require aware ISO
+timestamps, and unknown dates fail a date restriction. Question `source_types`
+annotations remain metric slices, not automatic query filters.
+`--read-more-chars 3000` checks adjacent reads in at most two returned documents
+and exports exact offsets/revision/text hashes without changing ranked-document
+metrics. `--limit N` is recorded as an explicit partial smoke selection.
+
+New predictions preserve the original IDs/scores/error fields and add original,
+eligible and unknown reference counts plus `scoring_status`. Metrics use the
+**authorized-reference intersection**, explicitly labeled in the summary. No
+eligible reference means `unanswerable` and N/A, not a successful zero-recall
+case. Any unknown reference excludes that whole question from quality scoring.
+Queries and errors remain counted; denied reference IDs are not exported. Original
+global reference denominators apply only when every reference is known and
+eligible. Scoped scores and historical full-corpus scores have different bases.
+
+Completed runs also have `manifest.json`, binding the actual backend, SnapshotRef,
+principal/session row ID, policy/session versions, scope/bitmap, filters, input
+hashes, index/model settings, installed versions, actual source-file hashes and
+cache conditions. Session secrets are never serialized. A missing complete
+manifest marks an interrupted attempt. Git-unavailable images report unknown
+commit/dirty state; source-file hashes and the operator's frozen-source receipt
+provide the source binding. A run freezes one permission binding; a policy or
+session change fails closed rather than mixing successful permissions.
+
+Latency includes identity/scope resolution and actual work. Hybrid variants each
+include shared candidate-search time plus their own materialization/rerank/read
+cost, not the sum of other variants. OS caches are not cleared, so first-process
+timings are not cold-disk claims. Full-resident FAISS is reserved for the deliberate
+separate `scripts/compare_retrieval_backends.py` reference under its memory guards.
 
 ## Retrieval results
 
@@ -156,6 +218,9 @@ python -m src.agents.pilot \
 
 # Full-development retrieval scoring
 python -m src.evaluation.run_retrieval --method bm25 --split development \
+  --bm25-index .cache/hybrid-artifacts/indexes/bm25 \
+  --snapshot-file /path/ready-snapshot.json \
+  --credentials-file /path/private/benchmark-credentials.json \
   --output .cache/retrieval-runs/bm25-development-new
 
 # Evidence/context inspection on a deterministic 20-question sample
