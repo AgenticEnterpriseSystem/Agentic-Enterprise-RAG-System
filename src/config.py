@@ -19,6 +19,9 @@ class RetrievalSettings(BaseModel):
     corpus: Path = CORPUS_DIR / 'documents.parquet'
     bm25_index: Path = CORPUS_DIR / 'indexes/bm25'
     dense_index: Path = CORPUS_DIR / 'indexes/dense-bge-base'
+    snapshot_file: Path | None = None
+    dense_block_rows: int = Field(default=8192, strict=True, ge=1)
+    dense_file_cache_policy: Literal['discard', 'retain'] = 'retain'
     device: str = 'cpu'
     fp16: bool | None = None
     bm25_weight: float = Field(default=.7, ge=0, le=1)

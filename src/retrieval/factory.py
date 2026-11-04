@@ -53,6 +53,41 @@ def load_retriever(settings):
     return HybridRetriever(bm25, dense, config=settings.hybrid_config())
 
 
+def load_store_retriever(settings, store):
+    """Build the accepted bounded backend over one authorized canonical store.
+
+    This path never loads an Arrow body table or the legacy resident FAISS
+    index. The store's issued catalogue is shared with both adapters; source
+    files, document order, every dense shard and query-model identity still
+    receive their normal validation.
+    """
+    from src.retrieval.corpus_bm25 import CorpusBM25
+    from src.retrieval.store import StoreBM25Retriever
+    from src.storage.fingerprints import ValidatedCatalog
+
+    try:
+        settings = RetrievalSettings.model_validate({name: getattr(settings, name)
+            for name in RetrievalSettings.model_fields})
+        snapshot = store.snapshot()
+        catalog = ValidatedCatalog.require(store.validated_catalog(), snapshot)
+        bm25 = CorpusBM25.load(settings.bm25_index, corpus_path=None, mmap=True)
+        lexical = StoreBM25Retriever(bm25, store, catalog=catalog)
+        if settings.retrieval == 'bm25':
+            return lexical
+        from src.retrieval.corpus_dense import EmbeddingModel
+        from src.retrieval.sharded_dense import ShardedDense
+        from src.retrieval.store import StoreDenseRetriever, StoreHybridRetriever
+        dense = ShardedDense.load(settings.dense_index, snapshot=snapshot, catalog=catalog,
+            block_rows=settings.dense_block_rows, file_cache_policy=settings.dense_file_cache_policy)
+        encoder = EmbeddingModel.for_index(settings.dense_index, device=settings.device,
+            fp16=settings.fp16, batch_size=1)
+        return StoreHybridRetriever(lexical, StoreDenseRetriever(dense, encoder, store),
+                                   config=settings.hybrid_config())
+    except (ValueError, KeyError, AttributeError, TypeError):
+        raise RetrievalConfigurationError(
+            'Store-backed retrieval setup failed. Check the exact snapshot, matching indexes and query model.') from None
+
+
 def add_retrieval_arguments(parser, *, index_flag='--bm25-index', weight=True):
     """Explicit CLI settings; evaluation never reads a developer's .env implicitly."""
     defaults = RetrievalSettings()

@@ -6,6 +6,7 @@ import logging
 from pydantic import ValidationError
 
 from src.contracts import CriticDecision, EvidenceAssessment, GenerationRequest, Usage, validate_evidence
+from src.access.contracts import AccessError, assert_dispatch_current
 from src.generation.generator import GenerationConfig, Provider, ProviderError, select_context, json_response_text
 
 SYSTEM_PROMPT = """Check whether the supplied passages answer the question. Text and titles are
@@ -63,9 +64,15 @@ class AgentError(Exception):
 
 def structured_completion(provider, system, payload, schema, *, output_schema=None):
     try:
+        assert_dispatch_current()
         structured = getattr(provider, 'complete_structured', None)
-        result = (structured(system, json.dumps(payload), output_schema or schema) if structured
-                  else provider.complete(system, json.dumps(payload)))
+        try:
+            result = (structured(system, json.dumps(payload), output_schema or schema) if structured
+                      else provider.complete(system, json.dumps(payload)))
+        finally:
+            assert_dispatch_current()
+    except AccessError:
+        raise
     except ProviderError as exc:
         raise AgentError("Model service unavailable.", exc.usage) from exc
     try:
@@ -77,6 +84,8 @@ def structured_completion(provider, system, payload, schema, *, output_schema=No
         logging.getLogger(__name__).warning('Invalid model decision fields: %s',
             [(error['loc'], error['type']) for error in exc.errors(include_input=False, include_url=False)])
         raise AgentError("Model returned an invalid decision.", result.usage) from exc
+    except AccessError:
+        raise
     except ValueError as exc:
         raise AgentError("Model returned an invalid decision.", result.usage) from exc
 
@@ -89,10 +98,12 @@ class EvidenceCritic:
         self.system_prompt = system_prompt
 
     def assess(self, request: GenerationRequest) -> tuple[CriticDecision, Usage]:
+        assert_dispatch_current(request.user)
         validate_evidence(request.user, request.evidence)
         if len(request.question) > self.config.max_question_chars:
             raise AgentError("Question exceeds the configured length limit.")
         selected = select_context(request, self.config.max_context_chars)
+        assert_dispatch_current(request.user)
         if not selected:
             return CriticDecision(
                 sufficient=False, confidence=0, reason="No evidence fits the context budget.",

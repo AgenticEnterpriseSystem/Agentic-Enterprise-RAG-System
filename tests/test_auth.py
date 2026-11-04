@@ -585,13 +585,13 @@ def test_login_http_body_limit_precedes_expensive_password_verification(auth, cl
     assert len(auth.hasher.verifications) == before and not session_rows(auth)
 
 
-def test_me_polling_does_not_refresh_idle_expiry_and_authenticated_queries_deny_until_acl(auth):
+def test_me_polling_and_unready_authenticated_queries_do_not_refresh_idle_expiry(auth):
     with TestClient(http_app(auth), base_url=ORIGIN) as client:
         response = http_login(client, auth)
         assert response.status_code == 200
         query = client.post("/api/query", json={"question": "Show CEO data"},
             headers={"Origin": ORIGIN, CSRF_HEADER_NAME: response.json()["csrf_token"]})
-        assert query.status_code == 403 and query.json()["detail"]["code"] == "scope_denied"
+        assert query.status_code == 503 and query.json()["detail"]["code"] == "not_ready"
         auth.clock.advance(9)
         assert client.get("/api/auth/me").status_code == 200
         auth.clock.advance(1)
