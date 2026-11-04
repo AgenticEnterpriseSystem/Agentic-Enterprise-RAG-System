@@ -13,7 +13,7 @@ from pydantic import AwareDatetime, Field, StrictBool, model_validator
 
 from src.contracts import (
     AggregateEvidence, Contract, GroundedEvidence, Identifier, PassageEvidence, QueryResponse,
-    ScopeBinding, Sha256, SnapshotRef,
+    ScopeBinding, Sha256, SnapshotRef, StructuredRecord,
 )
 
 EXPERIMENT_SCHEMA_VERSION = "2"
@@ -228,8 +228,8 @@ def validate_runtime_exports(manifest: ExperimentManifest,
             raise ValueError("Case belongs to another snapshot")
         for item in (*case.response.sources, *case.generation_evidence):
             _validate_evidence_snapshot(item, manifest.scope.snapshot)
-            if isinstance(item, AggregateEvidence) and item.scope != manifest.scope:
-                raise ValueError("Aggregate belongs to another permission scope")
+            if isinstance(item, (AggregateEvidence, StructuredRecord)) and item.scope != manifest.scope:
+                raise ValueError("Native evidence belongs to another permission scope")
     if require_complete and question_ids != declared:
         raise ValueError("Export is missing declared question outcomes")
 
@@ -292,10 +292,10 @@ def validate_paired_arms(fixed: ExperimentManifest, adaptive: ExperimentManifest
         raise ValueError("Paired question text differs")
 
 
-def _validate_evidence_snapshot(item: PassageEvidence | AggregateEvidence,
+def _validate_evidence_snapshot(item: PassageEvidence | AggregateEvidence | StructuredRecord,
                                 snapshot: SnapshotRef) -> None:
     if isinstance(item, PassageEvidence):
         if item.snapshot_id != snapshot.snapshot_id:
             raise ValueError("Generation passage belongs to another snapshot")
     elif item.scope.snapshot != snapshot:
-        raise ValueError("Aggregate belongs to another snapshot")
+        raise ValueError("Native evidence belongs to another snapshot")

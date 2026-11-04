@@ -1,5 +1,6 @@
 """Bounded search → evidence assessment → answer orchestration."""
 
+import json
 import time
 from uuid import uuid4
 
@@ -14,8 +15,9 @@ from src.access.contracts import (
     validate_grounded_evidence,
 )
 from src.contracts import (
-    Answer, Contract, CriticDecision, GenerationRequest, QueryResponse, SearchRequest, Trace,
-    TraceStep, Usage, validate_evidence,
+    AggregateEvidence, Answer, Contract, CriticDecision, Evidence, GenerationRequest,
+    QueryResponse, SearchRequest, StructuredRecord, ToolResult, Trace, TraceStep, Usage,
+    validate_evidence,
 )
 from src.generation.generator import combined_usage, select_context
 
@@ -37,20 +39,30 @@ class SearchAgent:
         self.router, self.tools = router or TextRouter(), dict(tools or {})
         self.config, self.clock = config or AgentConfig(), clock
 
-    def run(self, request: SearchRequest, *, single_pass=False, context=None, guard=None) -> QueryResponse:
-        scoped = context is not None or guard is not None or isinstance(request.user, ScopedUserContext)
+    def run(self, request: SearchRequest, *, single_pass=False, context=None, guard=None,
+            run_id=None, retrieval_only=False, aggregates=None, record_validator=None) -> QueryResponse:
+        if run_id is not None and (not isinstance(run_id, str) or not run_id.strip()):
+            raise ValueError("A server-generated run ID must be nonempty")
+        if type(retrieval_only) is not bool:
+            raise ValueError("Retrieval-only selection must be a server boolean")
+        scoped = (context is not None or guard is not None or isinstance(request.user, ScopedUserContext)
+                  or aggregates is not None or record_validator is not None)
         if not scoped:
-            return self._run(request, single_pass=single_pass)
+            return self._run(request, single_pass=single_pass, run_id=run_id, retrieval_only=retrieval_only)
         if context is None or guard is None:
             raise AccessDenied("Scoped search requires a request context and freshness guard")
         ScopedUserContext.require_context(request.user, context)
-        with guarded_dispatch(context, guard):
-            return self._run(request, single_pass=single_pass, request_context=context, guard=guard)
+        with guarded_dispatch(context, guard, aggregates=aggregates, record_validator=record_validator):
+            return self._run(request, single_pass=single_pass, request_context=context, guard=guard,
+                run_id=run_id, retrieval_only=retrieval_only, aggregates=aggregates,
+                record_validator=record_validator)
 
-    def _run(self, request: SearchRequest, *, single_pass=False, request_context=None, guard=None) -> QueryResponse:
+    def _run(self, request: SearchRequest, *, single_pass=False, request_context=None, guard=None,
+             run_id=None, retrieval_only=False, aggregates=None, record_validator=None) -> QueryResponse:
         started = self.clock()
         steps, usages, evidence = [], [], {}
         trace_evidence = {}
+        native_sources = {}
         feedback = None
         context_order = []
         retained = {}
@@ -72,12 +84,19 @@ class SearchAgent:
             finally:
                 current()
 
-        def grounded(hits):
+        def grounded(hits, source_scope=()):
             current()
             if request_context is not None:
-                validate_grounded_evidence(request_context, hits, guard)
+                validate_grounded_evidence(request_context, hits, guard, aggregates,
+                                           record_validator=record_validator)
             validate_evidence(request.user, hits)
             for item in hits:
+                if not isinstance(item, Evidence):
+                    source = source_scope[0] if len(source_scope) == 1 else native_sources.get(item.citation_id)
+                    if ((request.source_types and source not in request.source_types)
+                            or request.after or request.before):
+                        raise AccessDenied("Native evidence is outside the requested source/date scope")
+                    continue
                 chunk = item.chunk
                 if ((request.source_types and chunk.source_type not in request.source_types)
                         or (request.after and (chunk.timestamp is None or chunk.timestamp < request.after))
@@ -111,7 +130,14 @@ class SearchAgent:
                 remaining_cost_usd=max(0, config.max_cost_usd - (usage.estimated_cost_usd or 0)),
             )
             with call_budget(allowance):
-                return perform(operation, *args)
+                try:
+                    return perform(operation, *args)
+                finally:
+                    if request_context is not None:
+                        grounded(tuple(evidence.values()))
+                        for value in args:
+                            if isinstance(value, GenerationRequest):
+                                grounded(value.evidence)
 
         def record(tool, began, *, query=None, hits=(), decision=None, usage=None, sources=()):
             usage = usage or Usage(estimated_cost_usd=0)
@@ -143,10 +169,15 @@ class SearchAgent:
         def accept(hits, source_scope):
             hits = tuple(hits)
             if request_context is not None:
-                grounded(hits)
+                grounded(hits, source_scope)
             validate_evidence(request.user, hits)
-            checked_chunks = {e.chunk.chunk_id: e.chunk for e in evidence.values()}
+            checked_chunks = {e.chunk.chunk_id: e.chunk for e in evidence.values() if isinstance(e, Evidence)}
             for item in hits:
+                previous = evidence.get(item.citation_id)
+                if not isinstance(item, Evidence):
+                    if previous is not None and previous != item:
+                        raise AgentError("A citation ID was reused for different evidence.")
+                    continue
                 chunk = item.chunk
                 if source_scope and chunk.source_type not in source_scope:
                     raise AgentError("Search returned evidence outside the source filter.")
@@ -154,14 +185,18 @@ class SearchAgent:
                     raise AgentError("Search returned evidence outside the date filter.")
                 if request.before and (chunk.timestamp is None or chunk.timestamp > request.before):
                     raise AgentError("Search returned evidence outside the date filter.")
-                previous = evidence.get(item.citation_id)
-                if previous and previous.chunk != chunk:
+                if previous and (not isinstance(previous, Evidence) or previous.chunk != chunk):
                     raise AgentError("A citation ID was reused for different evidence.")
                 if chunk.chunk_id in checked_chunks and checked_chunks[chunk.chunk_id] != chunk:
                     raise AgentError("A chunk ID was reused for different evidence.")
                 checked_chunks[chunk.chunk_id] = chunk
-            known_chunks = {e.chunk.chunk_id for e in evidence.values()}
+            known_chunks = {e.chunk.chunk_id for e in evidence.values() if isinstance(e, Evidence)}
             for item in hits:
+                if not isinstance(item, Evidence):
+                    evidence.setdefault(item.citation_id, item)
+                    if len(source_scope) == 1:
+                        native_sources[item.citation_id] = source_scope[0]
+                    continue
                 if item.chunk.chunk_id not in known_chunks:
                     evidence.setdefault(item.citation_id, item)
                     known_chunks.add(item.chunk.chunk_id)
@@ -194,7 +229,7 @@ class SearchAgent:
                 "text": answer.text + "\n\nSearch limitation: " + limitation})
             return finish(reason, "", answer, context.evidence)
 
-        run_id = str(uuid4())
+        run_id = run_id or str(uuid4())
         if len(request.query) > config.max_question_chars:
             return finish("error", "Question exceeds the configured length limit.")
         for round_number in range(1, config.max_rounds + 1):
@@ -206,7 +241,7 @@ class SearchAgent:
                 expand = getattr(self.retriever, 'read_more', None)
                 anchors = ()
                 if not single_pass and feedback and feedback.read_more_doc_ids and expand and last_context:
-                    candidates = last_context.evidence
+                    candidates = tuple(item for item in last_context.evidence if isinstance(item, Evidence))
                     anchors = tuple(max((e for e in candidates if e.chunk.doc_id == doc),
                                         key=lambda e: e.chunk.end_char)
                                     for doc in feedback.read_more_doc_ids
@@ -262,14 +297,38 @@ class SearchAgent:
                         return finish("budget", "Search budget reached.")
                     active_tool, began = call.tool, self.clock()
                     result = perform(spec.adapter.execute, tool_request)
+                    if not isinstance(result, ToolResult):
+                        raise AgentError("Structured tool returned an invalid result.")
+                    result = ToolResult.model_validate(result.model_dump(warnings=False))
                     # Counts need scoped, citable aggregate evidence from the adapter.
                     if result.count is not None and not result.evidence:
                         raise AgentError("Structured count has no supporting evidence.")
-                    hits = accept(result.evidence, (spec.source_type,))
-                    record(active_tool, began, query=tool_request.model_dump_json(exclude={"user"}),
+                    if request_context is not None and result.count is not None and not any(
+                            isinstance(item, AggregateEvidence) for item in result.evidence):
+                        raise AccessDenied("Scoped counts require authoritative aggregate evidence")
+                    hits = accept((*result.evidence, *result.records), (spec.source_type,))
+                    metadata = {"count": result.count, "coverage": result.coverage,
+                        "limitation": result.limitation, "truncated": result.truncated,
+                        "ambiguous": result.ambiguous}
+                    record(active_tool, began, query=json.dumps({"request": tool_request.model_dump(
+                        mode='json', exclude={"user"}), "result": metadata}, allow_nan=False),
                            hits=hits, sources=(spec.source_type,))
+                    if result.ambiguous:
+                        return finish("clarification", "", Answer(status="insufficient_evidence",
+                            text="Multiple accessible Jira source records match. Specify a canonical document ID.",
+                            citation_ids=tuple(item.citation_id for item in hits)))
+                    native = any(isinstance(item, (AggregateEvidence, StructuredRecord)) for item in hits)
+                    supported_disclaimer = "Counts canonical Jira records in this pinned benchmark; native keys may repeat."
+                    if (result.truncated or (request_context is not None and result.coverage == "unknown")
+                            or (result.limitation and (not hits or (native and result.limitation != supported_disclaimer)))):
+                        detail = result.limitation or "Structured results are incomplete for this request."
+                        if result.truncated:
+                            detail += " Results are truncated; narrow the filters before treating them as complete."
+                        return finish("no_new_evidence", detail)
                 if exhausted():
                     return finish("budget", "Search budget reached.")
+                if retrieval_only:
+                    return finish("single_pass", "Retrieved authorized evidence only. Answer generation and critique are disabled.")
                 if len(evidence) == before:
                     return partial_answer("no_new_evidence", "Search found no new evidence; some requested facts may remain unresolved.")
                 # Prefer the newest round without reversing each search's ranking.
@@ -311,7 +370,7 @@ class SearchAgent:
                             raise AgentError("Critic returned an invalid decision.", usage) from None
                     supplied = {e.citation_id: e for e in context.evidence}
                     if request_context is not None and not set(feedback.read_more_doc_ids) <= {
-                            item.chunk.doc_id for item in context.evidence}:
+                            item.chunk.doc_id for item in context.evidence if isinstance(item, Evidence)}:
                         raise AgentError("Critic referenced an unknown document.", usage)
                     for fact in feedback.facts:
                         if not set(fact.citation_ids) <= supplied.keys():
@@ -325,9 +384,10 @@ class SearchAgent:
                 last_context = context
                 if exhausted():
                     return finish("budget", "Search budget reached.")
-                ambiguous_docs = ({e.chunk.doc_id for fact in feedback.facts
+                ambiguous_docs = ({e.chunk.doc_id if isinstance(e, Evidence) else e.doc_id for fact in feedback.facts
                                    if fact.status == 'ambiguous' for e in context.evidence
-                                   if e.citation_id in fact.citation_ids} if feedback else set())
+                                   if e.citation_id in fact.citation_ids and isinstance(e, (Evidence, StructuredRecord))}
+                                  if feedback else set())
                 if (not single_pass and feedback and feedback.clarification_question
                         and (len(ambiguous_docs) > 1 or not feedback.read_more_doc_ids
                              or round_number == config.max_rounds)):

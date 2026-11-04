@@ -20,7 +20,7 @@ import tempfile
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from src.contracts import AggregateEvidence
+from src.contracts import AggregateEvidence, StructuredRecord
 from src.evaluation.experiment_contracts import (
     ExperimentManifest, RuntimeCaseExport, ScoringInput, ScoringReference,
     runtime_case_digest, validate_paired_arms, validate_resume_compatibility,
@@ -451,8 +451,9 @@ def to_answer_evaluation_input(scoring: ScoringInput) -> AnswerEvaluationInput:
     """Optional passage-only adapter; preserves the old evaluator unchanged."""
     scoring = _checked(ScoringInput, scoring, "scoring input")
     case = scoring.runtime_case
-    if any(isinstance(item, AggregateEvidence) for item in (*case.response.sources, *case.generation_evidence)):
-        raise ExperimentIOError("Aggregate evidence requires the native scoring handoff")
+    if any(isinstance(item, (AggregateEvidence, StructuredRecord))
+           for item in (*case.response.sources, *case.generation_evidence)):
+        raise ExperimentIOError("Aggregate or record evidence requires the native scoring handoff")
     if case.error is not None or case.response.trace.stop_reason == "clarification":
         raise ExperimentIOError("Failed generation and clarification require the native scoring handoff")
     if scoring.reference.reference_answer is None:

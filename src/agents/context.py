@@ -3,8 +3,8 @@ import math
 import re
 from collections import Counter
 
-from src.contracts import validate_evidence
-from src.generation.generator import select_context
+from src.contracts import AggregateEvidence, Evidence, StructuredRecord, validate_evidence
+from src.generation.generator import evidence_chars, select_context
 from src.retrieval.passages import bounded_passage, slice_passage
 
 _STOP = frozenset('a an and are as at be by do does for from how i in is it of on or our should that the this to was we what when where which who why with'.split())
@@ -26,6 +26,30 @@ def select_agent_context(request, limit, initial_ids, retained=()):
     question coverage, and reward terms not already covered. Real token counting
     remains the provider's responsibility.
     """
+    if any(isinstance(item, (AggregateEvidence, StructuredRecord)) for item in (*request.evidence, *retained)):
+        validate_evidence(request.user, request.evidence)
+        validate_evidence(request.user, tuple(retained))
+        required_native = [item for item in retained if not isinstance(item, Evidence)]
+        if any(item not in request.evidence for item in required_native):
+            raise ValueError("Retained native evidence is outside the collected evidence")
+        if sum(evidence_chars(item) for item in retained) > limit:
+            raise ContextBudgetError("Supported evidence exceeds the remaining context allowance")
+        chosen = list(required_native)
+        remaining = limit - sum(evidence_chars(item) for item in required_native)
+        passage_retained = tuple(item for item in retained if isinstance(item, Evidence))
+        reserved = sum(evidence_chars(item) for item in passage_retained)
+        for item in request.evidence:
+            if isinstance(item, Evidence) or item in chosen:
+                continue
+            size = evidence_chars(item)
+            if size <= remaining - reserved:
+                chosen.append(item)
+                remaining -= size
+        passages = tuple(item for item in request.evidence if isinstance(item, Evidence))
+        if passages:
+            chosen.extend(select_agent_context(request.model_copy(update={"evidence": passages}),
+                remaining, initial_ids, passage_retained))
+        return chosen
     if retained:
         # Retain exact passages cited by the previous assessment, not its prose.
         # Remove overlapping text from candidates so it does not consume room twice.

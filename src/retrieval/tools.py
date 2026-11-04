@@ -192,11 +192,14 @@ class JiraTool:
                 config_sha256=hashlib.sha256(canonical({"template": TEMPLATE_ID, "version": TEMPLATE_VERSION})).hexdigest(),
                 mode="baseline", question="Structured Jira canonical-record count", created_at=now))
         else:
-            run = connection.execute(sa.select(schema.query_runs).where(schema.query_runs.c.run_id == run_id)).mappings().one_or_none()
+            run = connection.execute(sa.select(schema.query_runs).where(
+                schema.query_runs.c.run_id == run_id).with_for_update()).mappings().one_or_none()
             if run is None or (run["owner_user_id"], run["scope_id"], run["snapshot_id"], run["policy_revision"], run["session_version"]) != (
                 context.identity.user_id, context.binding.scope_id, self.snapshot.snapshot_id,
                 context.binding.policy_revision, context.binding.session_version):
                 raise AccessDenied("Aggregate run is unavailable in this scope")
+            if run['status'] != 'pending':
+                raise AccessDenied("Aggregate run no longer accepts tool activity")
         artifact_id = uuid4().hex
         aggregate = AggregateEvidence(artifact_id=artifact_id, citation_id="aggregate:" + artifact_id,
             scope=context.binding, template_id=TEMPLATE_ID, template_version=TEMPLATE_VERSION,

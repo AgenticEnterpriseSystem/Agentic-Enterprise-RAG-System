@@ -250,6 +250,57 @@ def create_app(settings=None, runtime_factory=None, *, auth_settings=None, auth_
         return JSONResponse(status_code=status, content=response.model_dump(mode='json'),
             headers={'Cache-Control': 'no-store'} if auth_enabled else None)
 
+    if auth_enabled:
+        @app.get('/api/runs/{run_id}')
+        async def run_metadata(run_id: str, request: Request):
+            """One current-owner receipt; no question, answer or trace history."""
+            def failure(status, code, message):
+                return HTTPException(status, detail={'code': code, 'message': message},
+                                     headers={'Cache-Control': 'no-store'})
+
+            origin = request.headers.get('origin')
+            if origin and origin not in origins:
+                raise failure(403, 'origin_denied', 'This browser origin is not allowed.')
+            token = request.cookies.get('rag_session')
+            if not token:
+                raise failure(401, 'authentication_required', 'Authentication is required.')
+            # Reading a receipt does not keep an idle session alive.
+            await auth_worker.call(auth_service.authenticate, token, touch=False)
+            if app.state.runtime is None or app.state.closing:
+                raise failure(503, 'not_ready', 'Document search is unavailable.')
+            if app.state.busy:
+                raise failure(429, 'busy', 'A query is still running. Wait before trying again.')
+            app.state.busy = True
+            runtime = app.state.runtime
+
+            def operation():
+                current = auth_service.authenticate(token, touch=False)
+                return runtime.get_run_metadata(run_id, current.identity)
+
+            try:
+                future = app.state.submit_work(operation)
+            except RuntimeError:
+                app.state.busy = False
+                raise failure(503, 'not_ready', 'Document search is unavailable.') from None
+            try:
+                metadata = await asyncio.wait_for(asyncio.shield(future), timeout=settings.max_seconds)
+            except asyncio.TimeoutError:
+                raise failure(504, 'timeout', 'Run metadata is temporarily unavailable.') from None
+            except SessionExpired:
+                raise failure(401, 'session_expired', 'This session is unavailable. Sign in again.') from None
+            except StaleContext:
+                raise failure(409, 'stale_context', 'Access changed. Please retry.') from None
+            except PolicyUnavailable:
+                raise failure(503, 'policy_unavailable', 'Document access is temporarily unavailable.') from None
+            except AccessError:
+                raise failure(403, 'scope_denied', 'Run is unavailable in this current scope.') from None
+            except AuthError:
+                raise
+            except Exception as exc:
+                log.warning('Run metadata failed: %s', type(exc).__name__)
+                raise failure(502, 'query_failed', 'Run metadata is unavailable.') from None
+            return JSONResponse(content=metadata.model_dump(mode='json'), headers={'Cache-Control': 'no-store'})
+
     if (settings.frontend_dist / 'assets').is_dir():
         app.mount('/assets', StaticFiles(directory=settings.frontend_dist / 'assets'), name='assets')
 

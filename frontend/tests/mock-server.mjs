@@ -12,7 +12,7 @@ function reset() {
     if (!pending.response.writableEnded) pending.response.end();
   }
   state = { counter: 0, sessions: new Map(), pending: [], queries: [], meCalls: 0,
-    delayNext: 0, logoutFailure: false, queryFailure: null, enabled: true };
+    delayNext: 0, logoutFailure: false, queryFailure: null, enabled: true, responseKind: "passage" };
 }
 reset();
 const users = {
@@ -62,6 +62,53 @@ function answer(login, request) {
     trace: { run_id: `ui-query-${state.counter}`, total_latency_ms: 1, usage,
       stop_reason: request.mode === "baseline" ? "single_pass" : "sufficient", steps: [{ round_number: 1,
         query: request.question, tool: "text_search", source_types: [], evidence_ids: [citation], elapsed_ms: 1, usage }] } };
+}
+
+function nativeAnswer(login, request) {
+  const response = answer(login, request), snapshot = response.snapshot;
+  const scope = { scope_id: `test-scope-${login}`, user_id: users[login].user_id, snapshot,
+    policy_revision: 1, session_version: 0 };
+  const feed = "d".repeat(64), recordId = `${login}-record`;
+  const record = (doc, key) => ({ kind: "record", scope, citation_id: `jira-record:${feed}:${doc}`,
+    record_id: doc, doc_id: doc, revision_id: "c".repeat(64), native_key: key,
+    status: "In Progress", priority: null, project_id: null,
+    source: { feed_id: feed, repository: "https://example.invalid/synthetic-jira.git", git_commit: "e".repeat(40),
+      git_blob: "f".repeat(40), path: `generated_data/sources/jira/test/${doc}.json`,
+      raw_sha256: "9".repeat(64), parser_version: "synthetic-browser-fixture" },
+    field_provenance: [{ field: "native_key", json_pointer: "/key", state: "verified" },
+      { field: "status", json_pointer: "/status", state: "verified" },
+      { field: "priority", json_pointer: "/priority", state: "invalid" },
+      { field: "project_id", json_pointer: "/project", state: "missing" }] });
+  const native = record(recordId, `${login.toUpperCase()}-NATIVE-101`);
+  const aggregate = { kind: "aggregate", citation_id: `aggregate:test-${login}-${state.counter}`,
+    artifact_id: `test-${login}-${state.counter}`, scope, template_id: "jira-canonical-record-count", template_version: "1",
+    filters: [{ field: "status", value: state.responseKind === "count" ? "Exact absent status" : "In Progress" }],
+    operation: "count", count: state.responseKind === "count" ? 0 : 2, lineage_sha256: "8".repeat(64),
+    coverage: "verified_records", created_at: "2026-11-04T12:00:00Z" };
+  const ambiguous = state.responseKind === "ambiguous", unknown = state.responseKind === "unknown";
+  response.sources = state.responseKind === "count" ? [aggregate]
+    : state.responseKind === "record" ? [native]
+    : ambiguous ? [record(`${recordId}-one`, "DUP-100"), record(`${recordId}-two`, "DUP-100")]
+    : unknown ? [] : [response.sources[0], native, aggregate];
+  response.contract_version = response.sources.some((value) => value.kind === "record") ? "3" : "2";
+  response.answer = { status: ambiguous || unknown ? "insufficient_evidence" : "answered",
+    text: ambiguous ? "This Jira key matches multiple permitted source records. Choose a canonical record ID."
+      : unknown ? "Verified field coverage is unavailable for this permitted scope."
+      : state.responseKind === "count" ? "0 matching canonical Jira source records in your permitted scope."
+      : "Results from permitted sources.",
+    citation_ids: response.sources.map((value) => value.citation_id) };
+  response.answer.text += response.answer.citation_ids.map((id) => ` [${id}]`).join("");
+  response.trace.stop_reason = ambiguous ? "clarification" : unknown ? "no_new_evidence" : "single_pass";
+  const nativeStep = { round_number: 1, tool: "jira", source_types: ["jira"],
+    evidence_ids: response.sources.filter((value) => value.kind !== "passage").map((value) => value.citation_id),
+    elapsed_ms: 1, usage: response.trace.usage,
+    query: JSON.stringify({ request: { source_type: "jira", operation: state.responseKind === "count" ? "count" : "lookup",
+      filters: ambiguous ? { native_key: "DUP-100" } : state.responseKind === "count" ? { status: "Exact absent status" } : { doc_id: recordId }, limit: 10 },
+      result: { count: state.responseKind === "count" ? 0 : null, coverage: unknown ? "unknown" : "verified_records",
+        limitation: "Counts canonical Jira source records in this pinned benchmark; native keys may repeat.",
+        ambiguous, truncated: ambiguous } }) };
+  response.trace.steps = state.responseKind === "mixed" ? [response.trace.steps[0], nativeStep] : [nativeStep];
+  return response;
 }
 
 async function api(request, response) {
@@ -131,7 +178,7 @@ async function api(request, response) {
     const value = await body(request), id = ++state.counter;
     state.queries.push({ id, login: current.login, question: value.question, mode: value.mode });
     if (state.queryFailure) return failure(response, 503, "policy_unavailable", "Synthetic test search is unavailable.");
-    const payload = answer(current.login, value);
+    const payload = state.responseKind === "passage" ? answer(current.login, value) : nativeAnswer(current.login, value);
     if (state.delayNext > 0) {
       state.delayNext--;
       state.pending.push({ id, login: current.login, response, payload });
