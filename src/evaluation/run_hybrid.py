@@ -6,6 +6,7 @@ variants differ only in fusion weights and reranking. Use --device cuda for GPU 
 """
 
 import argparse
+from dataclasses import replace
 import json
 import re
 import time
@@ -237,6 +238,7 @@ def main():
                     context = runner.context()
                     labels = runner.labels(question, context)
                     prepared = runner.prepare(context, question['question'], depth=depth)
+                    prepared = replace(prepared, seconds=time.perf_counter() - began)
                 except Exception as failure:
                     error = failure
                 setup_seconds = time.perf_counter() - began
