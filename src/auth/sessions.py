@@ -28,6 +28,7 @@ from src.auth.accounts import AccountError, PasswordHasher, normalize_login, pas
 from src.auth.contracts import CsrfResponse, CurrentUser, SessionResponse
 from src.auth.settings import AuthSettings
 from src.db import schema
+from src.db.clock import session_time
 from src.db.runtime import Database, DatabaseRoleError
 
 _TOKEN = re.compile(r"[A-Za-z0-9_-]{43}\Z")
@@ -120,7 +121,8 @@ class AuthService:
         self.settings = AuthSettings.model_validate(settings.model_dump(warnings=False))
         if not self.settings.enabled:
             raise ValueError("Local authentication must be explicitly enabled")
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self._default_clock = lambda: datetime.now(timezone.utc)
+        self.clock = self._default_clock if clock is None else clock
         self.hasher = hasher or PasswordHasher()
         self._dummy_hash = self.hasher.hash(secrets.token_urlsafe(32))
         self._csrf_secret = secrets.token_bytes(32) if csrf_secret is None else csrf_secret
@@ -133,6 +135,14 @@ class AuthService:
         if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
             raise ValueError("Authentication clock must return an aware datetime")
         return now.astimezone(timezone.utc)
+
+    def _session_clock(self):
+        # Explicit constructor clocks and later trusted .clock overrides retain
+        # the existing test seam. Default host time is only bootstrap/throttle.
+        return None if self.clock is self._default_clock else self.clock
+
+    def _session_now(self, connection):
+        return session_time(connection, clock=self._session_clock())
 
     @contextmanager
     def _transaction(self):
@@ -185,24 +195,25 @@ class AuthService:
             raise _unavailable() from None
         if not verified or observed is None or not observed["is_active"] or observed["account_kind"] != "human":
             raise _invalid_credentials()
-        raw, session_id, now = secrets.token_urlsafe(32), uuid4().hex, self._now()
+        raw, session_id = secrets.token_urlsafe(32), uuid4().hex
         csrf = _csrf(raw)
-        expires = now + timedelta(seconds=self.settings.idle_seconds)
         users, sessions = schema.users, schema.sessions
-        values = {"session_id": session_id, "token_hash": _digest(raw), "csrf_hash": _digest(csrf),
-                  "created_at": now, "expires_at": expires}
-        columns = tuple(values) + ("user_id", "session_version")
-        selection = sa.select(*(sa.literal(value) for value in values.values()), users.c.user_id, users.c.session_version).where(
-            users.c.user_id == observed["user_id"], users.c.is_active.is_(True), users.c.account_kind == "human",
-            users.c.session_version == observed["session_version"], users.c.password_hash == observed["password_hash"])
         with self._transaction() as connection:
+            now = self._session_now(connection)
+            values = {"session_id": session_id, "token_hash": _digest(raw), "csrf_hash": _digest(csrf),
+                      "created_at": now, "expires_at": now + timedelta(seconds=self.settings.idle_seconds)}
+            columns = tuple(values) + ("user_id", "session_version")
+            selection = sa.select(*(sa.literal(value) for value in values.values()), users.c.user_id, users.c.session_version).where(
+                users.c.user_id == observed["user_id"], users.c.is_active.is_(True), users.c.account_kind == "human",
+                users.c.session_version == observed["session_version"], users.c.password_hash == observed["password_hash"])
             inserted = connection.execute(sessions.insert().from_select(columns, selection).returning(sessions.c.session_id)).scalar_one_or_none()
             if inserted is None:
                 raise _invalid_credentials()
             previous_token = previous_token.get_secret_value() if isinstance(previous_token, SecretStr) else previous_token
             if isinstance(previous_token, str) and _TOKEN.fullmatch(previous_token):
                 connection.execute(sessions.update().where(sessions.c.token_hash == _digest(previous_token),
-                    sessions.c.revoked_at.is_(None)).values(revoked_at=now))
+                    sessions.c.revoked_at.is_(None)).values(
+                        revoked_at=sa.func.greatest(now, sessions.c.created_at)))
         try:
             authenticated = self.authenticate(raw, touch=False)
         except AuthError as error:
@@ -241,7 +252,7 @@ class AuthService:
         sessions, users = schema.sessions, schema.users
         with self._transaction() as connection:
             row = self._session(connection, raw)
-            now = self._now()
+            now = self._session_now(connection)
             self._valid(row, now, raw)
             expires = row["expires_at"]
             if touch:
@@ -250,8 +261,11 @@ class AuthService:
                 account_current = sa.exists(sa.select(users.c.user_id).where(users.c.user_id == row["user_id"],
                     users.c.is_active.is_(True), users.c.account_kind == "human", users.c.session_version == row["issued_version"],
                     users.c.password_hash == row["password_hash"]))
+                # A delayed UPDATE must not revive a session that expired after
+                # the Python check. Explicit simulated clocks keep their domain.
+                current = sa.func.clock_timestamp() if self._session_clock() is None else now
                 changed = connection.execute(sessions.update().where(sessions.c.session_id == row["session_id"],
-                    sessions.c.revoked_at.is_(None), sessions.c.expires_at > now, account_current)
+                    sessions.c.revoked_at.is_(None), sessions.c.expires_at > current, account_current)
                     .values(expires_at=expires).returning(sessions.c.session_id)).scalar_one_or_none()
                 if changed is None:
                     raise _expired()
@@ -264,19 +278,19 @@ class AuthService:
                 department=public.department, project_ids=public.project_ids, group_ids=groups)
             # Recheck after membership I/O before releasing the authenticated DTO.
             self._account(connection, row)
-            self._valid({**row, "expires_at": expires}, self._now(), raw)
+            self._valid({**row, "expires_at": expires}, self._session_now(connection), raw)
         return AuthenticatedSession(identity, SessionResponse(user=public, expires_at=expires, csrf_token=_csrf(raw)))
 
     def logout(self, token, csrf_token) -> None:
         raw = self._raw_token(token)
         with self._transaction() as connection:
             row = self._session(connection, raw)
-            now = self._now()
+            now = self._session_now(connection)
             self._valid(row, now, raw)
             if not isinstance(csrf_token, str) or not _TOKEN.fullmatch(csrf_token) or not hmac.compare_digest(row["csrf_hash"], _digest(csrf_token)):
                 raise AuthError("csrf_failed", 403, "Refresh your session and try again.")
             self._account(connection, row)
-            now = self._now()
+            now = self._session_now(connection)
             self._valid(row, now, raw)
             connection.execute(schema.sessions.update().where(schema.sessions.c.session_id == row["session_id"],
                 schema.sessions.c.revoked_at.is_(None)).values(revoked_at=now))
