@@ -114,9 +114,25 @@ def _file_cache_hint(descriptor, offset=0, length=0):
             pass
 
 
-def _normalized_block(stored, start, stop):
-    """One bounded, private C float32 copy; preserve FAISS zero-row behavior."""
-    vectors = np.array(stored[start:stop], dtype=np.float32, order="C", copy=True)
+def _normalized_block(stored, start, stop, *, out=None):
+    """Refill a private C float32 block, preserving FAISS zero-row behavior.
+
+    The three-argument reference path owns its copy. A query-local workspace
+    may be supplied as out; only its active prefix is used and every call
+    overwrites that prefix from stored values before validation/normalization.
+    """
+    if out is None:
+        vectors = np.array(stored[start:stop], dtype=np.float32, order="C", copy=True)
+    else:
+        rows = stop - start
+        if (type(out) is not np.ndarray or out.dtype != np.dtype("float32")
+                or out.ndim != 2 or rows < 0 or out.shape[0] < rows
+                or out.shape[1] != stored.shape[1]
+                or not out.flags.c_contiguous or not out.flags.writeable
+                or np.shares_memory(out, stored)):
+            raise ValueError("Dense workspace must be a private writable C float32 matrix")
+        vectors = out[:rows]
+        np.copyto(vectors, stored[start:stop], casting="unsafe")
     if not np.isfinite(vectors).all():
         raise ValueError("Dense embeddings contain non-finite values")
     faiss.normalize_L2(vectors)
@@ -379,17 +395,21 @@ class ShardedDense:
         best = np.full(count, -np.inf, dtype=np.float32)
         starts_best = np.full(count, np.iinfo(np.int64).max, dtype=np.int64)
         ends_best = np.full(count, np.iinfo(np.int64).max, dtype=np.int64)
+        workspace = None
         for shard in self._shards:
             with closing(self._blocks(shard)) as blocks:
                 for stored, start, stop, docs, starts, ends in blocks:
                     eligible = None if mask is None else mask[docs]
                     if eligible is not None and not eligible.any():
                         continue
+                    if workspace is None:
+                        capacity = min(self.block_rows, max(item.rows for item in self._shards))
+                        workspace = np.empty((capacity, self.dimension), dtype=np.float32, order="C")
                     if eligible is None or eligible.all():
-                        vectors = _normalized_block(stored, start, stop)
+                        vectors = _normalized_block(stored, start, stop, out=workspace)
                     else:
                         selected = stored[start:stop][eligible]
-                        vectors = _normalized_block(selected, 0, len(selected))
+                        vectors = _normalized_block(selected, 0, len(selected), out=workspace)
                         del selected
                         docs, starts, ends = docs[eligible], starts[eligible], ends[eligible]
                     scores = vectors @ vector

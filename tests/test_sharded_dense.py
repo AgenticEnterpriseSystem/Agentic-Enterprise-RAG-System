@@ -5,6 +5,7 @@ without loading a model, canonical corpus bodies, or any full-size artifact.
 """
 
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import heapq
 import json
@@ -12,6 +13,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from threading import Barrier, Lock, get_ident
 from types import SimpleNamespace
 import weakref
 
@@ -518,11 +520,13 @@ def test_normalized_copies_are_bounded_private_and_mmaps_do_not_escape_operation
         maximum_open = max(maximum_open, sum(not item.closed for item in mappings))
         return result
 
-    def watched_normalize(stored, start, stop):
-        result = real_normalize(stored, start, stop)
+    def watched_normalize(stored, start, stop, *, out=None):
+        result = real_normalize(stored, start, stop, out=out)
         assert 0 < stop - start <= 2
         assert result.dtype == np.float32 and result.flags.c_contiguous and result.flags.writeable
-        assert result.flags.owndata and result.nbytes <= 2 * 3 * np.dtype(np.float32).itemsize
+        assert result.nbytes <= 2 * 3 * np.dtype(np.float32).itemsize
+        assert out is not None and out.flags.owndata and np.shares_memory(result, out)
+        assert not np.shares_memory(result, stored)
         blocks.append(weakref.ref(result))
         dimensions.append(result.shape)
         return result
@@ -551,7 +555,7 @@ def test_normalizer_failure_closes_mmaps_while_traceback_is_still_retained(tmp_p
         mappings.append(result._mmap)
         return result
 
-    def failing_normalizer(*_args):
+    def failing_normalizer(*_args, **_kwargs):
         raise RuntimeError("injected normalization failure")
 
     monkeypatch.setattr(module.np, "load", watched_load)
@@ -560,6 +564,147 @@ def test_normalizer_failure_closes_mmaps_while_traceback_is_still_retained(tmp_p
         backend.rank_vector([1, 0, 0], 4)
     assert retained.value.__traceback__ is not None
     assert mappings and all(mapping.closed for mapping in mappings)
+
+
+@pytest.mark.parametrize("dtype", [np.float16, np.float32])
+def test_workspace_active_prefix_is_freshly_refilled_and_matches_three_argument_reference(dtype):
+    from src.retrieval.sharded_dense import _normalized_block
+    tiny = np.nextafter(dtype(0), dtype(1), dtype=dtype)
+    stored = np.array([[0, -0.0, 0], [tiny, -tiny, tiny], [1, -2, 3], [4, 5, -6]], dtype=dtype)
+    original = stored.copy()
+    workspace = np.full((4, 3), np.nan, dtype=np.float32)
+    for start, stop in ((0, 3), (2, 4), (0, 1), (0, 4)):
+        expected = _normalized_block(stored, start, stop)
+        assert expected.flags.owndata and not np.shares_memory(expected, stored)
+        # Poison old normalized values: the next result must come from stored.
+        workspace.fill(93)
+        result = _normalized_block(stored, start, stop, out=workspace)
+        assert result.shape == (stop-start, 3)
+        assert np.shares_memory(result, workspace) and not np.shares_memory(result, stored)
+        np.testing.assert_array_equal(result.view(np.uint32), expected.view(np.uint32))
+        np.testing.assert_array_equal(workspace[stop-start:], np.full((4-(stop-start), 3), 93, dtype=np.float32))
+        del result
+    np.testing.assert_array_equal(stored.view(np.uint16 if dtype == np.float16 else np.uint32),
+                                  original.view(np.uint16 if dtype == np.float16 else np.uint32))
+
+
+@pytest.mark.parametrize("bad", ["dtype", "fortran", "readonly", "rows", "columns", "alias", "list"])
+def test_normalizer_rejects_unsafe_or_incompatible_workspace(bad):
+    from src.retrieval.sharded_dense import _normalized_block
+    source = np.ones((3, 3), dtype=np.float32)
+    out = np.empty((3, 3), dtype=np.float32)
+    if bad == "dtype": out = out.astype(np.float64)
+    elif bad == "fortran": out = np.asfortranarray(out)
+    elif bad == "readonly": out.flags.writeable = False
+    elif bad == "rows": out = out[:1]
+    elif bad == "columns": out = np.empty((3, 2), dtype=np.float32)
+    elif bad == "alias": out = source
+    elif bad == "list": out = out.tolist()
+    with pytest.raises(ValueError, match="workspace"):
+        _normalized_block(source, 0, 3, out=out)
+    np.testing.assert_array_equal(source, np.ones((3, 3), dtype=np.float32))
+
+
+@pytest.mark.parametrize("dtype", [np.float16, np.float32])
+@pytest.mark.parametrize("nonfinite", [np.nan, np.inf, -np.inf])
+def test_workspace_keeps_pre_normalization_finite_validation(dtype, nonfinite, monkeypatch):
+    import src.retrieval.sharded_dense as module
+    source = np.array([[1, nonfinite, 0]], dtype=dtype)
+    monkeypatch.setattr(module.faiss, "normalize_L2", lambda *_: pytest.fail("Invalid input reached FAISS"))
+    with pytest.raises(ValueError, match="embeddings contain non-finite"):
+        module._normalized_block(source, 0, 1, out=np.empty((2, 3), dtype=np.float32))
+
+
+def test_workspace_keeps_post_normalization_finite_validation(monkeypatch):
+    import src.retrieval.sharded_dense as module
+    source = np.ones((2, 3), dtype=np.float32)
+    def corrupted_normalize(values):
+        values[1, 1] = np.nan
+    monkeypatch.setattr(module.faiss, "normalize_L2", corrupted_normalize)
+    with pytest.raises(ValueError, match="normalization produced non-finite"):
+        module._normalized_block(source, 0, 2, out=np.empty((2, 3), dtype=np.float32))
+    np.testing.assert_array_equal(source, np.ones((2, 3), dtype=np.float32))
+
+
+@pytest.mark.parametrize("dtype", [np.float16, np.float32])
+def test_one_lazy_bounded_workspace_per_query_full_narrow_empty_and_partial_blocks(tmp_path, monkeypatch, dtype):
+    import src.retrieval.sharded_dense as module
+    data, allocations, used = artifact(tmp_path, dtype=dtype), [], []
+    backend = load(data)
+    original_empty, original_normalize = module.np.empty, module._normalized_block
+    def empty(shape, *args, **kwargs):
+        result = original_empty(shape, *args, **kwargs)
+        if result.dtype == np.float32 and result.shape == (backend.block_rows, backend.dimension):
+            allocations.append(weakref.ref(result))
+            capacity = min(backend.block_rows, max(len(shard) for shard in data.vectors))
+            assert result.nbytes <= capacity * backend.dimension * 4
+        return result
+    def normalized(stored, start, stop, *, out=None):
+        used.append((weakref.ref(out), stop-start))
+        return original_normalize(stored, start, stop, out=out)
+    monkeypatch.setattr(module.np, "empty", empty)
+    monkeypatch.setattr(module, "_normalized_block", normalized)
+    assert backend.candidates_vector([1, 0, 0], 4, scope=scope(data, ())) == ()
+    assert backend.rank_vector([1, 0, 0], 4, mask=[False]*4) == []
+    assert allocations == used == []
+    for allowed in (set(data.doc_ids), {"alpha"}, {"zeta", "middle"}):
+        before = len(allocations)
+        hits = backend.candidates_vector([1, 0, 0], 4, scope=scope(data, allowed))
+        assert len(allocations) == before + 1
+        expected = reference(data, [1, 0, 0], 4, [doc in allowed for doc in data.doc_ids])
+        assert [(item.doc_id, item.start_char, item.end_char) for item in hits] == [(doc, start, end) for doc, _, start, end in expected]
+        np.testing.assert_allclose([item.score for item in hits], [score for _, score, _, _ in expected], atol=2e-6, rtol=2e-6)
+        assert all(reference() is None for reference in allocations)
+    assert {rows for _, rows in used} == {1, 2}
+    assert all(reference() is None for reference, _ in used)
+
+
+def test_workspace_capacity_is_capped_by_actual_shards_before_large_configured_allocation(tmp_path, monkeypatch):
+    import src.retrieval.sharded_dense as module
+    data = artifact(tmp_path, block_rows=10**9)
+    backend = load(data)
+    expected = reference(data, [1, 0, 0], 4)
+    original, allocations = module.np.empty, []
+    def bounded_empty(shape, *args, **kwargs):
+        if kwargs.get("dtype") is np.float32 and isinstance(shape, tuple) and len(shape) == 2:
+            # Check before allocation: the old uncapped request must fail this
+            # assertion rather than actually attempting a multi-GiB buffer.
+            assert shape == (max(len(shard) for shard in data.vectors), backend.dimension)
+            allocations.append(shape)
+        return original(shape, *args, **kwargs)
+    monkeypatch.setattr(module.np, "empty", bounded_empty)
+    hits = backend.candidates_vector([1, 0, 0], 4, scope=scope(data))
+    assert allocations == [(4, 3)]
+    assert [(item.doc_id, item.start_char, item.end_char) for item in hits] == [(doc, start, end) for doc, _, start, end in expected]
+    np.testing.assert_allclose([item.score for item in hits], [score for _, score, _, _ in expected], atol=2e-6, rtol=2e-6)
+
+
+def test_concurrent_queries_never_share_workspace(tmp_path, monkeypatch):
+    import src.retrieval.sharded_dense as module
+    data = artifact(tmp_path)
+    backend, barrier, lock = load(data), Barrier(2), Lock()
+    workspaces = {}
+    original = module._normalized_block
+    def normalized(stored, start, stop, *, out=None):
+        first = False
+        with lock:
+            if get_ident() not in workspaces:
+                workspaces[get_ident()] = out
+                first = True
+        if first:
+            barrier.wait(timeout=5)
+        return original(stored, start, stop, out=out)
+    monkeypatch.setattr(module, "_normalized_block", normalized)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(backend.rank_vector, query, 4) for query in ([1, 0, 0], [0, 1, 0])]
+        results = [future.result(timeout=10) for future in futures]
+    assert len(workspaces) == 2
+    left, right = workspaces.values()
+    assert left is not right and not np.shares_memory(left, right)
+    for query, actual in zip(([1, 0, 0], [0, 1, 0]), results):
+        expected = reference(data, query, 4)
+        assert [doc for doc, _ in actual] == [doc for doc, _, _, _ in expected]
+        np.testing.assert_allclose([score for _, score in actual], [score for _, score, _, _ in expected], atol=2e-6, rtol=2e-6)
 
 
 @pytest.mark.parametrize("bad", [None, True, False, 0, "", "Retain", "retain ", "auto", [], {}])
@@ -650,7 +795,7 @@ def test_cache_policy_never_retains_owned_descriptors_or_mappings(tmp_path, monk
         stream.close()
         assert retained[0]._mmap.closed
     elif ending == "error":
-        def fail(*_args):
+        def fail(*_args, **_kwargs):
             raise RuntimeError("retained normalization traceback")
         monkeypatch.setattr(module, "_normalized_block", fail)
         with pytest.raises(RuntimeError, match="retained normalization") as retained_error:
