@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
+from itertools import chain, islice
 import json
 from types import MappingProxyType
 from threading import Lock
@@ -32,6 +33,8 @@ from src.storage.contracts import CatalogEntry
 from src.storage.fingerprints import ValidatedCatalog, catalog_fingerprint
 
 _CATALOG_FIELDS = tuple(CatalogEntry.model_fields)
+# Shared immutable byte decoder, not a per-principal expanded mask cache.
+_BYTE_BOOLEAN_BITS = tuple(tuple(bool(value & (1 << bit)) for bit in range(8)) for value in range(256))
 _GRANT_POSITIONS_SQL = """
 WITH effective_groups AS MATERIALIZED (
  SELECT membership.group_id
@@ -109,6 +112,12 @@ class BitmapScope:
         if (not isinstance(snapshot, SnapshotRef)
                 or SnapshotRef.model_validate(snapshot.model_dump(warnings=False)) != self.binding.snapshot):
             raise SnapshotMismatch("Permission mask belongs to another snapshot")
+        if type(self) is BitmapScope and doc_ids is self._catalog.doc_ids:
+            # The resolver's immutable catalogue already fixes bit positions.
+            # Preserve LSB order, real bool elements and the existing tuple API;
+            # arbitrary ID collections and subclasses keep permits semantics.
+            decoded = chain.from_iterable(_BYTE_BOOLEAN_BITS[value] for value in self.bitmap)
+            return tuple(islice(decoded, self.binding.snapshot.document_count))
         return tuple(self.permits(doc_id) for doc_id in doc_ids)
 
 

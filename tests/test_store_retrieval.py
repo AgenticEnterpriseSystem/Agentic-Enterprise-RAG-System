@@ -24,7 +24,7 @@ from src.retrieval.passages import bounded_passage
 from src.retrieval.reranker import CrossEncoderReranker
 from src.retrieval.sharded_dense import ShardedDense
 from src.retrieval.store import (
-    StoreBM25Retriever, StoreDenseRetriever, StoreHybridRetriever, reciprocal_rank_candidates,
+    StoreBM25Retriever, StoreDenseRetriever, StoreHybridRetriever, _StoreReader, reciprocal_rank_candidates,
 )
 from src.storage.contracts import CatalogEntry, RankedCandidate, ReadFilters
 from src.storage.fingerprints import ValidatedCatalog, canonical_revision_id, catalog_fingerprint
@@ -709,6 +709,146 @@ def test_shared_proof_preserves_exact_hybrid_windows_filters_guards_and_model_ca
         counts.append(guard.calls)
     assert results[0] == results[1] and expansions[0] == expansions[1]
     assert counts[0] == counts[1]
+
+
+@pytest.mark.parametrize('allowed', [None, (), ('empty', 'current'), ('future', 'unknown')])
+@pytest.mark.parametrize('filters', [ReadFilters(), ReadFilters(source_types=('jira',)),
+    ReadFilters(source_types=('slack',)), ReadFilters(after=NOW), ReadFilters(before=NOW),
+    ReadFilters(after=NOW, before=NOW), ReadFilters(source_types=('jira',), after=NOW)])
+def test_issued_catalogue_masks_equal_independent_old_loop_for_all_scope_and_date_cases(allowed, filters):
+    store = fixture_store({'empty': '', 'current': 'needle current', 'future': 'needle future', 'unknown': 'needle unknown'},
+        sources={'future': 'slack'}, timestamps={'empty': NOW, 'current': NOW, 'future': NOW + timedelta(days=1)})
+    handle = ValidatedCatalog.build(store.snapshot(), entries(store), issuer=store)
+    reader, request, guard = _StoreReader(store, handle), context(store, allowed), Guard()
+    # Independent former algorithm: authority from permits, then the original
+    # per-entry source/date/unknown-time predicate and empty-body exclusion.
+    expected = np.array([request.scope.permits(entry.doc_id) for entry in handle.entries], dtype=bool)
+    for position in np.flatnonzero(expected):
+        entry = handle.entries[position]
+        if not filters.matches(entry) or not entry.text_length:
+            expected[position] = False
+    received = reader._mask(request, guard, filters)
+    np.testing.assert_array_equal(received, expected)
+    assert received.dtype == np.dtype(bool) and received.shape == (4,)
+    assert guard.calls == 2 and store.body_reads == []
+
+
+def test_empty_filter_fast_path_uses_one_immutable_metadata_mask_and_fresh_isolated_authority(monkeypatch):
+    store = fixture_store({'empty': '', 'alpha': 'needle alpha', 'beta': 'needle beta'})
+    handle = ValidatedCatalog.build(store.snapshot(), entries(store), issuer=store)
+    reader = _StoreReader(store, handle)
+    original = context(store)
+    live = np.array([True, True, False], dtype=bool)
+
+    class Scope:
+        binding = original.binding
+        calls = 0
+        def permits(self, doc): return bool(live[handle.positions[doc]])
+        def mask_for(self, _snapshot, _ids):
+            self.calls += 1
+            return live
+
+    scope = Scope()
+    request = context(store, scope=scope)
+    cached = reader._nonempty_text_mask
+    assert cached is not None and not cached.flags.writeable
+    with pytest.raises(ValueError):
+        cached.setflags(write=True)
+    monkeypatch.setattr(ReadFilters, 'matches', lambda *_: pytest.fail('No-filter issued path walked per-entry predicates'))
+    first = reader._mask(request, Guard(), ReadFilters())
+    np.testing.assert_array_equal(first, [False, True, False])
+    assert not np.shares_memory(first, live) and not np.shares_memory(first, cached)
+    first[:] = False
+    np.testing.assert_array_equal(live, [True, True, False])
+    live[:] = [False, False, True]
+    second = reader._mask(request, Guard(), ReadFilters())
+    np.testing.assert_array_equal(second, [False, False, True])
+    assert scope.calls == 2 and reader._nonempty_text_mask is cached
+    np.testing.assert_array_equal(cached, [False, True, True])
+    assert store.body_reads == []
+
+
+def test_generic_catalogue_and_custom_empty_filter_keep_original_predicate_dispatch(monkeypatch):
+    store = fixture_store()
+    ordinary = _StoreReader(store)
+    calls = []
+    monkeypatch.setattr(ReadFilters, 'matches', lambda _filter, entry: calls.append(entry.doc_id) or False)
+    assert not ordinary._mask(context(store), Guard(), ReadFilters()).any()
+    assert calls == list(ordinary.doc_ids) and ordinary._nonempty_text_mask is None
+
+    handle = ValidatedCatalog.build(store.snapshot(), entries(store), issuer=store)
+    issued = _StoreReader(store, handle)
+    custom_calls = []
+
+    class CustomFilters(ReadFilters):
+        def matches(self, entry):
+            custom_calls.append(entry.doc_id)
+            return False
+
+    assert not issued._mask(context(store), Guard(), CustomFilters()).any()
+    assert custom_calls == list(issued.doc_ids)
+
+
+def test_issued_empty_catalogue_preserves_zero_length_boolean_mask_and_guards():
+    snapshot = SnapshotRef(snapshot_id='empty-catalogue', corpus_sha256='a' * 64,
+        catalog_sha256=catalog_fingerprint((), expected_count=0), document_count=0)
+    store = TrackingStore(snapshot, ())
+    handle = ValidatedCatalog.build(snapshot, (), issuer=store)
+    reader, guard = _StoreReader(store, handle), Guard()
+    result = reader._mask(context(store), guard, ReadFilters())
+    assert result.shape == (0,) and result.dtype == np.dtype(bool)
+    assert not reader._nonempty_text_mask.flags.writeable
+    assert guard.calls == 2 and store.body_reads == []
+
+
+def test_issued_scope_with_only_empty_text_denies_before_encoder_ranking_or_body():
+    store = fixture_store({'empty': '', 'other': 'needle body'})
+    handle = ValidatedCatalog.build(store.snapshot(), entries(store), issuer=store)
+    index, encoder = ScriptedDense(store, rows=()), Encoder()
+    index.catalog_handle, index.catalog, index.doc_ids = handle, handle.entries, handle.doc_ids
+    dense = StoreDenseRetriever(index, encoder, store)
+    lexical = StoreBM25Retriever(bm25_index(store), store, catalog=handle)
+    request = context(store, ('empty',))
+    assert dense.search(request, 'needle', guard=Guard()) == ()
+    assert lexical.search(request, 'needle', guard=Guard()) == ()
+    assert encoder.calls == index.calls == store.body_reads == store.spans == []
+
+
+@pytest.mark.parametrize('mask', [[True], [1, 1, 1], [[True, True, True]], ['yes'] * 3])
+def test_issued_fast_path_still_rejects_malformed_scope_masks_before_expensive_work(mask):
+    store = fixture_store()
+    handle = ValidatedCatalog.build(store.snapshot(), entries(store), issuer=store)
+    original = context(store)
+
+    class BadScope:
+        binding = original.binding
+        def permits(self, _doc): return True
+        def mask_for(self, _snapshot, _ids): return mask
+
+    combined, index, encoder = proof_hybrid(store, handle=handle)
+    with pytest.raises(EvidenceValidationError):
+        combined.search(context(store, scope=BadScope()), 'needle', guard=Guard())
+    assert store.body_reads == index.calls == encoder.calls == []
+
+
+@pytest.mark.parametrize('change', ['revoked', 'binding'])
+def test_issued_fast_path_keeps_final_freshness_and_binding_check_before_expensive_work(change):
+    store = fixture_store()
+    handle = ValidatedCatalog.build(store.snapshot(), entries(store), issuer=store)
+    original, guard = context(store), Guard()
+
+    class ChangingScope:
+        binding = original.binding
+        def permits(self, _doc): return True
+        def mask_for(self, _snapshot, ids):
+            if change == 'revoked': guard.revoked = True
+            else: self.binding = self.binding.model_copy(update={'policy_revision': 5})
+            return (True,) * len(ids)
+
+    combined, index, encoder = proof_hybrid(store, handle=handle)
+    with pytest.raises(SessionExpired if change == 'revoked' else StaleContext):
+        combined.search(context(store, scope=ChangingScope()), 'needle', guard=guard)
+    assert store.body_reads == index.calls == encoder.calls == []
 
 
 @pytest.mark.parametrize("kind", ["unissued", "snapshot", "copied-fields"])

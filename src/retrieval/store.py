@@ -119,10 +119,17 @@ class _StoreReader:
             raise EvidenceValidationError("Document store requires a snapshot")
         self.snapshot = SnapshotRef.model_validate(snapshot.model_dump(warnings=False))
         self._catalog_handle = None
+        self._nonempty_text_mask = None
         if isinstance(catalog, ValidatedCatalog):
             proof = ValidatedCatalog.require(catalog, self.snapshot)
             self._catalog_handle = proof
             self.catalog, self.doc_ids, self._positions = proof.entries, proof.doc_ids, proof.positions
+            # Immutable metadata only, computed once. Bytes backing prevents a
+            # caller from making the cached view writable; every live authority
+            # mask below is still acquired, validated and copied per operation.
+            self._nonempty_text_mask = np.frombuffer(
+                bytes(entry.text_length > 0 for entry in proof.entries), dtype=bool)
+            self._nonempty_text_mask.setflags(write=False)
             return
         if catalog is None:
             catalog = (entry for batch in store.iter_catalog() for entry in batch)
@@ -172,9 +179,13 @@ class _StoreReader:
         if supplied.dtype != np.dtype(bool) or supplied.shape != (len(self.doc_ids),):
             raise EvidenceValidationError("Authorization scope must return one boolean per document")
         mask = supplied.copy()
-        for position in np.flatnonzero(mask):
-            if not filters.matches(self.catalog[position]) or not self.catalog[position].text_length:
-                mask[position] = False
+        if (self._nonempty_text_mask is not None and type(filters) is ReadFilters
+                and not filters.source_types and filters.after is None and filters.before is None):
+            mask &= self._nonempty_text_mask
+        else:
+            for position in np.flatnonzero(mask):
+                if not filters.matches(self.catalog[position]) or not self.catalog[position].text_length:
+                    mask[position] = False
         self._current(context, guard)
         return mask
 
