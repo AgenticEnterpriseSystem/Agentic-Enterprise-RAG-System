@@ -91,6 +91,79 @@ class VerifiedInputs:
         return current
 
 
+@dataclass(frozen=True)
+class ExperimentAdmission:
+    """An expected experiment restricts execution; it never supplies authority.
+
+    Construction performs no I/O or authentication. The runtime must reverify
+    the files and compare these declarations with its own current scope/profile
+    before creating a run or dispatching any provider work.
+    """
+
+    manifest: ExperimentManifest
+    inputs: VerifiedInputs
+    question_id: str
+
+    def __post_init__(self):
+        if not isinstance(self.manifest, ExperimentManifest) or type(self.inputs) is not VerifiedInputs:
+            raise TypeError("Experiment admission requires a manifest and verified inputs")
+        manifest = ExperimentManifest.model_validate(self.manifest.model_dump(warnings=False))
+        if not isinstance(self.question_id, str) or self.question_id not in manifest.question_ids:
+            raise ValueError("Admission question is outside the declared selection")
+        object.__setattr__(self, "manifest", manifest)
+
+
+def _execution_stat(path):
+    """Conservative in-attempt pins; full byte verification remains mandatory."""
+    try:
+        value = path.lstat()
+    except FileNotFoundError:
+        return None
+    return (value.st_dev, value.st_ino, value.st_mode, value.st_size,
+            value.st_mtime_ns, value.st_ctime_ns)
+
+
+def _experiment_input_pins(files, source_files=()):
+    """Snapshot existing scientific inputs/source provenance without body reads.
+
+    Rechecking these exact paths at dispatch is cheap even for a full corpus.
+    Source parent directories detect additions/replacements, and Git identity
+    files detect a changed HEAD/index without running Git at every SDK boundary.
+    These pins complement admission/export hashing; they are not file locks.
+    """
+    paths = {getattr(files, item.name) for item in fields(files)
+             if item.name != "source_repo" and getattr(files, item.name) is not None}
+    paths.update(files.source_repo / relative for relative in source_files)
+    root = Path(os.fsdecode(_git(files.source_repo, "rev-parse", "--show-toplevel").rstrip(b"\n"))).resolve()
+    names = _git(root, "ls-files", "--cached", "--others", "--exclude-standard", "-z").split(b"\0")
+    paths.add(root)
+    for name in names:
+        if not name:
+            continue
+        path = root / os.fsdecode(name)
+        paths.add(path)
+        for parent in path.parents:
+            paths.add(parent)
+            if parent == root:
+                break
+    git = Path(os.fsdecode(_git(root, "rev-parse", "--absolute-git-dir").rstrip(b"\n")))
+    common = Path(os.fsdecode(_git(root, "rev-parse", "--git-common-dir").rstrip(b"\n")))
+    common = common if common.is_absolute() else root / common
+    paths.update((root / ".git", git / "HEAD", git / "index", common / "packed-refs"))
+    head = (git / "HEAD").read_text().strip()
+    if head.startswith("ref: "):
+        reference = Path(head[5:])
+        if reference.is_absolute() or ".." in reference.parts or not str(reference).startswith("refs/"):
+            raise ValueError("Invalid source reference")
+        paths.add(common / reference)
+        paths.add((common / reference).parent)
+    # Git records a tracked symlink's link text, but runtime source attestation
+    # reads its effective bytes. Freeze both the logical path and resolved leaf
+    # so an external target edit cannot defer rejection until after spending.
+    paths.update(path.resolve() for path in tuple(paths))
+    return {path: _execution_stat(path) for path in paths}
+
+
 def _json_value(value: object) -> None:
     if value is None or type(value) in {str, bool, int}:
         return

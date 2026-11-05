@@ -434,6 +434,63 @@ class _RunJira:
         return result
 
 
+class _ExperimentGuard:
+    """Additional expected-input restrictions around existing live authority."""
+
+    def __init__(self, runtime, body, context, admission, profile, source_files):
+        from src.evaluation.experiment_inputs import _experiment_input_pins
+        self.runtime, self.body, self.binding = runtime, body, context.binding
+        self.resolver = runtime.resolver
+        self.owners = self._owners()
+        self.settings = _canonical(runtime.settings.model_dump(mode='json'))
+        self.provider_config = self._provider_config()
+        self.profile = _canonical(profile)
+        self.pins = _experiment_input_pins(admission.inputs.files, source_files)
+        try:
+            checked = admission.inputs.recheck(admission.manifest)
+            if _experiment_input_pins(checked.files, source_files) != self.pins:
+                raise EvidenceValidationError('Experiment inputs changed during verification')
+            question = next((value for value in checked.questions if value.question_id == admission.question_id), None)
+            if (question is None or body.question != question.question
+                    or body.question != body.question.strip()):
+                raise EvidenceValidationError('Execution question differs from its verified exact text')
+            if admission.manifest.scope != context.binding or admission.manifest.retrieval.snapshot != runtime.snapshot:
+                raise AccessDenied('Experiment scope differs from current authority')
+            runtime._match_experiment_profile(admission.manifest, profile)
+            for relative, expected in source_files.items():
+                path = checked.files.source_repo / relative
+                if not path.is_file() or _sha(path.read_bytes()) != expected:
+                    raise EvidenceValidationError('Experiment source differs from the loaded runtime')
+        except (OSError, ValueError, TypeError) as error:
+            if isinstance(error, (AccessDenied, EvidenceValidationError)):
+                raise
+            raise EvidenceValidationError('Experiment inputs failed current verification') from None
+        self.assert_current(context)
+
+    def _owners(self):
+        runtime = self.runtime
+        return (runtime.provider, runtime.router, runtime.retriever, runtime.database,
+                runtime.resolver, runtime.settings, runtime.jira_tool, runtime.runs)
+
+    def _provider_config(self):
+        provider = self.runtime.provider
+        return _canonical(provider.config.model_dump(mode='json')) if isinstance(provider, AnthropicProvider) else None
+
+    def assert_current(self, context):
+        from src.evaluation.experiment_inputs import _execution_stat
+        if (any(before is not after for before, after in zip(self.owners, self._owners()))
+                or context.binding != self.binding
+                or self.runtime._source_stamps() != self.runtime._loaded_source_pins
+                or self.settings != _canonical(self.runtime.settings.model_dump(mode='json'))
+                or self.provider_config != self._provider_config()
+                or self.profile != _canonical(self.runtime._scientific_profile(self.body))):
+            raise EvidenceValidationError('Prepared experiment runtime changed during execution')
+        if any(_execution_stat(path) != expected for path, expected in self.pins.items()):
+            raise EvidenceValidationError('Prepared experiment inputs changed during execution')
+        self.resolver.assert_current(context)
+        context.assert_bound()
+
+
 class AuthenticatedRuntime:
     """Indexes are shared; identity, scope, bridge and agent belong to one query."""
 
@@ -498,6 +555,8 @@ class AuthenticatedRuntime:
         self._source_types = frozenset(sources)
         if not set(self.settings.allowed_sources) <= self._source_types:
             raise RuntimeConfigurationError('RAG_ALLOWED_SOURCES contains unknown platforms.')
+        self._loaded_source_files = self._source_files()
+        self._loaded_source_pins = self._source_stamps()
 
     def info(self):
         return {'mode': self.settings.mode, 'retrieval': self.settings.retrieval,
@@ -552,7 +611,7 @@ class AuthenticatedRuntime:
     def query(self, body: QueryRequest, identity: ResolvedIdentity):
         return self.query_with_capture(body, identity).response
 
-    def query_with_capture(self, body: QueryRequest, identity: ResolvedIdentity):
+    def _resolve_request(self, body, identity):
         if not isinstance(body, QueryRequest):
             raise AccessDenied('A validated question request is required')
         if not isinstance(identity, ResolvedIdentity):
@@ -579,10 +638,47 @@ class AuthenticatedRuntime:
                 and getattr(self.provider, 'reserved_usd', 0) >= self.settings.budget_usd):
             raise RuntimeErrorResponse(429, 'spending_limit',
                 'The server spending cap has been reached. An operator must review it before more calls.')
+        return body, identity, context, sources
+
+    def _assert_loaded_source(self):
+        if (self._source_stamps() != self._loaded_source_pins
+                or self._source_files() != self._loaded_source_files):
+            raise EvidenceValidationError('Runtime source changed after construction')
+
+    def experiment_profile(self, body: QueryRequest, identity: ResolvedIdentity):
+        """Describe actual current settings/scope without running an agent/model."""
+        body, _identity, context, _sources = self._resolve_request(body, identity)
+        self._assert_loaded_source()
+        profile = self._scientific_profile(body)
+        self.resolver.assert_current(context)
+        context.assert_bound()
+        self._assert_loaded_source()
+        return {**json.loads(_canonical(profile)), 'scope': context.binding.model_dump(mode='json'),
+                'source_files': dict(self._loaded_source_files)}
+
+    def query_with_capture(self, body: QueryRequest, identity: ResolvedIdentity, *, experiment=None):
+        body, identity, context, sources = self._resolve_request(body, identity)
+        guard = self.resolver
+        if experiment is not None:
+            from src.evaluation.experiment_inputs import ExperimentAdmission
+            if type(experiment) is not ExperimentAdmission:
+                raise EvidenceValidationError('A typed experiment admission is required')
+            self._assert_loaded_source()
+            export_profile = self._scientific_profile(body)
+            source_files = dict(self._loaded_source_files)
+            guard = _ExperimentGuard(self, body, context, experiment, export_profile, source_files)
+        else:
+            source_files = self._source_files()
+            try:
+                export_profile = self._scientific_profile(body)
+            except EvidenceValidationError:
+                # Existing ordinary injected routes can still run without
+                # acquiring an invented experiment attestation.
+                export_profile = None
         user = ScopedUserContext.from_context(context)
         request = SearchRequest(query=body.question.strip(), user=user, top_k=self.settings.top_k,
                                 source_types=sources, after=body.after, before=body.before)
-        bridge = _ScopedRetriever(self.retriever, context, self.resolver, request, self._catalog)
+        bridge = _ScopedRetriever(self.retriever, context, guard, request, self._catalog)
         # An explicitly attested route must still describe the behavior admitted
         # now; an entirely unattested injected route remains nonexportable.
         self._router_profile()
@@ -591,16 +687,6 @@ class AuthenticatedRuntime:
         run_id = str(uuid4())
         registry = _RunBoundRegistry(self, context, run_id)
         selected, payload_hash = (), None
-        # Capture code bytes before dispatch; a later operator mapping must bind
-        # to these same runtime modules rather than merely name a Git commit.
-        source_files = self._source_files()
-        try:
-            export_profile = self._scientific_profile(body)
-        except EvidenceValidationError:
-            # Ordinary injected adapters/providers can still execute guarded
-            # queries. They cannot acquire an invented experiment attestation.
-            export_profile = None
-
         def on_input(evidence, payload):
             nonlocal selected, payload_hash
             if not isinstance(payload, dict) or payload.get('question') != request.query:
@@ -613,10 +699,11 @@ class AuthenticatedRuntime:
         config_sha = _sha(_canonical({'settings': self.settings.model_dump(mode='json', exclude={
             'frontend_dist', 'allowed_origins'}), 'request': body.model_dump(mode='json', exclude={'question'}),
             'source_files': source_files, 'effective_profile': export_profile}))
+        guard.assert_current(context)
         self.runs.begin(context, run_id, mode=body.mode, question=request.query, config_sha256=config_sha)
         try:
-            with guarded_dispatch(context, self.resolver, aggregates=registry,
-                    record_validator=lambda records: self.jira_tool.validate_records(context, records, guard=self.resolver)):
+            with guarded_dispatch(context, guard, aggregates=registry,
+                    record_validator=lambda records: self.jira_tool.validate_records(context, records, guard=guard)):
                 generation = GenerationConfig(max_context_chars=self.settings.max_context_chars, retries=0)
                 tools = {'jira': ToolSpec(_RunJira(self, context, run_id, request, registry), 'jira',
                     'Verified native Jira records and exact counts of canonical source records; native keys may repeat.',
@@ -628,9 +715,9 @@ class AuthenticatedRuntime:
                         max_seconds=self.settings.max_seconds,
                         max_cost_usd=self.settings.question_budget_usd if self.settings.mode == 'live' else 0))
                 response = agent.run(request, single_pass=body.mode == 'baseline', context=context,
-                    guard=self.resolver, run_id=run_id, retrieval_only=self.provider is None,
+                    guard=guard, run_id=run_id, retrieval_only=self.provider is None,
                     aggregates=registry, record_validator=lambda records: self.jira_tool.validate_records(
-                        context, records, guard=self.resolver))
+                        context, records, guard=guard))
                 if not isinstance(response, QueryResponse):
                     raise EvidenceValidationError('Runtime returned an invalid response')
                 try:
@@ -653,7 +740,7 @@ class AuthenticatedRuntime:
                     status='clarification' if response.trace.stop_reason == 'clarification' else response.answer.status,
                     usage=response.trace.usage, latency_ms=response.trace.total_latency_ms,
                     finished_at=datetime.now(timezone.utc))
-                self.resolver.assert_current(context)
+                guard.assert_current(context)
                 context.assert_bound()
         except Exception:
             # A failed authority check may make even the pending row invisible.
@@ -663,7 +750,8 @@ class AuthenticatedRuntime:
         capture = object.__new__(RuntimeCapture)
         state = {'runtime': self, 'context': context, 'response': response, 'selected': selected,
             'payload_sha256': payload_hash, 'question': request.query, 'body': body,
-            'registry': registry, 'source_files': source_files, 'profile': export_profile}
+            'registry': registry, 'source_files': source_files, 'profile': export_profile,
+            'experiment_guard': guard if experiment is not None else None}
         with _CAPTURE_LOCK:
             _CAPTURES[capture] = state
         return capture
@@ -680,6 +768,20 @@ class AuthenticatedRuntime:
         # Read only code bytes, never model/index contents or operator secrets.
         return {path.relative_to(ROOT).as_posix(): _sha(path.read_bytes())
                 for path in sorted((ROOT / 'src').rglob('*.py'))}
+
+    @staticmethod
+    def _source_stamps():
+        from src.evaluation.experiment_inputs import _execution_stat
+        return {path.relative_to(ROOT).as_posix(): _execution_stat(path)
+                for path in sorted((ROOT / 'src').rglob('*.py'))}
+
+    @staticmethod
+    def _match_experiment_profile(manifest, profile):
+        declared = manifest.model_dump(mode='json')
+        for key in ('generation_model', 'budgets', 'temperature', 'workflow', 'max_rounds',
+                    'generator_prompt_sha256', 'critic_prompt_sha256', 'router_prompt_sha256', 'retrieval'):
+            if declared[key] != profile[key]:
+                raise EvidenceValidationError('Experiment settings differ from the actual runtime')
 
     def export_profile(self, capture):
         state = self._export_state(capture)
@@ -747,6 +849,9 @@ class AuthenticatedRuntime:
     def _export_state(self, capture):
         state = _capture_state(capture, self)
         context = state['context']
+        self._assert_loaded_source()
+        if state.get('experiment_guard') is not None:
+            state['experiment_guard'].assert_current(context)
         self.resolver.assert_current(context)
         context.assert_bound()
         if self._source_files() != state['source_files']:
