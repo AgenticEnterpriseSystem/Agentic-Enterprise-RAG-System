@@ -40,8 +40,8 @@ latency, backup/restore or model quality. Root performs the full-corpus gate.
 
 The commands target Compose v2.10+ and use `up --wait`, without the newer
 wait-timeout flag. CI has an outer30-minute job timeout; local_stack bounds its
-application startup wait separately. Actual root-executed version compatibility
-remains part of the unaccepted OPS gate until that smoke completes.
+application startup wait separately. Run the actual service sequence against
+the installed Compose version when verifying deployment compatibility.
 
 ## Real-account security acceptance
 

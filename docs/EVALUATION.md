@@ -460,3 +460,117 @@ duplicate/missing IDs or different question text reject. Outputs are
 The optional legacy evaluator adapter accepts passage-only successful outcomes
 with an available reference; aggregates/failures/clarifications retain the native
 handoff instead. A valid export and a paired configuration are not quality scores.
+
+## Matched fixed BM25, dense, and hybrid runs
+
+`python -m src.evaluation.run_fixed` supplies the producer CLI for three fixed
+arms. `draft` and `--help` do not import a database driver, model stack, provider
+SDK, or dotenv loader. A draft selects only question IDs/text from the frozen
+split and reports an unverified scope; it creates no runtime manifest, account,
+grant, session, or generated answer. `preflight` authenticates against the actual
+database, loads one shared bounded hybrid pair/encoder/catalog, and prepares
+actual BM25, dense, and hybrid manifests without calling a provider. The same
+provider and routing policy are retained across the three lightweight runtime
+wrappers; live fixed runs still use the application's `ModelRouter`.
+
+The strict configuration format is `rag-fixed-cli-v1`. Paths resolve relative to
+the configuration file. For example, a configuration saved in a project-local
+ignored folder can use absolute paths or relative equivalents:
+
+```json
+{
+  "format": "rag-fixed-cli-v1",
+  "sources": {
+    "questions": "/data/questions.jsonl",
+    "splits": "/data/splits.json",
+    "corpus": "/data/documents.parquet",
+    "catalog": "/data/catalog.jsonl",
+    "source_repo": "/path/to/checkout"
+  },
+  "authentication": {
+    "snapshot_file": "/data/snapshot.json",
+    "credentials_file": "/private/reviewed-session.json",
+    "principal_kind": "session"
+  },
+  "retrieval": {
+    "bm25_index": "/indexes/bm25",
+    "dense_index": "/indexes/dense-bge-base",
+    "device": "cpu",
+    "fp16": false,
+    "dense_block_rows": 8192,
+    "dense_file_cache_policy": "retain"
+  },
+  "web": {
+    "top_k": 5,
+    "max_context_chars": 24000,
+    "max_tokens": 16000,
+    "max_seconds": 120,
+    "max_rounds": 2,
+    "question_budget_usd": 0.1,
+    "allowed_sources": []
+  },
+  "generation": {"provider": "disabled"},
+  "selection": {"split": "development", "count": 20, "repetition": 1},
+  "request_filters": {"source_types": []},
+  "comparison": {"experiment_id": "fixed-development-validation"},
+  "output_root": "new-fixed-validation"
+}
+```
+
+`principal_kind` is `benchmark` or `session`, using the existing reviewed
+benchmark credential format or a private ordinary 0600
+`{"format":"rag-session-v1","token":"..."}` file. Authentication may also
+declare `allowed_doc_ids_file` for additional narrowing; it cannot grant access.
+`web` accepts only the scientific controls shown above. Identity, authentication,
+model, prices, mode, and paid-call overrides are rejected there. Retrieval accepts
+the shown settings plus `bm25_weight`, `candidate_k`, `rerank_k`, and `rrf_k`.
+Request filters accept `source_types`, `after`, and `before`; dates must be
+timezone-aware ISO timestamps. Selection accepts explicit `question_ids` instead
+of `count`; omitting both selects the whole split. Final selection additionally
+requires `allow_final: true` and an accepted `final_freeze` file.
+
+```bash
+python -m src.evaluation.run_fixed draft --config local-v2/fixed-01/config.json --output local-v2/fixed-01/new-draft.json
+python -m src.evaluation.run_fixed preflight --config local-v2/fixed-01/config.json --output-root local-v2/fixed-01/new-preflight-plan
+python -m src.evaluation.run_fixed run --config local-v2/fixed-01/config.json
+python -m src.evaluation.run_fixed resume --config local-v2/fixed-01/config.json
+```
+
+The example configuration belongs in `local-v2/fixed-01/config.json`, so its
+relative output root stays visible under that ignored local folder. Before a
+full-corpus preflight/run, stop the task-owned serving app that already holds
+the full indexes: this CLI shares one pair across its arms, but a separate app
+process would load another pair. Retain the existing one-full-index-process
+resource policy; no service is stopped automatically by the CLI.
+
+With generation disabled, run/resume are explicitly **validation-only** and
+cannot establish completion of real generated baselines. Scripted-provider API
+fixtures are also validation-only. Real generated baseline artifacts remain
+pending an approved model, prices, and total budget. To declare a live plan,
+`generation.provider` must be `anthropic`, with explicit `model`, positive
+`budget_usd`, `input_price_per_million`, and `output_price_per_million`;
+`max_output_tokens` and `timeout_seconds` are optional bounded execution settings.
+The declared cap is configuration, not authorization. Live preflight keeps
+`AnthropicProvider.allow_paid` false and never constructs an SDK client. Live
+run/resume additionally require an API key in the environment, `--allow-paid`,
+and `--max-total-cost-usd` exactly equal to the declared cap. This gate runs
+before database/model/SDK imports. Ambient `RAG_ALLOW_PAID`, `RAG_MODE`, and
+dotenv files do not authorize this CLI.
+
+Output contains exclusive `plan.json`, `prepared/{bm25,dense,hybrid}/manifest.json`
+and `input-files.json`, authoritative `runs/{arm}/` directories, private sibling
+`attempts/` journals, and sanitized command receipts. Inputs are referenced and
+verified without copying the corpus. Creation and resume preflight every arm
+before any model call; each actual runtime admission also checks the current
+scope, verified question, source bytes, and effective profile. Reference labels
+remain outside runtime questions and model input.
+
+Resume loads the original manifests and absolute `InputFiles` mapping, preserving
+the exact scope/session. It never rebuilds a convenient replacement manifest.
+Benchmark authentication creates a new one-hour session per process, so a later
+process cannot resume a benchmark-bound plan. Use a fresh output root for a new
+benchmark run, or the same still-current private human session for resume.
+An independent preflight can use `--output-root` as above; `run` then prepares
+its new actual plan in the configured root. Unresolved attempt intents or
+changed authority/configuration stop resume. Inspect them explicitly rather
+than deleting locks, discarding failures, or replaying uncertain paid work.
