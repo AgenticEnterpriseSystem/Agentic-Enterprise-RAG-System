@@ -8,6 +8,7 @@ __pycache__/
 .DS_Store
 
 .cache/
+/local-v2/
 private_docs/
 docs/local/
 rag-dense/

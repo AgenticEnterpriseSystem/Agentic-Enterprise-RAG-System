@@ -27,6 +27,7 @@ async function ask(page, question) {
   const field = page.getByLabel("What would you like to know?", { exact: true });
   await expect(field).toBeEnabled();
   await field.fill(question);
+  await expect(page.getByRole("button", { name: "Ask question", exact: false })).toBeEnabled();
   await field.press("Enter");
 }
 async function pending(request, login) {
@@ -223,6 +224,87 @@ test("unconfirmed logout stays closed even while the backend cookie still authen
   await page.getByRole("button", { name: "Retry sign out", exact: true }).click();
   await signIn(page, "intern");
   await expect(page.getByLabel("What would you like to know?", { exact: true })).toHaveValue("");
+});
+
+test("session verification failure clears mixed evidence and discards a late response until recovery", async ({ page, request }) => {
+  await ignoreQueryAbort(page);
+  await settings(request, { responseKind: "mixed" });
+  await page.goto("/");
+  await signIn(page, "executive");
+  await ask(page, "Visible mixed evidence before session database failure");
+  await expect(page.locator("article.source-card")).toHaveCount(3);
+  await page.locator("details.steps > summary").click();
+  const assertClosed = async () => {
+    await expect(page.getByRole("button", { name: "Retry sign-in status", exact: true })).toBeVisible();
+    await expect(page.locator(".answer-text, article.source-card, details.steps")).toHaveCount(0);
+    await expect(page.getByLabel("What would you like to know?", { exact: true })).toHaveValue("");
+    await expect(page.getByRole("button", { name: "Ask question", exact: false })).toBeDisabled();
+    await expect(page.getByText(EXECUTIVE, { exact: false })).toHaveCount(0);
+    await noSensitiveStorage(page);
+  };
+  await settings(request, { meFailure: true });
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await assertClosed();
+  await settings(request, { meFailure: false });
+  await page.getByRole("button", { name: "Retry sign-in status", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Sign out", exact: true })).toBeVisible();
+  await settings(request, { delayNext: 1 });
+  const question = "Held mixed evidence before another verification failure";
+  await ask(page, question);
+  const id = await pending(request, "executive");
+  await settings(request, { meFailure: true });
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await assertClosed();
+  await release(page, request, id, question);
+  await assertClosed();
+  await settings(request, { meFailure: false });
+  await page.getByRole("button", { name: "Retry sign-in status", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Sign out", exact: true })).toBeVisible();
+  await expect(page.locator(".answer-text, article.source-card, details.steps")).toHaveCount(0);
+  await ask(page, "Current session after verification recovered");
+  await expect(page.locator("article.record-card")).toContainText("EXECUTIVE-NATIVE-101");
+});
+
+test("unready admission blocks queries and a policy failure returns no prior evidence", async ({ page, request }) => {
+  await settings(request, { readyFailure: true });
+  await page.goto("/");
+  await signIn(page);
+  await expect(page.getByRole("button", { name: "Retry connection", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Ask question", exact: false })).toBeDisabled();
+  expect((await status(request)).queries).toHaveLength(0);
+  await settings(request, { readyFailure: false });
+  await page.getByRole("button", { name: "Retry connection", exact: true }).click();
+  await ask(page, "Visible before policy database failure");
+  await expect(page.locator(".answer-text")).toContainText(INTERN);
+  await settings(request, { queryFailure: true });
+  const failed = page.waitForResponse(response => response.url().endsWith("/api/query"));
+  await ask(page, "Must fail without cached policy or old evidence");
+  const response = await failed;
+  expect(response.status()).toBe(503);
+  expect(await response.json()).not.toHaveProperty("sources");
+  await expect(page.getByText("Synthetic test search is unavailable.", { exact: true })).toBeVisible();
+  await expect(page.locator(".answer-text, article.source-card, details.steps")).toHaveCount(0);
+  await expect(page.getByText(INTERN, { exact: false })).toHaveCount(0);
+  await noSensitiveStorage(page);
+});
+
+test("query CSRF rejection revalidates the session and clears the rejected question", async ({ page, request }) => {
+  await page.goto("/");
+  await signIn(page);
+  await ask(page, "Visible evidence before session verification changes");
+  await expect(page.locator(".answer-text")).toContainText(INTERN);
+  const previousCalls = (await status(request)).meCalls;
+  await settings(request, { queryCsrfFailure: true });
+  const failed = page.waitForResponse(response => response.url().endsWith("/api/query"));
+  await ask(page, "Question with rejected session verification");
+  expect((await failed).status()).toBe(403);
+  await expect.poll(async () => (await status(request)).meCalls).toBeGreaterThan(previousCalls);
+  await expect(page.getByRole("button", { name: "Sign out", exact: true })).toBeVisible();
+  await expect(page.getByLabel("What would you like to know?", { exact: true })).toHaveValue("");
+  await expect(page.locator(".answer-text, article.source-card, details.steps")).toHaveCount(0);
+  await ask(page, "Fresh verified query");
+  await expect(page.locator(".answer-text")).toContainText(INTERN);
+  await noSensitiveStorage(page);
 });
 
 test("unknown auth profile fails closed and never becomes the benchmark demo", async ({ page, request }) => {

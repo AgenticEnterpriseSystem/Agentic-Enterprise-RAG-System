@@ -42,3 +42,45 @@ The commands target Compose v2.10+ and use `up --wait`, without the newer
 wait-timeout flag. CI has an outer30-minute job timeout; local_stack bounds its
 application startup wait separately. Actual root-executed version compatibility
 remains part of the unaccepted OPS gate until that smoke completes.
+
+## Real-account security acceptance
+
+`tests/test_access_end_to_end.py` runs two real Argon2 accounts through one HTTP
+application backed by disposable PostgreSQL. Its explicitly synthetic Git/Jira
+fixtures cover baseline and agentic modes, mixed passage/record/count inputs,
+complete count lineage, provider-input isolation, rejected expansion/injection,
+mid-request authority changes, and database permission failure/recovery. The
+providers are local scripts; these checks make no remote model calls. Supply the
+same three `RAG_TEST_*_URL` values used by the database suite, then run:
+
+```sh
+python -m pytest tests/test_access_end_to_end.py tests/test_security_operator.py
+```
+
+The opt-in full-corpus checks use an already prepared local Docker application:
+
+- `security_operator.py` guards the reviewed `rag-ops01-full-20261104` project,
+  dedicated migrator role, schema, 511,958-document snapshot, and verified native
+  Jira feed. `seed` records private credentials and exact owned manifests before
+  provisioning intern/executive fixture humans with one versus two explicit
+  document grants. `inspect`, `revoke-intern`, and idempotent `cleanup` operate on
+  that same ledger; cleanup disables only those humans and revokes their own
+  grants/sessions. Corpus records and unrelated policy stay intact. Mount this
+  helper read-only into the operator job and set `RAG_SEC_COMPOSE_PROJECT` to the
+  independently checked project identity.
+- `security_http.py before`, `after-revoke`, and `logout` use `--state` for the
+  private ledger and a fresh `--reports` directory for each phase. They verify
+  exact document permissions, canonical metadata/spans, forbidden text/title/ID
+  markers, owner-only run metadata, permission refresh, and old-cookie replay.
+- `frontend/tests/live-security.mjs` drives real Chrome with that same `--state`
+  and a fresh `--outdir`. Its optional `--control` handshake lets the root
+  operator stop/recover only the owned database while the browser checks live
+  fail-closed behavior. The browser script itself performs no database writes.
+  CLI usage and handshake phases are documented at the top of that file.
+
+State and cookies are private 0600 files; credentials never enter command-line
+arguments. Reports contain hashes/counts and sanitized outcomes. The ordinary
+browser regression suite still uses its explicitly synthetic HTTP fixture;
+passing it alone is distinct from real-Docker account isolation. Scripted model
+input checks and retrieval-only full-corpus checks do not establish model answer
+quality or a production security certification.

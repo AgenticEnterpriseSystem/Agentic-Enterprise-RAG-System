@@ -12,7 +12,8 @@ function reset() {
     if (!pending.response.writableEnded) pending.response.end();
   }
   state = { counter: 0, sessions: new Map(), pending: [], queries: [], meCalls: 0,
-    delayNext: 0, logoutFailure: false, queryFailure: null, enabled: true, responseKind: "passage" };
+    delayNext: 0, logoutFailure: false, queryFailure: null, meFailure: false,
+    readyFailure: false, queryCsrfFailure: false, enabled: true, responseKind: "passage" };
 }
 reset();
 const users = {
@@ -134,8 +135,11 @@ async function api(request, response) {
     return json(response, 200, { test_only: true });
   }
   if (path === "/api/auth/profile") return json(response, 200, { enabled: state.enabled });
-  if (path === "/api/ready") return json(response, 200, { status: "ready", busy: false, mode: "live", retrieval: "hybrid", generation_enabled: true,
-    ...(!state.enabled ? { allowed_documents: 2, source_types: ["confluence"] } : {}) });
+  if (path === "/api/ready") {
+    if (state.readyFailure) return json(response, 503, { status: "not_ready", message: "Synthetic dependency unavailable." });
+    return json(response, 200, { status: "ready", busy: false, mode: "live", retrieval: "hybrid", generation_enabled: true,
+      ...(!state.enabled ? { allowed_documents: 2, source_types: ["confluence"] } : {}) });
+  }
   if (path === "/api/auth/csrf") {
     const value = `test-bootstrap-${++state.counter}`;
     return json(response, 200, { csrf_token: value }, { "Set-Cookie": `rag_login_csrf=${value}; HttpOnly; SameSite=Strict; Path=/api/auth` });
@@ -157,6 +161,7 @@ async function api(request, response) {
   }
   if (path === "/api/auth/me") {
     state.meCalls++;
+    if (state.meFailure) return failure(response, 503, "policy_unavailable", "Synthetic session verification unavailable.");
     const current = session(request);
     return current ? json(response, 200, sessionBody(current)) : failure(response, 401,
       cookies(request).rag_session ? "session_expired" : "authentication_required", "Sign in to continue.");
@@ -175,6 +180,10 @@ async function api(request, response) {
     if (!current) return failure(response, 401, "session_expired", "Session expired. Sign in again.");
     if (state.enabled !== false && request.headers["x-csrf-token"] !== current.csrf)
       return failure(response, 403, "csrf_failed", "Request verification failed.");
+    if (state.queryCsrfFailure) {
+      state.queryCsrfFailure = false;
+      return failure(response, 403, "csrf_failed", "Request verification failed.");
+    }
     const value = await body(request), id = ++state.counter;
     state.queries.push({ id, login: current.login, question: value.question, mode: value.mode });
     if (state.queryFailure) return failure(response, 503, "policy_unavailable", "Synthetic test search is unavailable.");
