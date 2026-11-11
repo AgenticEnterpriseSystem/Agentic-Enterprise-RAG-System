@@ -87,6 +87,34 @@ def evaluate_retrieval(rows: Iterable[dict], ks=(5, 10, 20)) -> dict:
     }
 
 
+def paired_bootstrap(rows: list[dict], baseline: list[dict], metric=recall_at_k, k=10,
+                     iterations=10000, seed=5980) -> dict:
+    """Mean change versus `baseline` on the same questions, with a 95% bootstrap interval.
+
+    Questions are resampled with replacement; unlabeled questions are skipped. Also counts
+    questions that improved or got worse.
+    """
+    import random
+
+    by_id = {row["question_id"]: row for row in baseline}
+    changes = []
+    for row in rows:
+        before = by_id.get(row["question_id"])
+        if before is None:
+            raise ValueError("Rows and baseline must cover the same questions")
+        new = metric(row["retrieved_doc_ids"], row["relevant_doc_ids"], k)
+        old = metric(before["retrieved_doc_ids"], before["relevant_doc_ids"], k)
+        if new is not None and old is not None:
+            changes.append(new - old)
+    if not changes:
+        raise ValueError("No labeled questions to compare")
+    rng = random.Random(seed)
+    means = sorted(mean(rng.choices(changes, k=len(changes))) for _ in range(iterations))
+    return {"change": mean(changes), "low": means[int(0.025 * iterations)],
+            "high": means[int(0.975 * iterations) - 1], "questions": len(changes),
+            "better": sum(c > 0 for c in changes), "worse": sum(c < 0 for c in changes)}
+
+
 def main():
     import argparse
     import json

@@ -462,6 +462,70 @@ def test_unknown_date_filtered_and_empty_identity_skips_search():
     assert backend.requests == []
 
 
+def test_document_windows_cover_text_keep_lead_and_cap_by_query_terms():
+    from src.retrieval.reranker import document_windows
+    assert document_windows("short", "q", 100, 50, 4) == [(0, 5)]
+    text = "a" * 1000
+    spans = document_windows(text, "q", 300, 150, 10)
+    assert spans[0] == (0, 300) and spans[-1] == (700, 1000)
+    assert all(b - a == 300 for a, b in spans)
+    # More windows than allowed: keep the lead, then those covering the query terms.
+    text = "lead " * 200 + "canary rollback owner " * 10 + "filler " * 400
+    spans = document_windows(text, "canary rollback owner", 300, 150, 3)
+    assert len(spans) == 3 and spans[0][0] == 0
+    assert all("canary" in text[a:b] for a, b in spans[1:])
+    assert spans == sorted(spans)
+    with pytest.raises(ValueError):
+        document_windows(text, "q", 0, 1, 1)
+
+
+def test_maxp_reranker_scores_best_window_of_whole_document_with_title():
+    full = "Deploy runbook\n" + "filler words here. " * 400 + "The rollback owner is Priya."
+    short = evidence("a", text="filler words here")
+    target = Evidence(citation_id="b:0:20", chunk=Chunk(
+        chunk_id="b:0:20", doc_id="b", source_type="slack", title="Deploy runbook",
+        text="filler words here...", start_char=0, end_char=20), score=1, retrieval_method="bm25")
+    seen = []
+
+    def scorer(pairs):
+        seen.extend(pairs)
+        return [10.0 if "rollback owner" in text else 1.0 for _, text in pairs]
+
+    ranker = CrossEncoderReranker("offline", "a" * 40, scorer=scorer, window_chars=500,
+                                  max_windows=4, document_text={"b": full}.get)
+    out = ranker.rerank("who is the rollback owner", (short, target), 2)
+    assert [x.chunk.doc_id for x in out] == ["b", "a"]
+    assert out[0].score == 10.0
+    assert out[0].chunk == target.chunk  # The original passage is returned; only order changes.
+    b_windows = [text for _, text in seen if "Priya" in text or text.startswith("Deploy runbook")]
+    assert all(text.startswith("Deploy runbook") for text in b_windows)
+    assert len([1 for _, text in seen if "filler words here. " in text]) <= 4
+    assert ranker.identity["windows"] == {"chars": 500, "stride": 250, "max": 4,
+                                          "aggregate": "max", "full_document": True}
+    with pytest.raises(ValueError):
+        CrossEncoderReranker("offline", "a" * 40, window_chars=0)
+
+
+def test_hybrid_blends_reranker_rank_with_fused_rank():
+    items = [evidence(d) for d in ("a", "b", "c")]
+    reverse = CrossEncoderReranker("offline", "a" * 40,
+                                   scorer=lambda pairs: list(range(len(pairs))))  # Prefers c, b, a.
+
+    def order(weight):
+        config = HybridConfig(candidate_k=3, rerank_k=3, bm25_weight=1, dense_weight=0,
+                              rerank_weight=weight, rrf_k=1)
+        out = HybridRetriever(Fixed(*items), Fixed(), config=config, reranker=reverse).search(
+            request(top_k=3))
+        return [x.chunk.doc_id for x in out]
+
+    assert order(1) == ["c", "b", "a"]  # Reranker order only, as before.
+    assert order(0) == ["a", "b", "c"]  # Fused order only.
+    assert order(0.5) == ["a", "c", "b"]  # a and c tie (0.375); ties keep the fused order.
+    assert order(0.6) == ["c", "a", "b"]
+    with pytest.raises(ValueError):
+        HybridConfig(rerank_weight=1.5)
+
+
 def test_reranker_checks_scores_and_pin():
     with pytest.raises(ValueError, match="revision"):
         CrossEncoderReranker("model", "main")

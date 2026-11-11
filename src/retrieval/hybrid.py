@@ -11,6 +11,9 @@ class HybridConfig(Contract):
     rrf_k: float = Field(default=60, ge=0)
     bm25_weight: float = Field(default=1, ge=0)
     dense_weight: float = Field(default=1, ge=0)
+    # Share of a reranker in the final order: 1 replaces the fused order with the reranker's;
+    # lower values blend the two ranks with RRF, keeping BM25+'s exact-match wins.
+    rerank_weight: float = Field(default=1, ge=0, le=1)
 
 
 def matches_filters(item, request):
@@ -50,8 +53,13 @@ class HybridRetriever:
                     limit=max(request.top_k, self.config.rerank_k))
         fused = tuple(bounded_passage(item, request.query) for item in fused)
         validate_evidence(request.user, fused)
-        result = (self.reranker.rerank(request.query, fused, request.top_k)
-                  if self.reranker is not None else fused[:request.top_k])
+        if self.reranker is None:
+            result = fused[:request.top_k]
+        elif self.config.rerank_weight >= 1:
+            result = self.reranker.rerank(request.query, fused, request.top_k)
+        else:
+            result = self.blend(fused, self.reranker.rerank(request.query, fused, len(fused)),
+                                request.top_k)
         result = tuple(result)
         candidates = {item.citation_id: item for item in fused}
         if len(result) > request.top_k or any(
@@ -64,3 +72,16 @@ class HybridRetriever:
             raise ValueError("Reranker returned evidence outside filtered candidates")
         validate_evidence(request.user, result)
         return result
+
+    def blend(self, fused, reranked, top_k):
+        """Weighted RRF of the fused rank and the reranker's rank (ties keep fused order)."""
+        weight, k = self.config.rerank_weight, self.config.rrf_k
+        position = {item.citation_id: rank for rank, item in enumerate(reranked, 1)}
+        scored = []
+        for rank, item in enumerate(fused, 1):
+            score = (1 - weight) / (k + rank)
+            if item.citation_id in position:
+                score += weight / (k + position[item.citation_id])
+            scored.append((score, rank, item))
+        scored.sort(key=lambda entry: (-entry[0], entry[1]))
+        return tuple(item.model_copy(update={"score": score}) for score, _, item in scored[:top_k])

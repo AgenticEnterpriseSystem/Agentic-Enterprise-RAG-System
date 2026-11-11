@@ -226,6 +226,49 @@ def test_hybrid_variants_share_searches_and_match_live_hybrid(tmp_path):
     assert reranked[0]["scores"] != rows[0]["scores"]
     assert manifest["reranker"]["name"] == "offline-test"
 
+    # MaxP over whole documents, blended with the fused rank; scores computed once.
+    from src.evaluation.run_hybrid import CachedReranker
+    calls = []
+
+    def scorer(pairs):
+        calls.append(len(pairs))
+        return [float("rollback owner" in text) for _, text in pairs]
+
+    maxp = CachedReranker(CrossEncoderReranker("offline-test", "a" * 40, scorer=scorer,
+                                               window_chars=20, max_windows=3,
+                                               document_text=bm25.full_text))
+    for weight in (1.0, 0.5, 0.2):
+        blended, _, manifest = run_variant(counted, caches, seconds, errors, questions[:1], user,
+                                           bm25_weight=0.5, reranker=maxp, top_k=5,
+                                           candidate_k=5, rerank_weight=weight)
+        assert set(blended[0]["retrieved_doc_ids"]) == set(rows[0]["retrieved_doc_ids"])
+        assert manifest["config"]["rerank_weight"] == weight
+    assert len(calls) == 1  # Later weights reuse the cached scores.
+    assert manifest["reranker"]["windows"]["full_document"] is True
+
+
+def test_cross_validated_weight_and_paired_bootstrap():
+    from src.evaluation.retrieval_metrics import paired_bootstrap
+    from src.evaluation.run_hybrid import cross_validated
+
+    def rows(hits):
+        return [{"question_id": f"q{i}", "relevant_doc_ids": ["right"],
+                 "retrieved_doc_ids": ["right" if hit else "wrong"]} for i, hit in enumerate(hits)]
+
+    good, bad = rows([True] * 20), rows([False] * 20)
+    picked, chosen = cross_validated({0.2: bad, 0.8: good}, folds=5)
+    assert chosen == [0.8] * 5 and picked == good
+    _, chosen = cross_validated({0.2: good, 0.8: good}, folds=5)
+    assert chosen == [0.2] * 5  # Ties prefer the lower weight.
+
+    better = paired_bootstrap(good, bad, iterations=200)
+    assert better["change"] == 1 and better["low"] == better["high"] == 1
+    assert (better["better"], better["worse"], better["questions"]) == (20, 0, 20)
+    mixed = paired_bootstrap(rows([i % 2 == 0 for i in range(20)]), bad, iterations=500)
+    assert mixed["low"] < mixed["change"] == 0.5 < mixed["high"]
+    with pytest.raises(ValueError):
+        paired_bootstrap(good, bad[:3])
+
 
 # Screening sample
 

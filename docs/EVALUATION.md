@@ -31,6 +31,25 @@ are opt-in with `--rerankers`. Existing notebooks pass their experiment settings
 explicitly. Retrieval metrics still request 20 results to score Recall@20;
 the web app's default answer context starts with five results.
 
+Reranker options (the web app does not enable a reranker):
+
+- `--rerank-window-chars N` scores each candidate on windows of N characters across its
+  whole document, each starting with the title, and keeps the best (MaxP). Without it, a
+  reranker sees one query-relevant slice, which caused the losses described in
+  [Retrieval results](FULL_CORPUS.md#hybrid-search-and-reranking).
+  `--rerank-max-windows` caps windows per document (the lead plus the best-matching ones).
+- `--rerank-weights` blends the reranker's rank with the fused rank (1 = reranker order
+  only). Candidates are scored once per question and reused for every weight. With several
+  weights on development, a cross-validated `blendcv` run picks each fold's weight on the
+  other folds (`--cv-folds`, default 5); report that run, not the best fixed weight.
+- `--reranker-max-length` sets the token limit per query + window.
+- The run ends with each reranked variant's change versus the same hybrid without a
+  reranker, with 95% paired bootstrap intervals.
+
+[`notebooks/reranker_colab.ipynb`](../notebooks/reranker_colab.ipynb) runs these on a Colab
+GPU: two window settings, a sweep of blend weights, and one calibration check only if the
+cross-validated development gain has an interval above zero.
+
 ## Retrieval results
 
 Every method searched all **511,958 documents** for the 300 development questions.

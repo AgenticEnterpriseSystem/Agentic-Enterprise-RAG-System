@@ -3,10 +3,17 @@
 Each question is searched once by each retriever (top --candidate-k documents);
 every variant then runs HybridRetriever over those same saved results, so the
 variants differ only in fusion weights and reranking. Use --device cuda for GPU inference.
+
+Rerankers can score each candidate's best window across its whole document
+(--rerank-window-chars, "MaxP") and be blended with the fused rank (--rerank-weights).
+Each question's candidates are scored once and reused for every blend weight. With
+several weights on the development split, a cross-validated run picks the weight on
+the other folds for each question, so its score is not tuned on the questions it reports.
 """
 
 import argparse
 import json
+import random
 import time
 from pathlib import Path
 
@@ -32,6 +39,19 @@ class CachedSearch:
 
     def search(self, request):
         return self.results[request.query][: request.top_k]
+
+
+class CachedReranker:
+    """Scores each question's candidates once, so every blend weight reuses the scores."""
+
+    def __init__(self, reranker):
+        self.reranker, self.identity, self.cache = reranker, reranker.identity, {}
+
+    def rerank(self, query, evidence, top_k):
+        key = (query, tuple(item.citation_id for item in evidence))
+        if key not in self.cache:
+            self.cache[key] = self.reranker.rerank(query, evidence, len(evidence))
+        return self.cache[key][:top_k]
 
 
 def search_once(retrievers, questions, user, depth):
@@ -78,12 +98,15 @@ def run_single(cache, seconds, errors, questions, top_k):
 
 
 def run_variant(retrievers, caches, seconds, errors, questions, user, *, bm25_weight,
-                reranker=None, top_k=max(KS), candidate_k=None, rerank_k=None, rrf_k=None):
+                reranker=None, top_k=max(KS), candidate_k=None, rerank_k=None, rrf_k=None,
+                rerank_weight=None):
     """Rows, latencies and manifest for one fusion/rerank setting."""
     overrides = {name: value for name, value in (
         ('candidate_k', candidate_k), ('rerank_k', rerank_k), ('rrf_k', rrf_k))
         if value is not None}
     config = RetrievalSettings(bm25_weight=bm25_weight, **overrides).hybrid_config()
+    if rerank_weight is not None:
+        config = type(config)(**{**config.model_dump(), "rerank_weight": rerank_weight})
     hybrid = HybridRetriever(*(CachedSearch(r, c) for r, c in zip(retrievers, caches)),
                              config=config, reranker=reranker)
     rows, latencies = [], []
@@ -138,10 +161,42 @@ def compare(rows, baseline):
     return better, worse
 
 
+def cross_validated(rows_by_weight: dict[float, list[dict]], folds=5, seed=5980):
+    """Rows where each question's blend weight was chosen on the other folds.
+
+    For each fold, the weight with the highest mean Recall@10 on the remaining folds
+    (then nDCG@10, then the lower weight, closer to the unreranked order) is used for
+    that fold's questions. Returns the rows in the original order and the weight per fold.
+    """
+    from src.evaluation.retrieval_metrics import ndcg_at_k, recall_at_k
+
+    weights = sorted(rows_by_weight)
+    order = [row["question_id"] for row in rows_by_weight[weights[0]]]
+    shuffled = sorted(order)
+    random.Random(seed).shuffle(shuffled)
+    fold_of = {qid: i % folds for i, qid in enumerate(shuffled)}
+    by_weight = {w: {row["question_id"]: row for row in rows} for w, rows in rows_by_weight.items()}
+
+    def mean_score(metric, weight, ids):
+        scores = [metric(by_weight[weight][q]["retrieved_doc_ids"],
+                         by_weight[weight][q]["relevant_doc_ids"], 10) for q in ids]
+        scores = [s for s in scores if s is not None]
+        return sum(scores) / len(scores) if scores else 0.0
+
+    chosen, picked = [], {}
+    for fold in range(folds):
+        train = [q for q in order if fold_of[q] != fold]
+        best = max(weights, key=lambda w: (mean_score(recall_at_k, w, train),
+                                           mean_score(ndcg_at_k, w, train), -w))
+        chosen.append(best)
+        picked.update({q: by_weight[best][q] for q in order if fold_of[q] == fold})
+    return [picked[q] for q in order], chosen
+
+
 def parse_weights(text):
     weights = [float(w) for w in text.split(",") if w.strip()]
     if not weights or any(not 0 <= w <= 1 for w in weights):
-        raise argparse.ArgumentTypeError("BM25 weights must be between 0 and 1")
+        raise argparse.ArgumentTypeError("Weights must be between 0 and 1")
     return weights
 
 
@@ -160,6 +215,20 @@ def main():
                         help='Fusion weight before reranking: a number, or "best" (highest '
                              "Recall@10 among --bm25-weights on this split; use on development only)")
     parser.add_argument("--reranker-batch-size", type=int, default=32)
+    parser.add_argument("--reranker-max-length", type=int, default=512,
+                        help="Tokens per reranker input (query + window)")
+    parser.add_argument("--rerank-weights", type=parse_weights, default=[1.0],
+                        help="Reranker share of the final order: 1 = reranker order only; "
+                             "lower values blend it with the fused rank. Comma-separated sweep")
+    parser.add_argument("--rerank-window-chars", type=int, default=0,
+                        help="MaxP: score windows of this many characters across each whole "
+                             "document and keep the best; 0 = one query-relevant slice")
+    parser.add_argument("--rerank-window-stride", type=int, default=0,
+                        help="Characters between window starts (default: half a window)")
+    parser.add_argument("--rerank-max-windows", type=int, default=8,
+                        help="Most windows scored per document (the lead plus the best matches)")
+    parser.add_argument("--cv-folds", type=int, default=5,
+                        help="Folds for choosing the blend weight on development")
     parser.add_argument("--top-k", type=int, default=max(KS))
     parser.add_argument("--output-dir", type=Path, default=ROOT / "evaluation" / "results")
     parser.add_argument("--write-baselines", action="store_true",
@@ -167,6 +236,9 @@ def main():
     args = parser.parse_args()
     if args.top_k < max(KS):
         parser.error(f"--top-k must be at least {max(KS)} to score Recall@{max(KS)}")
+    if min(args.rerank_window_chars, args.rerank_window_stride) < 0 or args.rerank_max_windows < 1 \
+            or args.cv_folds < 2:
+        parser.error("Window sizes must be non-negative, and window count and folds positive")
     if args.rerank_bm25_weight != "best":
         args.rerank_bm25_weight = parse_weights(args.rerank_bm25_weight)[0]
     rerankers = [reranker_identity(s.strip()) for s in args.rerankers.split(",") if s.strip()]
@@ -217,22 +289,48 @@ def main():
         if args.split != "development":
             parser.error('--rerank-bm25-weight "best" tunes on the split; pass a number here')
         weight, choice = max(fusion, key=lambda w: fusion[w]), "best development Recall@10"
+    windows = args.rerank_window_chars or None
+    reranked_runs = []
     for label, name, revision in rerankers:
-        reranker = CrossEncoderReranker(name, revision, device=args.device,
-                                        batch_size=args.reranker_batch_size,
-                                        fp16=args.device.startswith("cuda"))
-        run_name = f"hybrid_{dense_label}_w{weight:g}_{label}_full_{args.split}"
-        began = time.perf_counter()
-        rows, latencies, manifest = run_variant(retrievers, caches, seconds, errors, questions,
-                                                user, bm25_weight=weight, reranker=reranker,
-                                                top_k=args.top_k, candidate_k=settings.candidate_k,
-                                                rerank_k=settings.rerank_k, rrf_k=settings.rrf_k)
-        save(run_name, rows, latencies, manifest,
-             fusion_weight_choice={"bm25_weight": weight, "chosen_by": choice})
-        results[run_name] = rows
-        print(f"{run_name}: {time.perf_counter() - began:.0f}s", flush=True)
+        reranker = CachedReranker(CrossEncoderReranker(
+            name, revision, device=args.device, batch_size=args.reranker_batch_size,
+            max_length=args.reranker_max_length, fp16=args.device.startswith("cuda"),
+            window_chars=windows, window_stride=args.rerank_window_stride or None,
+            max_windows=args.rerank_max_windows,
+            document_text=bm25.full_text if windows else None))
+        stem = f"hybrid_{dense_label}_w{weight:g}_{label}" + (f"_maxp{windows}" if windows else "")
+        by_weight, latency_by_weight, manifest = {}, {}, None
+        for rerank_weight in args.rerank_weights:
+            run_name = stem + (f"_blend{rerank_weight:g}" if rerank_weight < 1 else "") \
+                + f"_full_{args.split}"
+            began = time.perf_counter()
+            rows, latencies, manifest = run_variant(
+                retrievers, caches, seconds, errors, questions, user, bm25_weight=weight,
+                reranker=reranker, top_k=args.top_k, candidate_k=settings.candidate_k,
+                rerank_k=settings.rerank_k, rrf_k=settings.rrf_k, rerank_weight=rerank_weight)
+            save(run_name, rows, latencies, manifest,
+                 fusion_weight_choice={"bm25_weight": weight, "chosen_by": choice})
+            results[run_name], by_weight[rerank_weight] = rows, rows
+            latency_by_weight[rerank_weight] = latencies
+            reranked_runs.append(run_name)
+            # The first weight includes scoring every candidate; later ones reuse the scores.
+            print(f"{run_name}: {time.perf_counter() - began:.0f}s", flush=True)
+        if len(by_weight) > 1 and args.split == "development":
+            rows, chosen = cross_validated(by_weight, folds=args.cv_folds)
+            # The first weight's latencies include scoring the candidates; later ones reuse them.
+            first = latency_by_weight[args.rerank_weights[0]]
+            run_name = f"{stem}_blendcv_full_{args.split}"
+            save(run_name, rows, first, {**manifest, "config": {**manifest["config"],
+                                                                 "rerank_weight": "cross-validated"}},
+                 fusion_weight_choice={"bm25_weight": weight, "chosen_by": choice},
+                 cross_validation={"folds": args.cv_folds, "seed": 5980,
+                                   "weights": sorted(by_weight), "chosen_per_fold": chosen})
+            results[run_name] = rows
+            reranked_runs.append(run_name)
+            print(f"{run_name}: weight chosen per fold {chosen}", flush=True)
 
-    from src.evaluation.retrieval_metrics import evaluate_retrieval
+    from src.evaluation.retrieval_metrics import (evaluate_retrieval, ndcg_at_k, paired_bootstrap,
+                                                  recall_at_k)
 
     print(f"\n{'run':58} {'R@5':>6} {'R@10':>6} {'R@20':>6} {'nDCG@10':>8}  vs BM25+ (R@10 better/worse)")
     for name, rows in results.items():
@@ -240,6 +338,15 @@ def main():
         better, worse = compare(rows, bm25_rows)
         print(f"{name:58} {o['recall@5']['mean']:>6.3f} {o['recall@10']['mean']:>6.3f} "
               f"{o['recall@20']['mean']:>6.3f} {o['ndcg@10']['mean']:>8.3f}  {better:>3} / {worse}")
+
+    base = results.get(f"hybrid_{dense_label}_w{weight:g}_full_{args.split}") if rerankers else None
+    if base is not None:
+        print("\nChange versus the same hybrid without a reranker (95% bootstrap intervals):")
+        for name in reranked_runs:
+            r, n = (paired_bootstrap(results[name], base, metric=m) for m in (recall_at_k, ndcg_at_k))
+            print(f"{name:58} R@10 {r['change']:+.3f} ({r['low']:+.3f} to {r['high']:+.3f}; "
+                  f"{r['better']} better, {r['worse']} worse)  nDCG@10 {n['change']:+.3f} "
+                  f"({n['low']:+.3f} to {n['high']:+.3f})")
 
 
 if __name__ == "__main__":

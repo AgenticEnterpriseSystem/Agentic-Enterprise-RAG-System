@@ -189,6 +189,13 @@ class CorpusBM25:
         validate_evidence(request.user, results)
         return results
 
+    def full_text(self, doc_id: str) -> str | None:
+        """The whole indexed text (title + content) of one document, for rerankers."""
+        if self.corpus is None or doc_id not in self.position:
+            return None
+        row = self.corpus.slice(self.position[doc_id], 1).to_pylist()[0]
+        return document_text(row["title"], row["content"])
+
     def _chunk(self, doc_id):
         # Slice one row without concatenating the full chunked string columns.
         row = self.corpus.slice(self.position[doc_id], 1).to_pylist()[0]
