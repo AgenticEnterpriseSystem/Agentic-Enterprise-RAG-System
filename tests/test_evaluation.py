@@ -247,6 +247,44 @@ def test_hybrid_variants_share_searches_and_match_live_hybrid(tmp_path):
     assert manifest["reranker"]["windows"]["full_document"] is True
 
 
+def test_cached_reranker_reuses_scores_across_candidate_counts():
+    import argparse
+    from src.contracts import Chunk, Evidence
+    from src.evaluation.run_hybrid import CachedReranker, parse_depths
+    from src.retrieval.reranker import CrossEncoderReranker
+
+    def item(doc, text):
+        chunk = Chunk(chunk_id=f"{doc}:0:{len(text)}", doc_id=doc, source_type="slack",
+                      text=text, start_char=0, end_char=len(text))
+        return Evidence(citation_id=chunk.chunk_id, chunk=chunk, score=1, retrieval_method="hybrid")
+
+    texts = {"a": "x " * 30, "b": "rollback owner " * 3, "c": "y " * 80, "d": "rollback", "e": "z"}
+    pool = [item(d, t) for d, t in texts.items()]
+    scored = []
+
+    def scorer(pairs):
+        scored.extend(pairs)
+        return [text.count("rollback") + len(text) / 1000 for _, text in pairs]
+
+    inner = CrossEncoderReranker("offline", "a" * 40, scorer=scorer, window_chars=40, max_windows=8)
+    cached = CachedReranker(inner)
+    full = cached.rerank("rollback owner", pool, 5)
+    windows = len(scored)
+    assert full == inner.rerank("rollback owner", pool, 5)  # Same order as scoring all at once.
+    before = len(scored)
+    top3 = cached.rerank("rollback owner", pool[:3], 3)
+    assert len(scored) == before  # A smaller candidate list reuses the cached scores.
+    assert [x.chunk.doc_id for x in top3] == [x.chunk.doc_id for x in full if x.chunk.doc_id in "abc"]
+    # Windows needed per question are counted whether or not the scores were cached.
+    assert cached.windows_per_call[0] == windows and 0 < cached.windows_per_call[1] < windows
+    assert cached.windows_scored == windows and cached.seconds_per_window() >= 0
+
+    assert parse_depths("50:8, 100:8,20:4") == [(50, 8), (100, 8), (20, 4)]
+    for bad in ("50", "0:8", "50:0", "x:y", ""):
+        with pytest.raises(argparse.ArgumentTypeError):
+            parse_depths(bad)
+
+
 def test_cross_validated_weight_and_paired_bootstrap():
     from src.evaluation.retrieval_metrics import paired_bootstrap
     from src.evaluation.run_hybrid import cross_validated

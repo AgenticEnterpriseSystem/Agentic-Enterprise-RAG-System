@@ -105,6 +105,11 @@ class CrossEncoderReranker:
             return ()
         evidence = tuple(bounded_passage(item, query) for item in evidence)
         pairs, owners = self._pairs(query, evidence)
+        # Windows scored per candidate, for cost estimates in evaluation runs.
+        self.last_window_counts = {}
+        for owner in owners:
+            key = evidence[owner].citation_id
+            self.last_window_counts[key] = self.last_window_counts.get(key, 0) + 1
         scores = self._score(pairs)
         if len(scores) != len(pairs) or any(not math.isfinite(float(s)) for s in scores):
             raise ValueError("Reranker must return one finite scalar per candidate")

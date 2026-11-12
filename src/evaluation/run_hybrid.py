@@ -42,16 +42,36 @@ class CachedSearch:
 
 
 class CachedReranker:
-    """Scores each question's candidates once, so every blend weight reuses the scores."""
+    """Scores each candidate once per question, so every blend weight, and every candidate
+    count using the same reranker settings, reuses the scores. A candidate's score does not
+    depend on the other candidates, so the order matches scoring them all together."""
 
     def __init__(self, reranker):
-        self.reranker, self.identity, self.cache = reranker, reranker.identity, {}
+        self.reranker, self.identity = reranker, reranker.identity
+        self.scored = {}  # (query, citation ID) -> (reranked item, windows scored)
+        self.seconds = 0.0  # Time spent scoring, and the windows scored in it.
+        self.windows_scored = 0
+        self.windows_per_call = []  # Windows a setting needs per question, cached or not.
 
     def rerank(self, query, evidence, top_k):
-        key = (query, tuple(item.citation_id for item in evidence))
-        if key not in self.cache:
-            self.cache[key] = self.reranker.rerank(query, evidence, len(evidence))
-        return self.cache[key][:top_k]
+        missing = [item for item in evidence if (query, item.citation_id) not in self.scored]
+        if missing:
+            began = time.perf_counter()
+            reranked = self.reranker.rerank(query, missing, len(missing))
+            self.seconds += time.perf_counter() - began
+            counts = getattr(self.reranker, "last_window_counts", {})
+            for item in reranked:
+                windows = counts.get(item.citation_id, 1)
+                self.scored[(query, item.citation_id)] = (item, windows)
+                self.windows_scored += windows
+        self.windows_per_call.append(sum(self.scored[(query, item.citation_id)][1]
+                                         for item in evidence))
+        ranked = sorted((self.scored[(query, item.citation_id)][0] for item in evidence),
+                        key=lambda item: (-item.score, item.chunk.doc_id))
+        return tuple(ranked[:top_k])
+
+    def seconds_per_window(self):
+        return self.seconds / self.windows_scored if self.windows_scored else 0.0
 
 
 def search_once(retrievers, questions, user, depth):
@@ -193,6 +213,24 @@ def cross_validated(rows_by_weight: dict[float, list[dict]], folds=5, seed=5980)
     return [picked[q] for q in order], chosen
 
 
+def parse_depths(text):
+    """"50:8,100:8,20:4" -> [(candidates reranked, windows per document), ...]."""
+    depths = []
+    for part in text.split(","):
+        if not part.strip():
+            continue
+        try:
+            candidates, windows = (int(v) for v in part.split(":"))
+        except ValueError:
+            raise argparse.ArgumentTypeError("Use candidates:windows pairs, e.g. 50:8,20:4") from None
+        if not (1 <= candidates <= 200 and windows >= 1):
+            raise argparse.ArgumentTypeError("Candidates must be 1-200 and windows at least 1")
+        depths.append((candidates, windows))
+    if not depths:
+        raise argparse.ArgumentTypeError("Give at least one candidates:windows pair")
+    return depths
+
+
 def parse_weights(text):
     weights = [float(w) for w in text.split(",") if w.strip()]
     if not weights or any(not 0 <= w <= 1 for w in weights):
@@ -227,6 +265,11 @@ def main():
                         help="Characters between window starts (default: half a window)")
     parser.add_argument("--rerank-max-windows", type=int, default=8,
                         help="Most windows scored per document (the lead plus the best matches)")
+    parser.add_argument("--rerank-depths", type=parse_depths, default=None,
+                        help="Compare reranker settings in one run, as candidates:windows pairs "
+                             "(e.g. 50:8,100:8,20:4): how many fused candidates are reranked and "
+                             "the most windows per document. Default: --rerank-k and "
+                             "--rerank-max-windows. Searches and shared scores are reused")
     parser.add_argument("--cv-folds", type=int, default=5,
                         help="Folds for choosing the blend weight on development")
     parser.add_argument("--top-k", type=int, default=max(KS))
@@ -290,16 +333,29 @@ def main():
             parser.error('--rerank-bm25-weight "best" tunes on the split; pass a number here')
         weight, choice = max(fusion, key=lambda w: fusion[w]), "best development Recall@10"
     windows = args.rerank_window_chars or None
-    reranked_runs = []
-    for label, name, revision in rerankers:
-        reranker = CachedReranker(CrossEncoderReranker(
-            name, revision, device=args.device, batch_size=args.reranker_batch_size,
-            max_length=args.reranker_max_length, fp16=args.device.startswith("cuda"),
-            window_chars=windows, window_stride=args.rerank_window_stride or None,
-            max_windows=args.rerank_max_windows,
-            document_text=bm25.full_text if windows else None))
+    depths = args.rerank_depths or [(settings.rerank_k, args.rerank_max_windows)]
+    defaults = (RetrievalSettings().rerank_k, 8)
+    reranked_runs, shared, timing = [], {}, {}
+    for (label, name, revision), (depth, max_windows) in (
+            (r, d) for r in rerankers for d in depths):
+        if depth < args.top_k:
+            parser.error(f"{depth} candidates is below --top-k {args.top_k}: the hybrid passes "
+                         "at least --top-k candidates, so the setting would not differ")
+        if depth > settings.candidate_k * 2:
+            parser.error(f"{depth} candidates exceeds the two {settings.candidate_k}-document "
+                         "searches; raise --candidate-k")
+        if (label, max_windows) not in shared:  # One scorer, and its cache, per window cap.
+            shared[(label, max_windows)] = CachedReranker(CrossEncoderReranker(
+                name, revision, device=args.device, batch_size=args.reranker_batch_size,
+                max_length=args.reranker_max_length, fp16=args.device.startswith("cuda"),
+                window_chars=windows, window_stride=args.rerank_window_stride or None,
+                max_windows=max_windows, document_text=bm25.full_text if windows else None))
+        reranker = shared[(label, max_windows)]
         stem = f"hybrid_{dense_label}_w{weight:g}_{label}" + (f"_maxp{windows}" if windows else "")
+        if (depth, max_windows if windows else 8) != defaults:  # Earlier runs keep their names.
+            stem += f"_k{depth}" + (f"_win{max_windows}" if windows else "")
         by_weight, latency_by_weight, manifest = {}, {}, None
+        calls_before = len(reranker.windows_per_call)
         for rerank_weight in args.rerank_weights:
             run_name = stem + (f"_blend{rerank_weight:g}" if rerank_weight < 1 else "") \
                 + f"_full_{args.split}"
@@ -307,14 +363,18 @@ def main():
             rows, latencies, manifest = run_variant(
                 retrievers, caches, seconds, errors, questions, user, bm25_weight=weight,
                 reranker=reranker, top_k=args.top_k, candidate_k=settings.candidate_k,
-                rerank_k=settings.rerank_k, rrf_k=settings.rrf_k, rerank_weight=rerank_weight)
+                rerank_k=depth, rrf_k=settings.rrf_k, rerank_weight=rerank_weight)
             save(run_name, rows, latencies, manifest,
                  fusion_weight_choice={"bm25_weight": weight, "chosen_by": choice})
             results[run_name], by_weight[rerank_weight] = rows, rows
             latency_by_weight[rerank_weight] = latencies
             reranked_runs.append(run_name)
             # The first weight includes scoring every candidate; later ones reuse the scores.
-            print(f"{run_name}: {time.perf_counter() - began:.0f}s", flush=True)
+            elapsed = time.perf_counter() - began
+            if stem not in timing:
+                calls = reranker.windows_per_call[calls_before:]
+                timing[stem] = (reranker, sum(calls) / max(1, len(calls)), depth)
+            print(f"{run_name}: {elapsed:.0f}s", flush=True)
         if len(by_weight) > 1 and args.split == "development":
             rows, chosen = cross_validated(by_weight, folds=args.cv_folds)
             # The first weight's latencies include scoring the candidates; later ones reuse them.
@@ -338,6 +398,18 @@ def main():
         better, worse = compare(rows, bm25_rows)
         print(f"{name:58} {o['recall@5']['mean']:>6.3f} {o['recall@10']['mean']:>6.3f} "
               f"{o['recall@20']['mean']:>6.3f} {o['ndcg@10']['mean']:>8.3f}  {better:>3} / {worse}")
+
+    if timing:
+        print(f"\nEstimated reranking cost per question on this device ({args.device}): windows "
+              "the setting scores per question x measured seconds per window (cache-independent):")
+        costs = {}
+        for stem, (reranker, windows, depth) in timing.items():
+            seconds = windows * reranker.seconds_per_window()
+            costs[stem] = {"candidates": depth, "windows_per_question": round(windows, 1),
+                           "seconds_per_question": round(seconds, 3), "device": args.device}
+            print(f"{stem:58} {depth:>4} candidates, {windows:6.1f} windows, ~{seconds:.2f}s")
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        (args.output_dir / f"reranker_costs_{args.split}.json").write_text(json.dumps(costs, indent=2) + "\n")
 
     base = results.get(f"hybrid_{dense_label}_w{weight:g}_full_{args.split}") if rerankers else None
     if base is not None:

@@ -43,12 +43,22 @@ Reranker options (the web app does not enable a reranker):
   weights on development, a cross-validated `blendcv` run picks each fold's weight on the
   other folds (`--cv-folds`, default 5); report that run, not the best fixed weight.
 - `--reranker-max-length` sets the token limit per query + window.
+- `--rerank-depths 50:8,100:8,20:4` compares several settings in one run, as
+  candidates:windows pairs: how many fused candidates are reranked (at least `--top-k`; 100
+  includes the dense model's own candidates) and the most windows per document. Scores are
+  cached per document, and the run saves each setting's estimated reranking cost per question
+  in `reranker_costs_<split>.json`.
+- `python scripts/time_reranker.py` times hybrid search with and without the reranker on your
+  own computer, as the web app runs it (CPU, top 5), for a chosen setting.
 - The run ends with each reranked variant's change versus the same hybrid without a
   reranker, with 95% paired bootstrap intervals.
 
 [`notebooks/reranker_colab.ipynb`](../notebooks/reranker_colab.ipynb) runs these on a Colab
 GPU: two window settings, a sweep of blend weights, and one calibration check only if the
 cross-validated development gain has an interval above zero.
+[`notebooks/reranker_tradeoffs_colab.ipynb`](../notebooks/reranker_tradeoffs_colab.ipynb)
+compares 50, 100 and 20 (fast) candidates on development and can recommend the cheapest
+setting within a time budget that is not clearly less accurate than the best.
 
 ## Retrieval results
 
