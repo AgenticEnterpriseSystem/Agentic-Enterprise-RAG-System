@@ -160,6 +160,27 @@ Restart and refresh the browser. Select **Adaptive agent** for follow-up searche
 or **Fixed RAG** for one search. Inspect the answer's citations and source excerpts.
 Restarting resets the app's session cap, not actual provider spending.
 
+## Optional reranker
+
+Off by default. A cross-encoder can re-sort each search's top candidates by reading their
+whole documents. On development questions, `bge-reranker-base` at the settings below raised
+Recall@5 from 0.641 to 0.691 and nDCG@10 from 0.604 to 0.659 (see [Evaluation](EVALUATION.md)),
+but on a 16 GB laptop CPU it added about 20 seconds **per search**. The adaptive agent often
+searches four or five times, so with the reranker it can exceed the 120-second limit; use it
+with **Fixed RAG**, or on a machine with a GPU (`RAG_DEVICE=cuda`).
+
+```dotenv
+RAG_RERANKER=bge-reranker-base
+RAG_RERANK_K=20
+RAG_RERANK_MAX_WINDOWS=4
+```
+
+`RAG_RERANK_K` is how many candidates are re-sorted and `RAG_RERANK_MAX_WINDOWS` how many
+2,000-character windows of each document are read. `RAG_RERANK_WEIGHT` (default 0.7) is the
+reranker's share when blending its order with the hybrid order. The first start downloads the
+model (about 1 GB for `bge-reranker-base`, 2.3 GB for `bge-reranker-v2-m3`). Restart after
+changing these settings; `python scripts/run_web.py --check` shows whether a reranker is set.
+
 ## Docker alternative
 
 Docker is optional. Install Docker with Compose v2, prepare the same search data

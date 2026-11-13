@@ -68,6 +68,7 @@ def main():
     print(json.dumps({'mode': env.get('RAG_MODE', 'retrieval'),
                       'retrieval': env['RAG_RETRIEVAL'], 'device': env['RAG_DEVICE'],
                       'corpus': env['RAG_CORPUS'], 'dense_index': env['RAG_DENSE_INDEX'],
+                      'reranker': env.get('RAG_RERANKER') or None,
                       'port': env.get('WEB_PORT', '8000')}), flush=True)
     if args.check:
         return

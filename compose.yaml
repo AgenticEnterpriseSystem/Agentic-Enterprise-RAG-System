@@ -40,6 +40,11 @@ services:
       RAG_MAX_CONTEXT_CHARS: ${RAG_MAX_CONTEXT_CHARS:-24000}
       RAG_MAX_ROUNDS: ${RAG_MAX_ROUNDS:-2}
       RAG_TOP_K: ${RAG_TOP_K:-5}
+      RAG_RERANKER: ${RAG_RERANKER:-}
+      RAG_RERANK_WEIGHT: ${RAG_RERANK_WEIGHT:-0.7}
+      RAG_RERANK_WINDOW_CHARS: ${RAG_RERANK_WINDOW_CHARS:-2000}
+      RAG_RERANK_MAX_WINDOWS: ${RAG_RERANK_MAX_WINDOWS:-4}
+      RAG_RERANKER_MAX_LENGTH: ${RAG_RERANKER_MAX_LENGTH:-512}
     volumes:
       - "${ARTIFACTS_DIR:-./.cache/hybrid-artifacts}:/data:ro"
       - model-cache:/app/.cache/models

@@ -86,16 +86,21 @@ class CrossEncoderReranker:
                 owners.append(index)
         return pairs, owners
 
-    def _score(self, pairs):
-        if self.scorer is not None:
-            return list(self.scorer(pairs))
-        if self.model is None:
+    def load(self):
+        """Load the model now instead of on the first query (no-op with a test scorer)."""
+        if self.scorer is None and self.model is None:
             from sentence_transformers import CrossEncoder
             self.model = CrossEncoder(self.identity["name"], revision=self.identity["revision"],
                                       device=self.device, trust_remote_code=False,
                                       max_length=self.identity["max_length"])
             if self.identity["fp16"]:
                 self.model.half()  # Half precision for GPU inference only.
+        return self
+
+    def _score(self, pairs):
+        if self.scorer is not None:
+            return list(self.scorer(pairs))
+        self.load()
         return list(self.model.predict(pairs, batch_size=self.batch_size, show_progress_bar=False))
 
     def rerank(self, query: str, evidence: Sequence[Evidence], top_k: int) -> tuple[Evidence, ...]:

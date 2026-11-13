@@ -72,6 +72,15 @@ EMBEDDING_MODELS = {
                                              "that answer it\nQuery:"},
 }
 
+# Cross-encoder rerankers at the exact Hub commits measured in evaluation/results.
+RERANKER_MODELS = {
+    "bge-reranker-base": {"name": "BAAI/bge-reranker-base",
+                          "revision": "2cfc18c9415c912f9d8155881c133215df768a70"},
+    "bge-reranker-v2-m3": {"name": "BAAI/bge-reranker-v2-m3",
+                           "revision": "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e"},
+}
+
+
 def runtime_versions():
     """Record installed inference/data libraries without importing model stacks."""
     import importlib.metadata

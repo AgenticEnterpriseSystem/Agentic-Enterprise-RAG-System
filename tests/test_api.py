@@ -33,6 +33,44 @@ def test_empty_optional_environment_values_use_defaults(monkeypatch):
         WebSettings.from_env()
 
 
+def test_optional_reranker_settings_and_attachment(monkeypatch):
+    from src.api.runtime import RuntimeConfigurationError, attach_reranker
+    from src.config import RERANKER_MODELS
+    from src.retrieval.hybrid import HybridConfig, HybridRetriever
+    from tests.test_retrieval import Fixed, evidence, request
+
+    for key in WebSettings.model_fields:
+        monkeypatch.delenv('RAG_' + key.upper(), raising=False)
+    monkeypatch.setenv('RAG_MODE', 'retrieval')
+    assert WebSettings.from_env().reranker == ''  # Off by default.
+    monkeypatch.setenv('RAG_RERANKER', 'bge-reranker-base')
+    monkeypatch.setenv('RAG_RERANK_MAX_WINDOWS', '4')
+    monkeypatch.setenv('RAG_RERANK_K', '20')
+    config = WebSettings.from_env()
+    assert (config.reranker, config.rerank_max_windows, config.rerank_k) == ('bge-reranker-base', 4, 20)
+    monkeypatch.setenv('RAG_RERANKER', 'unknown-model')
+    with pytest.raises(ValueError):
+        WebSettings.from_env()
+
+    class Documents(Fixed):
+        def full_text(self, doc_id):
+            return f"Title {doc_id}\\n" + ("the answer is here" if doc_id == "c" else "nothing")
+
+    items = [evidence(d) for d in ("a", "b", "c")]
+    hybrid = HybridRetriever(Documents(*items), Fixed(), config=HybridConfig(
+        candidate_k=3, rerank_k=3, bm25_weight=1, dense_weight=0))
+    chosen = WebSettings(mode='retrieval', reranker='bge-reranker-base', rerank_weight=1, rerank_k=3)
+    reranked = attach_reranker(hybrid, chosen, scorer=lambda pairs: [
+        float('answer' in text) for _, text in pairs])
+    assert reranked.manifest['reranker']['name'] == RERANKER_MODELS['bge-reranker-base']['name']
+    assert reranked.manifest['config']['rerank_weight'] == 1
+    assert reranked.manifest['config']['rerank_k'] == 3
+    assert reranked.manifest['reranker']['windows']['full_document'] is True
+    assert reranked.search(request(top_k=1))[0].chunk.doc_id == 'c'  # Read from the full text.
+    with pytest.raises(RuntimeConfigurationError):
+        attach_reranker(FixtureRetriever(), chosen, scorer=lambda pairs: [0] * len(pairs))
+
+
 def wait_ready(client):
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:

@@ -39,6 +39,14 @@ class WebSettings(RetrievalSettings):
     max_context_chars: int = Field(default=24000, ge=128, le=48000)
     max_rounds: int = Field(default=2, ge=1, le=5)
     top_k: int = Field(default=5, ge=1, le=20)
+    # Optional cross-encoder reranker (off by default; slow on a laptop CPU). It scores each
+    # of the top RAG_RERANK_K candidates on up to RAG_RERANK_MAX_WINDOWS windows of its whole
+    # document and blends its rank with the hybrid rank (RAG_RERANK_WEIGHT = reranker share).
+    reranker: Literal['', 'bge-reranker-base', 'bge-reranker-v2-m3'] = ''
+    rerank_weight: float = Field(default=0.7, ge=0, le=1)
+    rerank_window_chars: int = Field(default=2000, ge=200, le=8000)
+    rerank_max_windows: int = Field(default=4, ge=1, le=16)
+    reranker_max_length: int = Field(default=512, ge=64, le=8192)
 
     @field_validator('allowed_sources', 'allowed_origins', mode='before')
     @classmethod
@@ -105,7 +113,28 @@ def load_retriever(settings):
     """Use the existing retrievers; artifact checks happen before loading a model."""
     if settings.mode == 'fixture':
         return FixtureRetriever()
-    return load_configured_retriever(settings)
+    retriever = load_configured_retriever(settings)
+    return attach_reranker(retriever, settings) if settings.reranker else retriever
+
+
+def attach_reranker(retriever, settings, *, scorer=None):
+    """Rebuild a hybrid retriever with the configured reranker; loads the model now."""
+    from src.config import RERANKER_MODELS
+    from src.retrieval.hybrid import HybridRetriever
+    from src.retrieval.reranker import CrossEncoderReranker
+    if not isinstance(retriever, HybridRetriever):
+        raise RuntimeConfigurationError('RAG_RERANKER requires RAG_RETRIEVAL=hybrid.')
+    model = RERANKER_MODELS[settings.reranker]
+    reranker = CrossEncoderReranker(
+        model['name'], model['revision'], device=settings.device,
+        max_length=settings.reranker_max_length, fp16=settings.device.startswith('cuda'),
+        window_chars=settings.rerank_window_chars, max_windows=settings.rerank_max_windows,
+        document_text=getattr(retriever.bm25, 'full_text', None), scorer=scorer)
+    reranker.load()  # Load at startup so the first question is not slowed by it.
+    config = type(retriever.config)(**{**retriever.config.model_dump(),
+                                       'rerank_k': settings.rerank_k,
+                                       'rerank_weight': settings.rerank_weight})
+    return HybridRetriever(retriever.bm25, retriever.dense, config=config, reranker=reranker)
 
 
 class Runtime:
@@ -146,6 +175,7 @@ class Runtime:
                 'model': self.settings.model if self.settings.mode == 'live' else None,
                 'retrieval_config': self.retriever.manifest.get('config'),
                 'embedding_model': self.retriever.manifest.get('dense', {}).get('model'),
+                'reranker': self.retriever.manifest.get('reranker'),
                 'budget_remaining_usd': max(0, self.settings.budget_usd-self.provider.reserved_usd)
                     if self.settings.mode == 'live' else None}
 

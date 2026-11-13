@@ -50,6 +50,10 @@ Reranker options (the web app does not enable a reranker):
   in `reranker_costs_<split>.json`.
 - `python scripts/time_reranker.py` times hybrid search with and without the reranker on your
   own computer, as the web app runs it (CPU, top 5), for a chosen setting.
+- `python scripts/time_agent.py --budget-usd 1` is a **paid** live run: it sends the 10
+  development questions of the 2026-10-21 agent record through the app's own runtime, with and
+  without the reranker, and records total time, searches, stop reasons, answers and cost
+  (`--modes agentic,baseline` adds Fixed RAG). Uses the live-mode settings in `.env`.
 - The run ends with each reranked variant's change versus the same hybrid without a
   reranker, with 95% paired bootstrap intervals.
 
