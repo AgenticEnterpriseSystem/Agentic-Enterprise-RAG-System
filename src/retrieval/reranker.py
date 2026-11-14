@@ -43,7 +43,8 @@ class CrossEncoderReranker:
                  batch_size: int = 16, max_length: int = 512, fp16: bool = False,
                  scorer: Callable[[Sequence[tuple[str, str]]], Sequence[float]] | None = None,
                  window_chars: int | None = None, window_stride: int | None = None,
-                 max_windows: int = 8, document_text: Callable[[str], str | None] | None = None):
+                 max_windows: int = 8, document_text: Callable[[str], str | None] | None = None,
+                 document_header: Callable[[str], str] | None = None):
         if not model_name.strip() or not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
             raise ValueError("Provide a model name and immutable 40-character commit revision")
         if max_length < 2:
@@ -59,10 +60,13 @@ class CrossEncoderReranker:
         self.window_stride = window_stride or (window_chars // 2 if window_chars else None)
         self.max_windows = max_windows
         self.document_text = document_text
+        self.document_header = document_header
         if window_chars is not None:
             self.identity["windows"] = {"chars": window_chars, "stride": self.window_stride,
                                         "max": max_windows, "aggregate": "max",
                                         "full_document": document_text is not None}
+            if document_header is not None:
+                self.identity["windows"]["header"] = "path-v1"
         self.device, self.batch_size = device, batch_size
         self.scorer = scorer
         self.model = None
@@ -79,8 +83,12 @@ class CrossEncoderReranker:
             for start, end in document_windows(text, query, self.window_chars,
                                                self.window_stride, self.max_windows):
                 window = text[start:end]
+                if self.document_header is not None:
+                    # Every window starts with the path header and the title.
+                    body = window[len(title):].lstrip("\n") if title and window.startswith(title) else window
+                    window = "\n".join(p for p in (self.document_header(item.chunk.doc_id), title, body) if p)
                 # Later windows keep the document's name, like the dense index's passages.
-                if title and not window.startswith(title):
+                elif title and not window.startswith(title):
                     window = f"{title}\n{window}"
                 pairs.append((query, window))
                 owners.append(index)

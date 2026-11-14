@@ -22,6 +22,7 @@ import numpy as np
 import pyarrow.parquet as pq
 from pydantic import Field
 
+from src.retrieval.headers import HEADER_VERSION, path_header
 from src.retrieval.passages import bounded_passage
 from src.config import CORPUS_DIR
 from src.contracts import Chunk, Contract, Evidence, SearchRequest, validate_evidence
@@ -110,14 +111,20 @@ def build_bm25(texts, config: BM25Config) -> tuple[bm25s.BM25, dict]:
     return model, stats
 
 
-def corpus_texts(corpus_path: Path, doc_ids: list):
-    """Stream document texts in corpus order, collecting IDs as a side effect."""
-    for batch in pq.ParquetFile(corpus_path).iter_batches(
-        batch_size=2000, columns=["doc_id", "title", "content"]
-    ):
+def corpus_texts(corpus_path: Path, doc_ids: list, headers: bool = False):
+    """Stream document texts in corpus order, collecting IDs as a side effect.
+
+    With `headers`, each text starts with its path header (see `src.retrieval.headers`).
+    """
+    columns = ["doc_id", "title", "content"] + (["source_type", "path"] if headers else [])
+    for batch in pq.ParquetFile(corpus_path).iter_batches(batch_size=2000, columns=columns):
         rows = batch.to_pydict()
         doc_ids.extend(rows["doc_id"])
-        yield from map(document_text, rows["title"], rows["content"])
+        texts = map(document_text, rows["title"], rows["content"])
+        if headers:
+            texts = (f"{path_header(source, path)}\n{text}" for source, path, text
+                     in zip(rows["source_type"], rows["path"], texts))
+        yield from texts
 
 
 class CorpusBM25:
@@ -196,6 +203,13 @@ class CorpusBM25:
         row = self.corpus.slice(self.position[doc_id], 1).to_pylist()[0]
         return document_text(row["title"], row["content"])
 
+    def header(self, doc_id: str) -> str:
+        """The document's path header, or "" when the corpus has no paths."""
+        if self.corpus is None or doc_id not in self.position or "path" not in self.corpus.column_names:
+            return ""
+        row = self.corpus.slice(self.position[doc_id], 1).to_pylist()[0]
+        return path_header(row["source_type"], row["path"])
+
     def _chunk(self, doc_id):
         # Slice one row without concatenating the full chunked string columns.
         row = self.corpus.slice(self.position[doc_id], 1).to_pylist()[0]
@@ -213,15 +227,16 @@ class CorpusBM25:
         )
 
     @classmethod
-    def build(cls, corpus_path: Path, config: BM25Config | None = None):
+    def build(cls, corpus_path: Path, config: BM25Config | None = None, headers: bool = False):
         config = config or BM25Config()
         doc_ids: list[str] = []
-        texts = corpus_texts(corpus_path, doc_ids)
+        texts = corpus_texts(corpus_path, doc_ids, headers)
         model, stats = build_bm25(texts, config)
         manifest = {
             "version": INDEX_VERSION,
             "method": "bm25+ (bm25s)",
-            "unit": "document (title + content)",
+            "unit": "document (path header + title + content)" if headers else "document (title + content)",
+            **({"headers": HEADER_VERSION} if headers else {}),
             "config": config.model_dump(),
             "corpus_sha256": file_sha256(corpus_path),
             "stats": stats,
@@ -247,9 +262,10 @@ class CorpusBM25:
             if file_sha256(corpus_path) != manifest["corpus_sha256"]:
                 raise ValueError("Corpus differs from the one used to build the index")
             if corpus is None:
-                corpus = pq.read_table(
-                    corpus_path, columns=["doc_id", "source_type", "title", "content"]
-                )
+                # Paths (for headers) are read when the corpus has them.
+                names = pq.ParquetFile(corpus_path).schema_arrow.names
+                corpus = pq.read_table(corpus_path, columns=[
+                    "doc_id", "source_type", "title", "content"] + (["path"] if "path" in names else []))
         model = bm25s.BM25.load(directory, mmap=mmap)
         doc_ids = json.loads((directory / "doc_ids.json").read_text())
         if corpus is not None and corpus.column("doc_id").to_pylist() != doc_ids:
@@ -277,9 +293,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--corpus", type=Path, default=CORPUS_DIR / "documents.parquet")
     parser.add_argument("--output", type=Path, default=CORPUS_DIR / "indexes" / "bm25")
+    parser.add_argument("--path-headers", action="store_true",
+                        help="Index each document with its path header (use a new --output)")
     args = parser.parse_args()
     start = time.perf_counter()
-    index = CorpusBM25.build(args.corpus)
+    index = CorpusBM25.build(args.corpus, headers=args.path_headers)
     index.manifest["build_seconds"] = round(time.perf_counter() - start, 1)
     index.save(args.output)
     print(json.dumps(index.manifest, indent=2))

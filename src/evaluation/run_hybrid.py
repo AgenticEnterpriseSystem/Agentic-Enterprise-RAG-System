@@ -265,6 +265,9 @@ def main():
                         help="Characters between window starts (default: half a window)")
     parser.add_argument("--rerank-max-windows", type=int, default=8,
                         help="Most windows scored per document (the lead plus the best matches)")
+    parser.add_argument("--rerank-headers", default="off",
+                        help="Start each reranker window with the document's path header: off, "
+                             "on, or off,on to compare both (needs --rerank-window-chars)")
     parser.add_argument("--rerank-depths", type=parse_depths, default=None,
                         help="Compare reranker settings in one run, as candidates:windows pairs "
                              "(e.g. 50:8,100:8,20:4): how many fused candidates are reranked and "
@@ -295,6 +298,7 @@ def main():
     bm25, dense = load_pair(settings)
     load_seconds = time.perf_counter() - started
     dense_label = method_label(dense.manifest["model"]["name"])
+    bm25_tag = "_bm25hdr" if bm25.manifest.get("headers") else ""  # BM25 indexed with path headers.
     user = UserContext(user_id="benchmark", allowed_doc_ids=frozenset(bm25.doc_ids))
     print(f"Indexes loaded in {load_seconds:.0f}s; searching {len(questions)} questions...", flush=True)
     retrievers = (bm25, dense)
@@ -312,14 +316,14 @@ def main():
     bm25_rows, bm25_latency = run_single(caches[0], seconds, errors, questions, args.top_k)
     results["BM25+ alone"] = bm25_rows
     if args.write_baselines:
-        save(f"bm25_full_{args.split}", bm25_rows, bm25_latency, bm25.manifest)
+        save(f"bm25{bm25_tag}_full_{args.split}", bm25_rows, bm25_latency, bm25.manifest)
         dense_rows, dense_latency = run_single(caches[1], seconds, errors, questions, args.top_k)
         save(f"dense_{dense_label}_full_{args.split}", dense_rows, dense_latency, dense.manifest)
         results[f"{dense_label} alone"] = dense_rows
 
     fusion: dict[float, float] = {}
     for weight in args.bm25_weights:
-        name = f"hybrid_{dense_label}_w{weight:g}_full_{args.split}"
+        name = f"hybrid_{dense_label}{bm25_tag}_w{weight:g}_full_{args.split}"
         rows, latencies, manifest = run_variant(retrievers, caches, seconds, errors, questions,
                                                 user, bm25_weight=weight, top_k=args.top_k,
                                                 candidate_k=settings.candidate_k,
@@ -333,25 +337,32 @@ def main():
             parser.error('--rerank-bm25-weight "best" tunes on the split; pass a number here')
         weight, choice = max(fusion, key=lambda w: fusion[w]), "best development Recall@10"
     windows = args.rerank_window_chars or None
+    header_modes = [mode.strip() == "on" for mode in args.rerank_headers.split(",") if mode.strip()]
+    if not header_modes or any(m.strip() not in ("on", "off") for m in args.rerank_headers.split(",") if m.strip()):
+        parser.error("--rerank-headers takes off, on, or off,on")
+    if any(header_modes) and not windows:
+        parser.error("--rerank-headers on needs --rerank-window-chars")
     depths = args.rerank_depths or [(settings.rerank_k, args.rerank_max_windows)]
     defaults = (RetrievalSettings().rerank_k, 8)
     reranked_runs, shared, timing = [], {}, {}
-    for (label, name, revision), (depth, max_windows) in (
-            (r, d) for r in rerankers for d in depths):
+    for (label, name, revision), (depth, max_windows), header in (
+            (r, d, h) for r in rerankers for d in depths for h in header_modes):
         if depth < args.top_k:
             parser.error(f"{depth} candidates is below --top-k {args.top_k}: the hybrid passes "
                          "at least --top-k candidates, so the setting would not differ")
         if depth > settings.candidate_k * 2:
             parser.error(f"{depth} candidates exceeds the two {settings.candidate_k}-document "
                          "searches; raise --candidate-k")
-        if (label, max_windows) not in shared:  # One scorer, and its cache, per window cap.
-            shared[(label, max_windows)] = CachedReranker(CrossEncoderReranker(
+        if (label, max_windows, header) not in shared:  # One scorer and cache per window setup.
+            shared[(label, max_windows, header)] = CachedReranker(CrossEncoderReranker(
                 name, revision, device=args.device, batch_size=args.reranker_batch_size,
                 max_length=args.reranker_max_length, fp16=args.device.startswith("cuda"),
                 window_chars=windows, window_stride=args.rerank_window_stride or None,
-                max_windows=max_windows, document_text=bm25.full_text if windows else None))
-        reranker = shared[(label, max_windows)]
-        stem = f"hybrid_{dense_label}_w{weight:g}_{label}" + (f"_maxp{windows}" if windows else "")
+                max_windows=max_windows, document_text=bm25.full_text if windows else None,
+                document_header=bm25.header if header else None))
+        reranker = shared[(label, max_windows, header)]
+        stem = (f"hybrid_{dense_label}{bm25_tag}_w{weight:g}_{label}"
+                + (f"_maxp{windows}" if windows else "") + ("_rhdr" if header else ""))
         if (depth, max_windows if windows else 8) != defaults:  # Earlier runs keep their names.
             stem += f"_k{depth}" + (f"_win{max_windows}" if windows else "")
         by_weight, latency_by_weight, manifest = {}, {}, None
@@ -411,7 +422,7 @@ def main():
         args.output_dir.mkdir(parents=True, exist_ok=True)
         (args.output_dir / f"reranker_costs_{args.split}.json").write_text(json.dumps(costs, indent=2) + "\n")
 
-    base = results.get(f"hybrid_{dense_label}_w{weight:g}_full_{args.split}") if rerankers else None
+    base = results.get(f"hybrid_{dense_label}{bm25_tag}_w{weight:g}_full_{args.split}") if rerankers else None
     if base is not None:
         print("\nChange versus the same hybrid without a reranker (95% bootstrap intervals):")
         for name in reranked_runs:

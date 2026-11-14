@@ -43,6 +43,14 @@ Reranker options (the web app does not enable a reranker):
   weights on development, a cross-validated `blendcv` run picks each fold's weight on the
   other folds (`--cv-folds`, default 5); report that run, not the best fixed weight.
 - `--reranker-max-length` sets the token limit per query + window.
+- `--rerank-headers on` (or `off,on` to compare) starts every reranker window with the
+  document's path header, e.g. `Slack · #devex · 2025-10-09 · opaque routing shim sdk discuss`
+  (`src/retrieval/headers.py`); it needs `--rerank-window-chars`. Run names gain `_rhdr`.
+- `python -m src.retrieval.corpus_bm25 --path-headers --output <new folder>` builds a BM25+
+  index with the same header in front of each document. It keeps the corpus hash, so it loads
+  with the existing dense index; runs on it are named `..._bm25hdr_...`. The header uses only
+  each document's own path; about 8% of documents are deliberately misfiled, so folders can be
+  wrong.
 - `--rerank-depths 50:8,100:8,20:4` compares several settings in one run, as
   candidates:windows pairs: how many fused candidates are reranked (at least `--top-k`; 100
   includes the dense model's own candidates) and the most windows per document. Scores are
@@ -63,6 +71,10 @@ cross-validated development gain has an interval above zero.
 [`notebooks/reranker_tradeoffs_colab.ipynb`](../notebooks/reranker_tradeoffs_colab.ipynb)
 compares 50, 100 and 20 (fast) candidates on development and can recommend the cheapest
 setting within a time budget that is not clearly less accurate than the best.
+[`notebooks/headers_colab.ipynb`](../notebooks/headers_colab.ipynb) tests path headers without
+re-embedding: plain or header BM25+ index × title-only or header reranker windows
+(`bge-reranker-base`, 50 candidates, 8 windows), on development, with paired intervals against
+the current hybrid and a per-source (Slack) breakdown.
 
 ## Retrieval results
 

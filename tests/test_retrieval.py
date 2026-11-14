@@ -462,6 +462,68 @@ def test_unknown_date_filtered_and_empty_identity_skips_search():
     assert backend.requests == []
 
 
+def test_path_headers_from_source_paths():
+    from src.retrieval.headers import path_header
+    assert path_header("slack", "slack/devex/1759999992-opaque-routing-shim-sdk-discuss.json") == \
+        "Slack · #devex · 2025-10-09 · opaque routing shim sdk discuss"
+    assert path_header("gmail", "gmail/karthik_iyer/20260930-brightmfg-idp-signed-invite-reject.json") == \
+        "Gmail · karthik iyer · 2026-09-30 · brightmfg idp signed invite reject"
+    assert path_header("jira", "jira/ops-requests/SUP-175001-evening-5xx-surge.json") == \
+        "Jira · ops-requests · SUP-175001 · evening 5xx surge"
+    assert path_header("google_drive", "google_drive/shared_drives/engineering/sre/retro.json") == \
+        "Google Drive · engineering / sre · retro"
+    assert path_header("fireflies", "fireflies/sales-calls/2026-08-27-intake-with-equinox-labs.json") == \
+        "Fireflies · sales-calls · 2026-08-27 · intake with equinox labs"
+    assert path_header("hubspot", "hubspot/company-signal-peak.json") == "HubSpot · company signal peak"
+    assert path_header("slack", None) == ""
+    # Numbers that are not dates stay part of the topic.
+    assert path_header("linear", "linear/design/99999999-x.json").endswith("99999999 x")
+
+
+def test_bm25_path_headers_add_path_words_without_changing_evidence(tmp_path):
+    import pyarrow as pa
+    path = tmp_path / "docs.parquet"
+    pq.write_table(pa.table({
+        "doc_id": ["d0", "d1"], "source_type": ["slack", "slack"], "title": ["devex", "devex"],
+        "content": ["the sdk shim discussion", "lunch plans"],
+        "path": ["slack/devex/1759999992-opaque-routing-shim.json", "slack/devex/1759999993-lunch.json"],
+    }), path)
+    plain = CorpusBM25.build(path)
+    headed = CorpusBM25.build(path, headers=True)
+    assert headed.manifest["headers"] == "path-v1" and "headers" not in plain.manifest
+    assert headed.manifest["corpus_sha256"] == plain.manifest["corpus_sha256"]  # Same corpus file.
+    assert plain.rank("opaque routing", 2) == []  # Only in the path.
+    assert [d for d, _ in headed.rank("opaque routing", 2)] == ["d0"]
+    headed.save(tmp_path / "index")
+    loaded = CorpusBM25.load(tmp_path / "index", corpus_path=path)
+    user = UserContext(user_id="u", allowed_doc_ids=frozenset({"d0", "d1"}))
+    hit = loaded.search(SearchRequest(query="opaque routing", user=user, top_k=1))[0]
+    assert hit.chunk.text == "devex\nthe sdk shim discussion"  # Evidence is the document, not the header.
+    assert loaded.header("d0") == "Slack · #devex · 2025-10-09 · opaque routing shim"
+    assert loaded.full_text("d0") == "devex\nthe sdk shim discussion"
+
+
+def test_reranker_header_starts_every_window():
+    text = "Title\n" + "word " * 400
+    item = Evidence(citation_id="d:0:9", chunk=Chunk(
+        chunk_id="d:0:9", doc_id="d", source_type="slack", title="Title", text="word word",
+        start_char=0, end_char=9), score=1, retrieval_method="bm25")
+    seen = []
+
+    def scorer(pairs):
+        seen.extend(text for _, text in pairs)
+        return [1.0] * len(pairs)
+
+    ranker = CrossEncoderReranker("offline", "a" * 40, scorer=scorer, window_chars=500,
+                                  max_windows=4, document_text={"d": text}.get,
+                                  document_header=lambda doc: "Slack · #devex · 2025-10-09")
+    ranker.rerank("word", (item,), 1)
+    assert len(seen) == 4
+    assert all(w.startswith("Slack · #devex · 2025-10-09\nTitle\n") for w in seen)
+    assert all(w.count("Title") == 1 for w in seen)  # The title is not repeated.
+    assert ranker.identity["windows"]["header"] == "path-v1"
+
+
 def test_document_windows_cover_text_keep_lead_and_cap_by_query_terms():
     from src.retrieval.reranker import document_windows
     assert document_windows("short", "q", 100, 50, 4) == [(0, 5)]
