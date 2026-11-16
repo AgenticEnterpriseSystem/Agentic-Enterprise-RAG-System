@@ -39,14 +39,22 @@ class WebSettings(RetrievalSettings):
     max_context_chars: int = Field(default=24000, ge=128, le=48000)
     max_rounds: int = Field(default=2, ge=1, le=5)
     top_k: int = Field(default=5, ge=1, le=20)
-    # Optional cross-encoder reranker (off by default; slow on a laptop CPU). It scores each
-    # of the top RAG_RERANK_K candidates on up to RAG_RERANK_MAX_WINDOWS windows of its whole
-    # document and blends its rank with the hybrid rank (RAG_RERANK_WEIGHT = reranker share).
-    reranker: Literal['', 'bge-reranker-base', 'bge-reranker-v2-m3'] = ''
+    # Cross-encoder reranker, on by default in hybrid mode (RAG_RERANKER=off turns it off).
+    # It scores each of the top RAG_RERANK_K candidates on up to RAG_RERANK_MAX_WINDOWS
+    # windows of its whole document and blends its rank with the hybrid rank
+    # (RAG_RERANK_WEIGHT = reranker share). Defaults are the "fast" setting: 20 candidates,
+    # 4 windows, weight 0.7 (development Recall@10 0.744 vs 0.722 for the hybrid alone).
+    reranker: Literal['', 'bge-reranker-base', 'bge-reranker-v2-m3'] = 'bge-reranker-base'
+    rerank_k: int = Field(default=20, ge=1, le=200)
     rerank_weight: float = Field(default=0.7, ge=0, le=1)
     rerank_window_chars: int = Field(default=2000, ge=200, le=8000)
     rerank_max_windows: int = Field(default=4, ge=1, le=16)
     reranker_max_length: int = Field(default=512, ge=64, le=8192)
+
+    @field_validator('reranker', mode='before')
+    @classmethod
+    def reranker_off(cls, value):
+        return '' if isinstance(value, str) and value.strip().lower() in ('off', 'none') else value
 
     @field_validator('allowed_sources', 'allowed_origins', mode='before')
     @classmethod
@@ -114,7 +122,10 @@ def load_retriever(settings):
     if settings.mode == 'fixture':
         return FixtureRetriever()
     retriever = load_configured_retriever(settings)
-    return attach_reranker(retriever, settings) if settings.reranker else retriever
+    # The reranker needs the hybrid's two searches; the BM25-only baseline runs without it.
+    if settings.reranker and settings.retrieval == 'hybrid':
+        return attach_reranker(retriever, settings)
+    return retriever
 
 
 def attach_reranker(retriever, settings, *, scorer=None):

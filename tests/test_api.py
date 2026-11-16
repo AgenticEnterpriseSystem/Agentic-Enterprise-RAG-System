@@ -35,19 +35,24 @@ def test_empty_optional_environment_values_use_defaults(monkeypatch):
 
 def test_optional_reranker_settings_and_attachment(monkeypatch):
     from src.api.runtime import RuntimeConfigurationError, attach_reranker
-    from src.config import RERANKER_MODELS
+    from src.config import RERANKER_MODELS, RetrievalSettings
     from src.retrieval.hybrid import HybridConfig, HybridRetriever
     from tests.test_retrieval import Fixed, evidence, request
 
     for key in WebSettings.model_fields:
         monkeypatch.delenv('RAG_' + key.upper(), raising=False)
     monkeypatch.setenv('RAG_MODE', 'retrieval')
-    assert WebSettings.from_env().reranker == ''  # Off by default.
-    monkeypatch.setenv('RAG_RERANKER', 'bge-reranker-base')
-    monkeypatch.setenv('RAG_RERANK_MAX_WINDOWS', '4')
-    monkeypatch.setenv('RAG_RERANK_K', '20')
+    config = WebSettings.from_env()  # On by default, at the fast setting.
+    assert (config.reranker, config.rerank_k, config.rerank_max_windows, config.rerank_weight,
+            config.rerank_window_chars) == ('bge-reranker-base', 20, 4, 0.7, 2000)
+    assert RetrievalSettings().rerank_k == 50  # Evaluation defaults are unchanged.
+    for off in ('off', 'OFF', 'none'):
+        monkeypatch.setenv('RAG_RERANKER', off)
+        assert WebSettings.from_env().reranker == ''
+    monkeypatch.setenv('RAG_RERANKER', 'bge-reranker-v2-m3')
+    monkeypatch.setenv('RAG_RERANK_K', '50')
     config = WebSettings.from_env()
-    assert (config.reranker, config.rerank_max_windows, config.rerank_k) == ('bge-reranker-base', 4, 20)
+    assert (config.reranker, config.rerank_k) == ('bge-reranker-v2-m3', 50)
     monkeypatch.setenv('RAG_RERANKER', 'unknown-model')
     with pytest.raises(ValueError):
         WebSettings.from_env()
@@ -304,7 +309,8 @@ def test_hybrid_manifest_failures_and_shared_corpus(tmp_path, monkeypatch):
     def save():
         (tmp_path / 'manifest.json').write_text(json.dumps(manifest))
     save()
-    config = WebSettings(mode='retrieval', demo_access=True, retrieval='hybrid', dense_index=tmp_path)
+    config = WebSettings(mode='retrieval', demo_access=True, retrieval='hybrid', dense_index=tmp_path,
+                         reranker='off')
     with pytest.raises(FileNotFoundError):
         load_retriever(config)
     (tmp_path / 'doc_ids.json').write_text('["fixture-policy"]')
@@ -335,3 +341,14 @@ def test_hybrid_manifest_failures_and_shared_corpus(tmp_path, monkeypatch):
     assert captured['model'] == 'bge-base' and captured['fp16']
     assert hybrid.config.bm25_weight == .7
     assert hybrid.bm25.corpus is corpus
+
+
+def test_reranker_default_applies_only_to_hybrid(monkeypatch):
+    import src.api.runtime as runtime_module
+    attached = []
+    monkeypatch.setattr(runtime_module, 'load_configured_retriever', lambda s: 'retriever')
+    monkeypatch.setattr(runtime_module, 'attach_reranker', lambda r, s: attached.append(s.reranker) or 'reranked')
+    assert load_retriever(WebSettings(mode='retrieval', retrieval='bm25')) == 'retriever'
+    assert load_retriever(WebSettings(mode='retrieval', reranker='off')) == 'retriever'
+    assert load_retriever(WebSettings(mode='retrieval')) == 'reranked'
+    assert attached == ['bge-reranker-base']

@@ -160,26 +160,32 @@ Restart and refresh the browser. Select **Adaptive agent** for follow-up searche
 or **Fixed RAG** for one search. Inspect the answer's citations and source excerpts.
 Restarting resets the app's session cap, not actual provider spending.
 
-## Optional reranker
+## Reranker
 
-Off by default. A cross-encoder can re-sort each search's top candidates by reading their
-whole documents. On development questions, `bge-reranker-base` at the settings below raised
-Recall@5 from 0.641 to 0.691 and nDCG@10 from 0.604 to 0.659 (see [Evaluation](EVALUATION.md)),
-but on a 16 GB laptop CPU it added about 20 seconds **per search**. The adaptive agent often
-searches four or five times, so with the reranker it can exceed the 120-second limit; use it
-with **Fixed RAG**, or on a machine with a GPU (`RAG_DEVICE=cuda`).
+On by default in hybrid mode. A cross-encoder (`bge-reranker-base`) re-sorts each search's top
+20 candidates by reading up to four 2,000-character windows of each whole document, and its
+order is blended with the hybrid order (reranker share 0.7). On development questions this
+raised Recall@10 from 0.722 to 0.744, Recall@5 from 0.640 to 0.687 and nDCG@10 from 0.604 to
+0.661 (see [Evaluation](EVALUATION.md)). The defaults are:
 
 ```dotenv
 RAG_RERANKER=bge-reranker-base
 RAG_RERANK_K=20
 RAG_RERANK_MAX_WINDOWS=4
+RAG_RERANK_WEIGHT=0.7
 ```
 
+**Speed.** On a 16 GB laptop CPU it adds about 20 seconds **per search**. Fixed RAG searches
+once. The adaptive agent often searches four or five times, so it can exceed the 120-second
+limit (`RAG_MAX_SECONDS`): in a 10-question live run, 5 of 10 agent questions timed out with
+the reranker and none without it. On a laptop, use **Fixed RAG**, or turn the reranker off for
+the agent with `RAG_RERANKER=off`. A GPU (`RAG_DEVICE=cuda`) removes most of the delay.
+
 `RAG_RERANK_K` is how many candidates are re-sorted and `RAG_RERANK_MAX_WINDOWS` how many
-2,000-character windows of each document are read. `RAG_RERANK_WEIGHT` (default 0.7) is the
-reranker's share when blending its order with the hybrid order. The first start downloads the
-model (about 1 GB for `bge-reranker-base`, 2.3 GB for `bge-reranker-v2-m3`). Restart after
-changing these settings; `python scripts/run_web.py --check` shows whether a reranker is set.
+windows of each document are read. The first start downloads the model (about 1 GB for
+`bge-reranker-base`, 2.3 GB for `bge-reranker-v2-m3`) and loads it before the app accepts
+questions. BM25-only mode (`--retrieval bm25`) never uses it. Restart after changing these
+settings; `python scripts/run_web.py --check` shows the reranker the app will load.
 
 ## Docker alternative
 

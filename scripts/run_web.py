@@ -54,6 +54,19 @@ def build_environment(root, inherited, retrieval=None):
     return env
 
 
+def reranker_summary(env):
+    """The reranker the app will load, from the same settings it reads (no model loaded)."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from src.api.runtime import WebSettings
+    names = ('RERANKER', 'RERANK_K', 'RERANK_MAX_WINDOWS', 'RERANK_WEIGHT')
+    values = {n.lower(): env['RAG_' + n] for n in names if env.get('RAG_' + n, '') != ''}
+    settings = WebSettings(**values)
+    if not settings.reranker or env.get('RAG_RETRIEVAL') != 'hybrid':
+        return None
+    return (f'{settings.reranker} ({settings.rerank_k} candidates, {settings.rerank_max_windows} '
+            f'windows, weight {settings.rerank_weight:g})')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--retrieval', choices=('hybrid', 'bm25'),
@@ -68,7 +81,7 @@ def main():
     print(json.dumps({'mode': env.get('RAG_MODE', 'retrieval'),
                       'retrieval': env['RAG_RETRIEVAL'], 'device': env['RAG_DEVICE'],
                       'corpus': env['RAG_CORPUS'], 'dense_index': env['RAG_DENSE_INDEX'],
-                      'reranker': env.get('RAG_RERANKER') or None,
+                      'reranker': reranker_summary(env),
                       'port': env.get('WEB_PORT', '8000')}), flush=True)
     if args.check:
         return

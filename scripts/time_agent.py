@@ -103,7 +103,8 @@ def main():
                                  attach_reranker, load_retriever)
     from src.evaluation.run_retrieval import load_questions
 
-    settings = WebSettings(**{**WebSettings.from_env().model_dump(), "budget_usd": args.budget_usd})
+    settings = WebSettings(**{**WebSettings.from_env().model_dump(), "budget_usd": args.budget_usd,
+                              "reranker": ""})  # The "no reranker" arm.
     if not (settings.allow_paid and settings.model and os.environ.get("ANTHROPIC_API_KEY")
             and settings.input_price > 0 and settings.output_price > 0 and settings.demo_access):
         parser.error("Needs live-mode settings in .env: RAG_ALLOW_PAID=true, RAG_MODEL, "

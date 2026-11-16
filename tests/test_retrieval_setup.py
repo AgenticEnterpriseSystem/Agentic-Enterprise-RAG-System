@@ -34,6 +34,7 @@ def test_web_and_evaluation_use_identical_settings_and_results(tmp_path, monkeyp
     for name, value in values.items():
         monkeypatch.setenv('RAG_' + name.upper(), str(value))
     monkeypatch.setenv('RAG_RETRIEVAL', 'hybrid')
+    monkeypatch.setenv('RAG_RERANKER', 'off')  # Compare the hybrid itself.
     web = load_retriever(WebSettings.from_env())
 
     parser = argparse.ArgumentParser()
@@ -72,8 +73,11 @@ def test_cli_defaults_and_validation_match_web():
     add_retrieval_arguments(parser)
     cli = settings_from_args(parser.parse_args([]))
     web = WebSettings()
+    # The web app reranks 20 candidates (the fast setting); evaluation keeps 50. Without a
+    # reranker this changes nothing, since the web app returns at most 20 results.
+    assert (web.rerank_k, cli.rerank_k) == (20, 50) and web.top_k <= 20
     assert cli == RetrievalSettings.model_validate({
-        name: getattr(web, name) for name in RetrievalSettings.model_fields})
+        name: getattr(web, name) for name in RetrievalSettings.model_fields} | {'rerank_k': 50})
     for flag, value in (('--bm25-weight', '1.1'), ('--candidate-k', '0'), ('--rrf-k', 'nan')):
         with pytest.raises(ValueError):
             settings_from_args(parser.parse_args([flag, value]))

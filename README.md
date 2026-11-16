@@ -119,9 +119,12 @@ What this means:
 - Keyword search beats BGE in every question type, likely because this dataset is
   full of project codenames and IDs, which exact word matching handles well.
 - BGE finds some documents that keyword search misses. Combining the two with more
-  weight on keyword search is the best setting so far. Cross-encoder rerankers made
-  results worse as tested, likely because they saw only one short section of long
-  documents (see [retrieval results](docs/FULL_CORPUS.md#hybrid-search-and-reranking)).
+  weight on keyword search is the best setting so far. Cross-encoder rerankers first made
+  results worse because they saw only one short section of long documents (see
+  [retrieval results](docs/FULL_CORPUS.md#hybrid-search-and-reranking)). Reading windows
+  across the whole document and blending with the hybrid order fixed this: the web app now
+  uses `bge-reranker-base` by default (development Recall@10 0.744 vs 0.722; see
+  [web app](docs/WEB_APP.md#reranker)).
 
 Full results by question type: [docs/FULL_CORPUS.md](docs/FULL_CORPUS.md).
 
