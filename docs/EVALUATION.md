@@ -324,7 +324,9 @@ natural end (2026-11-16):
   keeps no reranker and 5 results, with a 200 s limit per question.
 - `time_agent.py` now also records, per question, whether reference documents were retrieved,
   shown to the critic and cited, the critic's reasons and missing facts, and error details.
-  Unanswered questions are labelled `never_found`, `not_shown` or `judged_insufficient`.
+  Unanswered questions are labelled `no_answer_expected` (an `info_not_found` question, where
+  "insufficient evidence" is the right outcome), `never_found`, `not_shown` or
+  `judged_insufficient`.
 
 ## Answer evaluation: first baseline
 

@@ -60,9 +60,10 @@ def diagnose(response, expected):
     """Where the reference documents were lost, from the run's own trace.
 
     found: in any search's results; shown: in a context the critic or the answer step read;
-    cited: cited by the answer. Unanswered questions are labelled never_found (no reference
-    document was retrieved), not_shown (retrieved but left out of the critic's context) or
-    judged_insufficient (the critic saw at least one and still asked for more).
+    cited: cited by the answer. Unanswered questions are labelled no_answer_expected (the
+    question has no reference documents, so "insufficient evidence" is the right outcome),
+    never_found (no reference document was retrieved), not_shown (retrieved but left out of the
+    critic's context) or judged_insufficient (the critic saw at least one and still asked for more).
     """
     expected = set(expected)
     steps = response.trace.steps
@@ -82,6 +83,8 @@ def diagnose(response, expected):
         label = "answered"
     elif response.answer.status == "error" or response.trace.stop_reason == "error":
         label = "error"
+    elif not expected:
+        label = "no_answer_expected"
     elif not found:
         label = "never_found"
     elif not shown:
@@ -98,6 +101,8 @@ def diagnose(response, expected):
         "answer_output_tokens": generate[-1].usage.output_tokens if generate else None,
         "answer_text": response.answer.text,
         "error_steps": [s.tool for s in steps if s.tool.endswith(":error") or s.tool.endswith(":budget")],
+        # Output tokens of a failed model call; about 1,024 means its reply was cut off.
+        "error_output_tokens": [s.usage.output_tokens for s in steps if s.tool.endswith(":error")],
     }
 
 
@@ -169,7 +174,8 @@ def explain(done):
     for r in done:
         labels[r["diagnosis"]] = labels.get(r["diagnosis"], 0) + 1
     print(f"  Diagnosis: {labels}")
-    print("    never_found = no reference document in any search; not_shown = retrieved but not in "
+    print("    no_answer_expected = the question has no reference documents (insufficient is right); "
+          "never_found = no reference document in any search; not_shown = retrieved but not in "
           "the critic's context; judged_insufficient = the critic saw one and asked for more")
     for r in done:
         if r["diagnosis"] == "answered":
@@ -184,7 +190,8 @@ def explain(done):
                 print(f"      missing: {short('; '.join(last['missing_facts']))}")
         if r["diagnosis"] == "error":
             print(f"      error: {short(r['answer_text'])} | steps {r['error_steps']} | "
-                  f"answer output tokens {r['answer_output_tokens']}")
+                  f"failed call output tokens {r['error_output_tokens']} | answer output tokens "
+                  f"{r['answer_output_tokens']}")
 
 
 def main():
