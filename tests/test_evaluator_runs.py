@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.agents.budget import current_call_budget
+from src.agents.budget import RunBudgetExceeded, current_call_budget
 from src.contracts import AggregateEvidence, Usage
 from src.evaluation import evaluator_runs as runs
 from src.evaluation.experiment_inputs import verify_inputs
@@ -625,3 +625,153 @@ def test_guarded_binding_rejects_execution_tampering(projection, tmp_path, chang
     if changed != "manifest_path_escape": path.write_text('{"tampered":true}')
     with pytest.raises(ValueError): runs.validate_guarded_result_manifest(projection,
         output / "bundle_000001.results.json", output / "bundle_000001.manifest.json")
+
+
+@pytest.mark.parametrize("stage", ["score", "citation_audit"])
+@pytest.mark.parametrize("error_type", [ProviderError, RunBudgetExceeded])
+@pytest.mark.parametrize("known_cost", [False, True])
+def test_stop_policy_halts_provider_and_budget_failures_even_with_known_cost(
+        projection, tmp_path, stage, error_type, known_cost):
+    plan = plan_for(projection, tmp_path, output_protocol="native_schema_v1", stop_on_invalid_response=True)
+    usage = Usage(input_tokens=23, output_tokens=7, api_calls=2,
+        estimated_cost_usd=.000058 if known_cost else None)
+    factory = Factory(plan, {("q1", stage): error_type(usage=usage)})
+    receipt = execute(plan, tmp_path, factory)
+    output = Path(plan.output_directory)
+    result = json.loads((output / "cases/case_000001.json").read_text())
+    assert receipt["fatal_error"] == error_type.__name__
+    assert receipt["committed_results"] == 1 and receipt["reserved_usd"] == "0.05"
+    assert [a.stage for a in factory.admissions] == (["score"] if stage == "score" else ["score", "citation_audit"])
+    assert factory.closed == len(factory.calls) == len(factory.admissions)
+    assert result["execution_identity"] == plan.cases[0].model_dump(mode="json")
+    attempted = result["stage_usage"][stage]
+    assert attempted == {"input_tokens": 23, "output_tokens": 7, "api_calls": 2,
+        "estimated_cost_usd": .000058 if known_cost else None, "token_counts_complete": False}
+    assert result["stage_diagnostics"][stage]["raw_response"] is None
+    assert result["scores"] == (None if stage == "score" else score())
+    assert result["audit"] is None
+    assert result["error" if stage == "score" else "audit_error"] == error_type.__name__
+    assert not (output / "cases/case_000002.json").exists()
+    if stage == "score":
+        assert not (output / "stages/case_000001_citation_audit.intent.json").exists()
+    assert receipt["coverage_counts"]["not_dispatched"] == 1
+    assert receipt["unknown_cost_stages"] == (0 if known_cost else 1)
+    assert runs.validate_guarded_result_manifest(projection, output / "bundle_000001.results.json",
+        output / "bundle_000001.manifest.json")["committed_results"] == 1
+
+
+@pytest.mark.parametrize("stage", ["score", "citation_audit"])
+@pytest.mark.parametrize("missing", ["estimated_cost_usd", "api_calls", "input_tokens", "output_tokens", "all"])
+def test_stop_policy_keeps_valid_raw_grade_but_halts_incomplete_usage(projection, tmp_path, stage, missing):
+    plan = plan_for(projection, tmp_path, output_protocol="native_schema_v1", stop_on_invalid_response=True)
+    usage = {"input_tokens": 23, "output_tokens": 7, "api_calls": 2, "estimated_cost_usd": .000058}
+    if missing != "all": usage[missing] = None
+    raw = json.dumps(score() if stage == "score" else audit())
+    def unknown(*_args):
+        fields = {} if missing == "all" else {"usage": usage}
+        return SimpleNamespace(text=raw, truncated=False, **fields)
+    factory = Factory(plan, {("q1", stage): unknown})
+    receipt = execute(plan, tmp_path, factory)
+    output = Path(plan.output_directory)
+    result = json.loads((output / "cases/case_000001.json").read_text())
+    assert receipt["fatal_error"] == "IncompleteEvaluatorUsage"
+    assert receipt["committed_results"] == 1 and receipt["reserved_usd"] == "0.05"
+    assert [a.stage for a in factory.admissions] == (["score"] if stage == "score" else ["score", "citation_audit"])
+    assert len(factory.calls) == len(factory.admissions) == factory.closed
+    assert result["scores"] == result["raw_scores"] == score()
+    assert result["execution_identity"] == plan.cases[0].model_dump(mode="json")
+    assert result["audit"] == (None if stage == "score" else audit())
+    assert result["error"] is None
+    assert result["audit_error"] == ("EvaluatorRunError" if stage == "score" else None)
+    retained = result["stage_diagnostics"][stage]["raw_response"]
+    assert retained["complete"] is True and (output / retained["path"]).read_text() == raw
+    attempted = result["stage_usage"][stage]
+    assert attempted["estimated_cost_usd"] is None if missing in {"all", "estimated_cost_usd"} else attempted["estimated_cost_usd"] == .000058
+    assert attempted["api_calls"] is None if missing in {"all", "api_calls"} else attempted["api_calls"] == 2
+    assert not (output / "cases/case_000002.json").exists()
+    assert receipt["coverage_counts"]["not_dispatched"] == 1
+    if stage == "score":
+        assert not (output / "stages/case_000001_citation_audit.intent.json").exists()
+    assert runs.validate_guarded_result_manifest(projection, output / "bundle_000001.results.json",
+        output / "bundle_000001.manifest.json")["committed_results"] == 1
+
+
+def _repin_fixture_stop_policy(output):
+    """Change a completed permissive fixture into an otherwise consistent strict one.
+
+    This deliberately updates every outer hash, so only the admission-history
+    policy can detect the continued stages, rather than a stale file checksum.
+    """
+    def read(name): return json.loads((output / name).read_text())
+    def write(name, value): (output / name).write_bytes(runs._bytes(value) + b"\n")
+    plan = read("plan.json"); plan["stop_on_invalid_response"] = True
+    write("plan.json", plan)
+    plan_hash = runs.evaluator_plan_sha256(runs.EvaluatorPlan.model_validate(plan))
+    grant = read("approval.json"); grant["plan_sha256"] = plan_hash; write("approval.json", grant)
+    journal = read("journal.json"); journal["plan_sha256"] = plan_hash; write("journal.json", journal)
+    receipt = read("receipt.json")
+    receipt.update(plan_sha256=plan_hash, stop_on_invalid_response=True,
+        approval_sha256=runs._sha((output / "approval.json").read_bytes()), fatal_error="IncompleteEvaluatorUsage")
+    for name in receipt["artifacts"]:
+        receipt["artifacts"][name] = runs._sha((output / name).read_bytes())
+    write("receipt.json", receipt)
+    manifest = read("bundle_000001.manifest.json"); manifest["execution"]["plan_sha256"] = plan_hash
+    for name, reference in manifest["execution"]["references"].items():
+        reference["sha256"] = runs._sha((output / name).read_bytes())
+    write("bundle_000001.manifest.json", manifest)
+
+
+@pytest.mark.parametrize("boundary", ["audit_after_unknown_score", "case_after_unknown_audit", "case_after_known_provider_failure"])
+def test_stop_policy_binding_rejects_fully_repinned_continuation(projection, tmp_path, boundary):
+    only_one = boundary == "audit_after_unknown_score"
+    plan = plan_for(projection, tmp_path, selection={"fixed": ["q1"]} if only_one else None,
+        output_protocol="native_schema_v1", stop_on_invalid_response=False)
+    stage = "citation_audit" if boundary == "case_after_unknown_audit" else "score"
+    if boundary == "case_after_known_provider_failure":
+        behavior = ProviderError(usage=Usage(input_tokens=23, output_tokens=7, api_calls=2, estimated_cost_usd=.000058))
+    else:
+        def behavior(*_args):
+            return SimpleNamespace(text=json.dumps(score() if stage == "score" else audit()), truncated=False)
+    factory = Factory(plan, {("q1", stage): behavior})
+    receipt = execute(plan, tmp_path, factory)
+    assert receipt["fatal_error"] is None
+    assert len(factory.calls) == (2 if only_one else 3 if boundary == "case_after_known_provider_failure" else 4)
+    output = Path(plan.output_directory)
+    # This same history remains valid under the explicitly permissive fixture policy.
+    runs.validate_guarded_result_manifest(projection, output / "bundle_000001.results.json",
+        output / "bundle_000001.manifest.json")
+    _repin_fixture_stop_policy(output)
+    with pytest.raises(ValueError, match="continued after a provider failure or incomplete usage"):
+        runs.validate_guarded_result_manifest(projection, output / "bundle_000001.results.json",
+            output / "bundle_000001.manifest.json")
+
+
+@pytest.mark.parametrize("missing", ["input_tokens", "output_tokens"])
+def test_stop_policy_binding_rejects_missing_tokens_despite_repinned_complete_flag(projection, tmp_path, missing):
+    plan = plan_for(projection, tmp_path, selection={"fixed": ["q1"]},
+        output_protocol="native_schema_v1", stop_on_invalid_response=False)
+    usage = {"input_tokens": 23, "output_tokens": 7, "api_calls": 2, "estimated_cost_usd": .000058}
+    usage[missing] = None
+    def unknown(*_args): return SimpleNamespace(text=json.dumps(score()), truncated=False, usage=usage)
+    factory = Factory(plan, {("q1", "score"): unknown})
+    execute(plan, tmp_path, factory)
+    assert [a.stage for a in factory.admissions] == ["score", "citation_audit"]
+    output = Path(plan.output_directory)
+    def read(name): return json.loads((output / name).read_text())
+    def write(name, value): (output / name).write_bytes(runs._bytes(value) + b"\n")
+    outcome_name = "stages/case_000001_score.outcome.json"
+    outcome = read(outcome_name); outcome["usage"]["token_counts_complete"] = True; write(outcome_name, outcome)
+    result_name = "cases/case_000001.json"
+    result = read(result_name)
+    result["stage_usage"]["score"]["token_counts_complete"] = True
+    result["usage"] = runs._sum_usage(list(result["stage_usage"].values()))
+    write(result_name, result); write("bundle_000001.results.json", [result])
+    journal = read("journal.json")
+    journal["cases"][0]["result_sha256"] = runs._sha((output / result_name).read_bytes())
+    write("journal.json", journal)
+    receipt = read("receipt.json")
+    receipt["reported_usage"] = result["usage"]; write("receipt.json", receipt)
+    _repin_fixture_stop_policy(output)
+    with pytest.raises(ValueError, match="continued after a provider failure or incomplete usage"):
+        runs.validate_guarded_result_manifest(projection, output / "bundle_000001.results.json",
+            output / "bundle_000001.manifest.json")

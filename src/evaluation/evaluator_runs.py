@@ -342,6 +342,12 @@ def _sum_usage(values):
     return result
 
 
+def _incomplete_usage(usage):
+    return (any(usage[key] is None for key in (
+        "input_tokens", "output_tokens", "api_calls", "estimated_cost_usd"))
+        or not usage["token_counts_complete"])
+
+
 def _response_payload(raw, *, stage, complete, truncated, protocol):
     """Classify retained bytes without rendering or executing provider text."""
     if not complete:
@@ -452,11 +458,20 @@ class _Stages:
                     self.fatal = "InvalidEvaluatorResponse"
                 raise ValueError("Invalid evaluator response")
             self.validated[stage] = parsed
+            if self.plan.stop_on_invalid_response and _incomplete_usage(outcome["usage"]):
+                # Keep a usable grade/raw response, but do not admit its audit
+                # or another case while the attempted stage's usage is unknown.
+                self.fatal = "IncompleteEvaluatorUsage"
             return completion
         except BaseException as error:
             outcome["error"] = type(error).__name__
             if isinstance(error, EvaluatorRunError) or not isinstance(error, (ValueError, ProviderError, RunBudgetExceeded)):
                 self.fatal = type(error).__name__
+            elif self.plan.stop_on_invalid_response:
+                if isinstance(error, (ProviderError, RunBudgetExceeded)):
+                    self.fatal = type(error).__name__
+                elif self.fatal is None and outcome["provider_complete_called"] and _incomplete_usage(outcome["usage"]):
+                    self.fatal = "IncompleteEvaluatorUsage"
             raise
         finally:
             if provider is not None and callable(getattr(provider, "close", None)):
@@ -694,7 +709,7 @@ def validate_guarded_result_manifest(bundle_dir, results_file, evaluator_manifes
         and isinstance(journal.get("cases"), list)
         and len(journal["cases"]) == receipt.get("committed_results") <= len(plan.cases),
         "Guarded execution journal differs")
-    all_records, known_usage, logical_calls, diagnostics, invalid_responses = {}, [], 0, [], []
+    all_records, known_usage, logical_calls, diagnostics, invalid_responses, policy_stops = {}, [], 0, [], [], []
     score_template = _regular_bytes(ROOT / plan.evaluator_sources["score_prompt"]).decode()
     audit_template = _regular_bytes(ROOT / plan.evaluator_sources["audit_prompt"]).decode()
     for ordinal, item in enumerate(journal["cases"], 1):
@@ -735,6 +750,9 @@ def validate_guarded_result_manifest(bundle_dir, results_file, evaluator_manifes
                 and (usage["output_tokens"] is None or usage["output_tokens"] <= plan.settings.max_output_tokens)
                 and (usage["api_calls"] is None or usage["api_calls"] <= 2),
                 "Stage usage or spending exceeds its admitted bounds")
+            if outcome["provider_complete_called"] and (
+                    outcome.get("error") in {"ProviderError", "RunBudgetExceeded"} or _incomplete_usage(usage)):
+                policy_stops.append((ordinal, stage))
             raw = outcome.get("raw_response")
             if raw is not None:
                 _need(type(raw) is dict and set(raw) == {"path", "sha256", "size_bytes", "total_size_bytes", "complete"}
@@ -806,6 +824,14 @@ def validate_guarded_result_manifest(bundle_dir, results_file, evaluator_manifes
             and (stage != "score" or set(journal["cases"][-1]["stages"]) == {"score"})
             and receipt.get("fatal_error") in {"InvalidEvaluatorResponse", "ProviderCleanupError"},
             "Execution continued after its first invalid evaluator response")
+    if plan.stop_on_invalid_response and policy_stops:
+        # Stored JSON sorts stage keys; their dictionary order is not dispatch
+        # order. There must be just one stopping boundary, at the final case,
+        # with no audit admitted after a stopping score stage.
+        _need(len(policy_stops) == 1 and policy_stops[0][0] == len(journal["cases"])
+            and (policy_stops[0][1] != "score" or set(journal["cases"][-1]["stages"]) == {"score"})
+            and isinstance(receipt.get("fatal_error"), str) and bool(receipt["fatal_error"]),
+            "Execution continued after a provider failure or incomplete usage")
     reserved = len(journal["cases"]) * plan.settings.case_cost_cap_usd
     _need(_amount(journal["reserved_usd"]) == _amount(receipt["reserved_usd"]) == reserved <= plan.settings.total_cost_cap_usd
         and receipt.get("logical_provider_calls") == logical_calls

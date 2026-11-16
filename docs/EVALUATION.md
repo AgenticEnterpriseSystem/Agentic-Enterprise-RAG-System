@@ -180,7 +180,12 @@ Score each applicable dimension independently. A usable answer needs 2 on every 
 | Citation support | Central claims unsupported | Some support missing or ambiguous | Every factual claim supported |
 | Abstention/limits | Unsupported answer or unjustified refusal | Important limitation missed | Answers when justified and explains unavailable or conflicting evidence |
 
-Completeness is N/A without reference answer facts; citation support is N/A without factual claims. N/A is not zero. Track appropriate and unnecessary refusal separately.
+Citation support is N/A for a bare refusal with no substantive factual claims.
+Completeness is N/A only when it genuinely cannot be assessed; an intentionally
+unanswerable question or refusal is still assessable. Correctness and abstention
+require numeric scores. N/A is not zero. Track appropriate and unnecessary refusal
+separately. Use the [human-versus-LLM review instructions](ANSWER_REVIEW.md) for the
+exact files, steps and refusal rules.
 
 1. Give two reviewers the **same exact saved answer and evidence**, without showing machine grades first.
 2. Have them score independently and identify unsupported/missing claims.
@@ -335,6 +340,11 @@ python -m src.evaluation.run_evaluator run --help
 `prepare` needs bundles, an optional exact selection, the judge model/prices, score/audit/case/total caps, a new plan path and a new run-output path. It only writes files. Review the exact selected answer identities and data destination before approving execution. `run` additionally needs exact plan/approval hashes, the separate approval file, `--allow-paid` and the matching total cap. See [CLI source](../src/evaluation/run_evaluator.py) and [tested plan examples](../tests/test_run_evaluator_cli.py).
 
 The runner reserves a whole case once, journals each stage before dispatch, disables SDK retries and saves private bounded raw responses before parsing. The first invalid/missing response or uncertain usage stops further live admission. Answer grading receives references; citation audit receives only the answer's cited generation evidence. Neither output is a human rating.
+
+Live plans also stop on a provider or budget failure, even when some usage is
+known. A valid grade is kept if its usage is incomplete, but no audit or later
+case is dispatched. Explicit test-fixture plans can allow continuation to test
+error handling; live plans cannot opt out of the stopping policy.
 
 ### 3. Attach already-produced results without another judge call
 
