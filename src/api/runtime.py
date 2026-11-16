@@ -19,6 +19,11 @@ from src.generation.generator import (AnthropicConfig, AnthropicProvider, Comple
                                       GenerationConfig, GroundedGenerator, ProviderError)
 
 
+# Output tokens per model call. 1,024 cut off some long answers (a live run's answer stopped at
+# exactly 1,024 tokens and was rejected as invalid); only tokens actually used are paid for.
+MAX_OUTPUT_TOKENS = 2048
+
+
 class WebSettings(RetrievalSettings):
     model_config = ConfigDict(frozen=True, extra='forbid', allow_inf_nan=False)
     mode: Literal['retrieval', 'fixture', 'live'] = 'retrieval'
@@ -237,7 +242,7 @@ def build_runtime(settings):
             raise RuntimeConfigurationError('Live mode requires positive RAG_BUDGET_USD, RAG_INPUT_PRICE and RAG_OUTPUT_PRICE.')
         config = AnthropicConfig(model=settings.model, allow_paid=True, budget_usd=settings.budget_usd,
             input_usd_per_million=settings.input_price, output_usd_per_million=settings.output_price,
-            max_output_tokens=1024, timeout_seconds=min(30, settings.max_seconds))
+            max_output_tokens=MAX_OUTPUT_TOKENS, timeout_seconds=min(30, settings.max_seconds))
         provider = AnthropicProvider(config)
     elif settings.mode == 'fixture':
         provider = FixtureProvider()

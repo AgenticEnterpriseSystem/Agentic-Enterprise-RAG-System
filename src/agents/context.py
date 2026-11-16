@@ -16,10 +16,12 @@ def terms(text):
 def select_agent_context(request, limit, initial_ids):
     """Keep relevant evidence from both rounds without consulting labels or answers.
 
-    Initial-only requests preserve retrieval ranking. With useful follow-up hits,
-    reserve up to half the character allowance for each group, rank passages by
-    question coverage, and reward terms not already covered. Real token counting
-    remains the provider's responsibility.
+    Initial-only requests preserve retrieval ranking. With useful follow-up hits, the
+    first-round passages are kept whole and in retrieval order, within two thirds of the
+    character allowance, so the critic sees again what it judged in round one. (Shortening
+    or dropping them lost facts the critic had already found.) Follow-up passages fill the
+    rest, ranked by question coverage, rewarding terms not already covered, and shortened
+    to fit several sources. Real token counting remains the provider's responsibility.
     """
     initial_ids = set(initial_ids)
     original = [e for e in request.evidence if e.citation_id in initial_ids]
@@ -69,8 +71,24 @@ def select_agent_context(request, limit, initial_ids):
             selected_docs.add(best.chunk.doc_id)
         return remaining
 
-    original_budget = limit // 2
-    unused = take(original, original_budget, keep_unmatched=True)
+    def keep_whole(pool, budget):
+        remaining = budget
+        for item in list(pool):
+            if remaining < 32:
+                break
+            if len(item.chunk.text) > remaining:
+                item_fit = bounded_passage(item, request.question, remaining)
+            else:
+                item_fit = item
+            pool.remove(item)
+            selected.append(item_fit)
+            covered.update(terms(item_fit.chunk.text) & query)
+            remaining -= len(item_fit.chunk.text)
+            selected_docs.add(item.chunk.doc_id)
+        return remaining
+
+    original_budget = limit * 2 // 3
+    unused = keep_whole(original, original_budget)
     unused = take(followup, limit - original_budget + unused)
     take(original + followup, unused)
     return selected

@@ -97,11 +97,11 @@ def diagnose(response, expected):
         "references_shown": len(shown), "references_cited": len(cited),
         "queries": [s.query for s in steps if s.tool == "text_search"],
         "critic": critics,
-        # A generate step that used about 1,024 output tokens was probably cut off.
+        # A generate step that used the whole output limit (MAX_OUTPUT_TOKENS) was probably cut off.
         "answer_output_tokens": generate[-1].usage.output_tokens if generate else None,
         "answer_text": response.answer.text,
         "error_steps": [s.tool for s in steps if s.tool.endswith(":error") or s.tool.endswith(":budget")],
-        # Output tokens of a failed model call; about 1,024 means its reply was cut off.
+        # Output tokens of a failed model call; the full output limit means its reply was cut off.
         "error_output_tokens": [s.usage.output_tokens for s in steps if s.tool.endswith(":error")],
     }
 
@@ -261,8 +261,8 @@ def main():
     os.environ.update(build_environment(ROOT, os.environ, "hybrid"))
     os.environ["RAG_MODE"] = "live"
     os.environ.pop("RAG_RERANKER", None)  # The run itself turns the reranker on and off.
-    from src.api.runtime import (AnthropicConfig, AnthropicProvider, Runtime, WebSettings,
-                                 attach_reranker, load_retriever)
+    from src.api.runtime import (MAX_OUTPUT_TOKENS, AnthropicConfig, AnthropicProvider, Runtime,
+                                 WebSettings, attach_reranker, load_retriever)
     from src.evaluation.run_retrieval import load_questions
 
     app_settings = WebSettings.from_env()
@@ -290,7 +290,7 @@ def main():
     provider = AnthropicProvider(AnthropicConfig(
         model=settings.model, allow_paid=True, budget_usd=args.budget_usd,
         input_usd_per_million=settings.input_price, output_usd_per_million=settings.output_price,
-        max_output_tokens=1024, timeout_seconds=min(30, settings.max_seconds)))
+        max_output_tokens=MAX_OUTPUT_TOKENS, timeout_seconds=min(30, settings.max_seconds)))
     arms = {"no reranker": Runtime(settings, plain_retriever, provider),
             "reranker": Runtime(reranked_settings, reranked_retriever, provider)}
     arms = {name: arms[name] for name in arms if name in wanted_arms}

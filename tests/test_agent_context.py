@@ -59,3 +59,15 @@ def test_followup_passage_keeps_priority_lead_and_query_dense_tail():
     assert any('budget_bytes_per_step' in s for s in parts)
     assert any('counters' in s for s in parts)
     assert sum(len(e.chunk.text) for e in out)<=2000
+
+
+def test_round_two_keeps_first_round_passages_whole_and_in_order():
+    # Five first-round passages of 3,000 characters fit whole within two thirds of 24,000;
+    # the lowest-ranked one (with few question words) is no longer shortened or dropped.
+    firsts = [hit(f'r1-{i}', (('DEK caching policy ' if i < 4 else 'threshold eviction_rate 0.5% ') * 200)[:3000])
+              for i in range(5)]
+    follow = [hit(f'r2-{i}', 'KMS outage key rotation dual decrypt ' * 120) for i in range(6)]
+    out = select_agent_context(req(firsts + follow), 24000, {e.citation_id for e in firsts})
+    assert out[:5] == firsts  # Whole, in retrieval order.
+    assert any(e.chunk.doc_id.startswith('r2-') for e in out)
+    assert sum(len(e.chunk.text) for e in out) <= 24000

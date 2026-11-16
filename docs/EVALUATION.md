@@ -328,6 +328,29 @@ natural end (2026-11-16):
   "insufficient evidence" is the right outcome), `never_found`, `not_shown` or
   `judged_insufficient`.
 
+### 70-question diagnosis and fixes
+
+A run on 70 development questions (the 20 above plus 50 sampled with seed 5980; no reranker,
+top 5) answered 25, correctly declined 4 with no reference documents, and failed 39: 28 after
+the critic had seen a reference document (`judged_insufficient`), 9 never found, 2 not shown and
+2 errors. By the critic's reasons the 28 were: an excerpt cut off the answer (8), a specific value
+missing that may lie elsewhere in the document (8), a demand for explicit confirmation the
+question may not need (7), conflicting sources (4), and a reference dropped in round two (1).
+
+Two causes were mechanical and are fixed:
+
+- **Round two shortened and dropped first-round evidence.** Context selection gave each group
+  half the space and cut every passage to 1,500 characters, so the critic lost text it had read
+  in round one. First-round passages are now kept whole and in retrieval order within two thirds
+  of the space (`src/agents/context.py`).
+- **Answers stopped at 1,024 output tokens** and were rejected as invalid. The limit per model
+  call is now 2,048 tokens (`MAX_OUTPUT_TOKENS`).
+
+`python scripts/excerpt_coverage.py` measures, without searches or model calls, how often the
+excerpt the agent shows contains the reference answer's specific facts (numbers, dates, IDs,
+names), at several excerpt sizes and for the whole document. With `--results` it also reports a
+`time_agent` run's unanswered questions one by one.
+
 ## Answer evaluation: first baseline
 
 [Answer evaluation](ANSWER_EVALUATION.md) runs the rubric above with an LLM judge.

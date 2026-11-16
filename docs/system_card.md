@@ -62,7 +62,7 @@ Answer, source excerpts, and a trace of every step (latency, tokens, cost)
 - **Retrieval:** see the [model card](model_card_hybrid_retriever.md).
 - **Critic and generator:** an Anthropic Claude model called through the API, chosen by
   the operator with `RAG_MODEL`. Recorded development runs used
-  `claude-haiku-4-5-20251001`. Temperature 0, at most 1,024 output tokens per call.
+  `claude-haiku-4-5-20251001`. Temperature 0, at most 2,048 output tokens per call.
 - **Offline answer evaluation only:** GPT-OSS 20B (`gpt-oss:20b-cloud`, called through
   Ollama) generated and graded the 20-question baseline. The web app does not use it.
 
@@ -150,7 +150,7 @@ Answer, source excerpts, and a trace of every step (latency, tokens, cost)
 | Time per question | 200 s (504 after) | `RAG_MAX_SECONDS` |
 | Time per model call | 30 s | fixed |
 | Tokens per question | 16,000 | `RAG_MAX_TOKENS` |
-| Output tokens per model call | 1,024 | fixed |
+| Output tokens per model call | 2,048 | fixed |
 | Search rounds | 2 | `RAG_MAX_ROUNDS` |
 | Results per search | 5 | `RAG_TOP_K` |
 | Evidence sent to the model | 24,000 characters | `RAG_MAX_CONTEXT_CHARS` |
