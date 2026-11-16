@@ -83,8 +83,8 @@ Answer, source excerpts, and a trace of every step (latency, tokens, cost)
    `RAG_ALLOWED_SOURCES`).
 3. **Search.** The retriever searches the local indexes and returns the top 5 documents
    per query, filtered to the allowed scope.
-4. **Model calls (live mode only).** The question and selected excerpts (up to 24,000
-   characters) are sent to the Anthropic API, first to the critic and then to the
+4. **Model calls (live mode only).** The question and selected excerpts (6,000 characters
+   each, up to 48,000 in total) are sent to the Anthropic API, first to the critic and then to the
    generator. Each excerpt carries its citation ID, document ID, title, platform,
    date when known, and text. In the final round the generator
    receives exactly the evidence the critic approved. **This is the only time data leaves the computer.** The API key is read
@@ -149,11 +149,11 @@ Answer, source excerpts, and a trace of every step (latency, tokens, cost)
 | Queries at once | 1 (others get 429 "busy") | fixed |
 | Time per question | 200 s (504 after) | `RAG_MAX_SECONDS` |
 | Time per model call | 30 s | fixed |
-| Tokens per question | 16,000 | `RAG_MAX_TOKENS` |
+| Tokens per question | 32,000 | `RAG_MAX_TOKENS` |
 | Output tokens per model call | 2,048 | fixed |
 | Search rounds | 2 | `RAG_MAX_ROUNDS` |
 | Results per search | 5 | `RAG_TOP_K` |
-| Evidence sent to the model | 24,000 characters | `RAG_MAX_CONTEXT_CHARS` |
+| Evidence sent to the model | 48,000 characters (excerpts of 6,000) | `RAG_MAX_CONTEXT_CHARS`, `RAG_PASSAGE_CHARS` |
 | Cost per question | $0.10 | `RAG_QUESTION_BUDGET_USD` |
 | Cost per server session | operator-set; required > 0 | `RAG_BUDGET_USD` |
 

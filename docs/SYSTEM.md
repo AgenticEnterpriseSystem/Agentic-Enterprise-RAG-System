@@ -62,8 +62,8 @@ Source/date filters may narrow server scope. HTTP statuses distinguish validatio
 (504) and provider/agent errors (502). Agent errors retain permitted traces/evidence;
 boundary errors use `detail`. Responses do not expose provider exception text.
 
-Defaults: top-k 5, two rounds, 200 seconds, 16,000 total model tokens, 24,000 context
-characters, and 2,048 maximum output tokens per model call. Search and loop limits
+Defaults: top-k 5, 6,000-character excerpts, two rounds, 200 seconds, 32,000 total model
+tokens, 48,000 context characters, and 2,048 maximum output tokens per model call. Search and loop limits
 use `RAG_*` settings in `src/api/runtime.py`; the provider output limit is fixed
 in code. These limits are not quality claims. Provider calls include token-count
 requests as well as generation.

@@ -363,7 +363,11 @@ def test_passage_chars_setting_reaches_search_critic_and_answer(monkeypatch):
     for key in WebSettings.model_fields:
         monkeypatch.delenv('RAG_' + key.upper(), raising=False)
     monkeypatch.setenv('RAG_MODE', 'fixture')
-    assert WebSettings.from_env().passage_chars is None  # Unset by default.
+    defaults = WebSettings.from_env()
+    assert (defaults.passage_chars, defaults.max_context_chars, defaults.max_tokens) == (6000, 48000, 32000)
+    for off in ('off', '0', 'none'):
+        monkeypatch.setenv('RAG_PASSAGE_CHARS', off)
+        assert WebSettings.from_env().passage_chars is None
     monkeypatch.setenv('RAG_PASSAGE_CHARS', '6000')
     settings = WebSettings.from_env().model_copy(update={'demo_access': True})
     assert settings.hybrid_config().passage_chars == 6000

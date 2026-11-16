@@ -41,8 +41,13 @@ class WebSettings(RetrievalSettings):
     question_budget_usd: float = Field(default=.1, gt=0)
     # 200 s leaves room for the reranker's ~20 s per search on a laptop CPU.
     max_seconds: float = Field(default=200, gt=0, le=300)
-    max_tokens: int = Field(default=16000, ge=256, le=64000)
-    max_context_chars: int = Field(default=24000, ge=128, le=48000)
+    # 6,000-character excerpts need room: in live runs on 70 tuning and 25 fresh development
+    # questions they answered 14 more and 8 fewer (34 vs 31 and 9 vs 6) than 3,000 characters,
+    # at about 60-70% more cost per question (docs/EVALUATION.md). RAG_PASSAGE_CHARS=off
+    # restores each method's own excerpt.
+    passage_chars: int | None = Field(default=6000, ge=500, le=20000)
+    max_tokens: int = Field(default=32000, ge=256, le=64000)
+    max_context_chars: int = Field(default=48000, ge=128, le=48000)
     max_rounds: int = Field(default=2, ge=1, le=5)
     top_k: int = Field(default=5, ge=1, le=20)
     # Optional cross-encoder reranker, off by default (RAG_RERANKER=bge-reranker-base turns it
@@ -58,6 +63,11 @@ class WebSettings(RetrievalSettings):
     rerank_window_chars: int = Field(default=2000, ge=200, le=8000)
     rerank_max_windows: int = Field(default=4, ge=1, le=16)
     reranker_max_length: int = Field(default=512, ge=64, le=8192)
+
+    @field_validator('passage_chars', mode='before')
+    @classmethod
+    def passage_off(cls, value):
+        return None if isinstance(value, str) and value.strip().lower() in ('off', 'none', '0') else value
 
     @field_validator('reranker', mode='before')
     @classmethod

@@ -364,6 +364,23 @@ be extended. `RAG_PASSAGE_CHARS` re-cuts each returned result from the whole doc
 matched passage; the critic and answer step then keep excerpts up to that size, and round-two
 follow-ups up to half of it. Unset (the default), nothing changes.
 
+Longer excerpts were then tested live on the same 70 questions and on 25 development
+questions not used for tuning (`--count 95 --start 70`), against the fixed 3,000-character
+version (`RAG_PASSAGE_CHARS=6000 RAG_MAX_CONTEXT_CHARS=48000 RAG_MAX_TOKENS=32000`):
+
+| Questions | Answered, 3,000 | Answered, 6,000 | Gained / lost | Cost per question |
+| --- | ---: | ---: | --- | --- |
+| 70 tuning | 31 | **34** | 10 / 7 | $0.017 / $0.026 |
+| 25 fresh | 6 | **9** | 4 / 1 | $0.017 / $0.029 |
+
+Questions answered after the first search rose on both sets (24 to 31; 4 to 5), median time
+did not rise (69 to 56 s; 80 to 74 s), and errors did not increase. Over the 95 questions the
+14-8 split is not conclusive on its own (about 30% by chance), but both sets agree and match
+the excerpt test, so 6,000-character excerpts with a 48,000-character context and a
+32,000-token budget became the web app defaults. Against the original version the 70 rose
+from 25 to 34 answered (13 gained, 4 lost; about 5% by chance). The fresh questions were
+harder (8 of 25 never found, mostly reworded `semantic` questions).
+
 `python scripts/excerpt_coverage.py` measures, without searches or model calls, how often the
 excerpt the agent shows contains the reference answer's specific facts (numbers, dates, IDs,
 names), at several excerpt sizes and for the whole document. With `--results` it also reports a
