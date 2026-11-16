@@ -106,6 +106,29 @@ def diagnose(response, expected):
     }
 
 
+FLAG_PATTERNS = {
+    # Phrases in the critic's reason or missing facts; a rough first sort, not a judgement.
+    "excerpt_cut_off": r"truncat|cut[s]? off|cut-off|incomplete in the (?:evidence|excerpt)|excerpt ends",
+    "conflicting_sources": r"conflict|contradict|inconsistent|supersede|differing|disagree",
+}
+
+
+def flags(record):
+    """Rough causes for an unanswered question, from the critic's words and the trace."""
+    import re
+    found = set()
+    for c in record["critic"]:
+        text = " ".join([c["reason"], *c["missing_facts"]]).lower()
+        found |= {name for name, pattern in FLAG_PATTERNS.items() if re.search(pattern, text)}
+    critics = record["critic"]
+    if critics and critics[-1]["sufficient"] and record["status"] != "answered" and record["diagnosis"] != "error":
+        found.add("answer_step_refused")  # The critic approved; the answer step declined.
+    shown = [c["references_shown"] for c in critics]
+    if len(shown) > 1 and max(shown[:-1]) > shown[-1]:
+        found.add("reference_dropped_in_round_2")
+    return sorted(found)
+
+
 def run_one(runtime, question, mode, expected=()):
     from src.api.runtime import RuntimeErrorResponse
     from src.contracts import QueryRequest
@@ -121,12 +144,14 @@ def run_one(runtime, question, mode, expected=()):
     for step in steps:
         tool = step.tool.split(":")[0]
         by_tool[tool] = by_tool.get(tool, 0) + step.elapsed_ms / 1000
-    return {"seconds": seconds, "searches": sum(s.tool == "text_search" for s in steps),
+    result = {"seconds": seconds, "searches": sum(s.tool == "text_search" for s in steps),
             "search_seconds": by_tool.get("text_search", 0.0),
             "model_seconds": sum(v for k, v in by_tool.items() if k in ("critic", "generate", "route")),
             "stop_reason": response.trace.stop_reason, "status": response.answer.status,
             "citations": len(response.answer.citation_ids),
             "cost_usd": response.trace.usage.estimated_cost_usd, **diagnose(response, expected)}
+    result["flags"] = flags(result)
+    return result
 
 
 def describe(name, runs, limit, agent_limit):
@@ -177,10 +202,25 @@ def explain(done):
     print("    no_answer_expected = the question has no reference documents (insufficient is right); "
           "never_found = no reference document in any search; not_shown = retrieved but not in "
           "the critic's context; judged_insufficient = the critic saw one and asked for more")
+    names = ["answered", "no_answer_expected", "never_found", "not_shown", "judged_insufficient", "error"]
+    print(f"\n    {'question type':26} {'n':>3} " + " ".join(f"{n[:12]:>12}" for n in names))
+    for qtype in sorted({r["question_type"] for r in done}):
+        group = [r for r in done if r["question_type"] == qtype]
+        print(f"    {qtype:26} {len(group):>3} "
+              + " ".join(f"{sum(r['diagnosis'] == n for r in group):>12}" for n in names))
+    tagged = {}
+    for r in done:
+        for f in r.get("flags", []):
+            tagged.setdefault(f, []).append(r["question_id"])
+    print("\n    Likely causes among unanswered questions (from the critic's words; a question can have several):")
+    for name in ("excerpt_cut_off", "reference_dropped_in_round_2", "conflicting_sources", "answer_step_refused"):
+        ids = tagged.get(name, [])
+        print(f"      {name:30} {len(ids):>3}  {' '.join(ids)}")
+    print()
     for r in done:
         if r["diagnosis"] == "answered":
             continue
-        print(f"    {r['question_id']} [{r['question_type']}] {r['diagnosis']}: references found "
+        print(f"    {r['question_id']} [{r['question_type']}] {r['diagnosis']} {r.get('flags', [])}: references found "
               f"{r['references_found']}/{r['references']} (first search {r['references_found_first_search']}), "
               f"shown {r['references_shown']}")
         if r["critic"]:
