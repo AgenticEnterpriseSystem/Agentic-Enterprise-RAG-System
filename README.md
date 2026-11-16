@@ -112,7 +112,7 @@ Scored on the 300 development questions (282 have labeled answer documents):
   0.712 for BM25+ alone.
 - Arctic-embed-l-v2.0 beats BGE-base on its own (Recall@10 0.554 vs 0.487), but its hybrid
   with BM25+ is only marginally better (0.723 vs 0.722), so the team keeps BGE-base for now
-  (see [full-corpus Arctic](docs/FULL_CORPUS.md#full-corpus-arctic-embed-l-v20)).
+  (see [full-corpus Arctic](docs/EXPERIMENTS.md#full-corpus-arctic-embed-l-v20)).
 
 What this means:
 
@@ -121,12 +121,12 @@ What this means:
 - BGE finds some documents that keyword search misses. Combining the two with more
   weight on keyword search is the best setting so far. Cross-encoder rerankers first made
   results worse because they saw only one short section of long documents (see
-  [retrieval results](docs/FULL_CORPUS.md#hybrid-search-and-reranking)). Reading windows
+  [experiments](docs/EXPERIMENTS.md#hybrid-search-and-reranking)). Reading windows
   across the whole document and blending with the hybrid order fixed this (development
   Recall@10 0.744 vs 0.722), but in live agent runs on a laptop CPU it doubled the time without
   answering more questions, so it stays optional (see [web app](docs/WEB_APP.md#optional-reranker)).
 
-Full results by question type: [docs/FULL_CORPUS.md](docs/FULL_CORPUS.md).
+Full results by question type, and every experiment tried: [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md).
 
 ## Documentation
 
@@ -134,7 +134,7 @@ Full results by question type: [docs/FULL_CORPUS.md](docs/FULL_CORPUS.md).
 - [System](docs/SYSTEM.md)
 - [Evaluation](docs/EVALUATION.md)
 - [Answer evaluation](docs/ANSWER_EVALUATION.md): the 20-question GPT-OSS generation and LLM-judge baseline
-- [Retrieval results](docs/FULL_CORPUS.md)
+- [Experiments and results](docs/EXPERIMENTS.md): every retrieval and live agent experiment, adopted or not
 - [Dataset](docs/DATA_CARD.md)
 - [Model card: hybrid retriever](docs/model_card_hybrid_retriever.md)
 - [System card](docs/system_card.md)

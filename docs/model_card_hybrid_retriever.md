@@ -189,4 +189,4 @@ hashes differ even though document contents match.
 **Contact:** the team above, through issues on the project's GitHub repository.
 
 **Related documents:** [System card](system_card.md) · [Data card](DATA_CARD.md) ·
-[Evaluation](EVALUATION.md) · [Retrieval results](FULL_CORPUS.md)
+[Evaluation](EVALUATION.md) · [Experiments and results](EXPERIMENTS.md)

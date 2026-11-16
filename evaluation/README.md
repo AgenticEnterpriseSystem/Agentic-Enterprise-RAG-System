@@ -23,4 +23,4 @@ Large corpus/index files and full answer/evidence traces stay in ignored `.cache
 Old local reduced-corpus experiments are not the full-corpus results above. Review
 selection files and empty review templates do not establish completed human review.
 
-Hybrid, reranker, model-screening and Arctic results are documented in [Retrieval results](../docs/FULL_CORPUS.md).
+Hybrid, reranker, model-screening, Arctic, path-header and live agent results are documented in [Experiments and results](../docs/EXPERIMENTS.md).

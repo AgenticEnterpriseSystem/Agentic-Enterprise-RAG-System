@@ -31,12 +31,12 @@ are opt-in with `--rerankers`. Existing notebooks pass their experiment settings
 explicitly. Retrieval metrics still request 20 results to score Recall@20;
 the web app's default answer context starts with five results.
 
-Reranker options (the web app does not enable a reranker):
+Reranker options (off by default in the web app):
 
 - `--rerank-window-chars N` scores each candidate on windows of N characters across its
   whole document, each starting with the title, and keeps the best (MaxP). Without it, a
   reranker sees one query-relevant slice, which caused the losses described in
-  [Retrieval results](FULL_CORPUS.md#hybrid-search-and-reranking).
+  [Experiments](EXPERIMENTS.md#hybrid-search-and-reranking).
   `--rerank-max-windows` caps windows per document (the lead plus the best-matching ones).
 - `--rerank-weights` blends the reranker's rank with the fused rank (1 = reranker order
   only). Candidates are scored once per question and reused for every weight. With several
@@ -58,10 +58,8 @@ Reranker options (the web app does not enable a reranker):
   in `reranker_costs_<split>.json`.
 - `python scripts/time_reranker.py` times hybrid search with and without the reranker on your
   own computer, as the web app runs it (CPU, top 5), for a chosen setting.
-- `python scripts/time_agent.py --budget-usd 1` is a **paid** live run: it sends the 10
-  development questions of the 2026-10-21 agent record through the app's own runtime, with and
-  without the reranker, and records total time, searches, stop reasons, answers and cost
-  (`--modes agentic,baseline` adds Fixed RAG). Uses the live-mode settings in `.env`.
+- `python scripts/time_agent.py` is a **paid** live run through the app's own runtime; see
+  [Live agent runs](#live-agent-runs).
 - The run ends with each reranked variant's change versus the same hybrid without a
   reranker, with 95% paired bootstrap intervals.
 
@@ -108,16 +106,17 @@ Retrieval scores do not measure answer correctness or citation support.
 - **Arctic vs BGE-base:** better alone (+0.067 Recall@10 on development), but the hybrids
   tie on Recall@10 (+0.001) with slightly better Arctic ranking (nDCG@10 +0.023). The team
   keeps BGE-base; the Arctic index remains available.
-- **Rerankers made results worse as tested:** `bge-reranker-base` lowered hybrid Recall@10
-  to 0.637 and `bge-reranker-v2-m3` to 0.669. They saw one 3,000-character section of each
-  document (cut to 512 tokens), often without its title, so long reference documents
-  dropped. The web app does not enable a reranker.
+- **Rerankers:** on one 3,000-character section per document they made results worse
+  (Recall@10 0.637 and 0.669). Reading whole-document windows and blending with the hybrid
+  order turned that into gains (up to 0.787 with `bge-reranker-v2-m3`), but live agent runs
+  showed no benefit on a laptop CPU, so the web app keeps the reranker off by default
+  ([details](EXPERIMENTS.md#reranker-revisited-whole-document-windows-and-blending)).
 
 Each result directory in [`evaluation/results/`](../evaluation/README.md) contains
 category/source slices, timings, settings, code versions, index manifests, ranked
 predictions and upstream-format outputs. Category tables, confidence intervals, the
 title-on-every-passage experiment and the embedding model screening are in
-[Retrieval results](FULL_CORPUS.md).
+[Experiments and results](EXPERIMENTS.md).
 
 ### Reproduction settings
 
@@ -300,86 +299,19 @@ on the same development set and retain real-conflict/unanswerable counterexample
 
 ## Live agent runs
 
-`scripts/time_agent.py` runs the web app's adaptive agent (live mode, `claude-haiku-4-5`) on
-development questions and records each question's time, searches, how it stopped and its cost.
-Four runs on the same 20 questions (the 10 of the 2026-10-21 agent record plus 10 sampled with
-seed 5980), on a 16 GB laptop CPU, with the agent allowed 300 s so every question ran to its
-natural end (2026-11-16):
-
-| Setup | Answered | Errors | Median time | Slowest | Over 200 s | Cost |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| **No reranker, top 5 (app default)** | **8** | 1 | **67 s** | 93 s | 0 | **$0.33** |
-| No reranker, top 10 (36,000 context characters, 32,000 tokens) | 6 | 2 | 73 s | 147 s | 0 | $0.59 |
-| `bge-reranker-base` (20 candidates, 4 windows, weight 0.7), top 5 | 5 | 0 | 126 s | 206 s | 1 | $0.36 |
-| `bge-reranker-base`, top 10 | 6 | 0 | 138 s | 243 s | 4 | $0.61 |
-
-- Searching took 85-90% of the time: about 12-16 s per search without the reranker and 30-48 s
-  with it. Model calls took 6-27 s per question.
-- 11 questions were answered by no setup and 4 by every setup (one error aside). The other 5
-  changed between runs without a consistent pattern, so the answered counts (5-8 of 20) are
-  within the critic's run-to-run variation. Time and cost differences are not.
-- The reranker's retrieval gain (Recall@5 0.640 to 0.687 on 300 questions) is too small to
-  show on 20 questions, and "answered" means the critic accepted the evidence, not that the
-  answer is correct. Neither the reranker nor 10 results showed a benefit here, so the app
-  keeps no reranker and 5 results, with a 200 s limit per question.
-- `time_agent.py` now also records, per question, whether reference documents were retrieved,
-  shown to the critic and cited, the critic's reasons and missing facts, and error details.
-  Unanswered questions are labelled `no_answer_expected` (an `info_not_found` question, where
-  "insufficient evidence" is the right outcome), `never_found`, `not_shown` or
-  `judged_insufficient`.
-
-### 70-question diagnosis and fixes
-
-A run on 70 development questions (the 20 above plus 50 sampled with seed 5980; no reranker,
-top 5) answered 25, correctly declined 4 with no reference documents, and failed 39: 28 after
-the critic had seen a reference document (`judged_insufficient`), 9 never found, 2 not shown and
-2 errors. By the critic's reasons the 28 were: an excerpt cut off the answer (8), a specific value
-missing that may lie elsewhere in the document (8), a demand for explicit confirmation the
-question may not need (7), conflicting sources (4), and a reference dropped in round two (1).
-
-Two causes were mechanical and are fixed:
-
-- **Round two shortened and dropped first-round evidence.** Context selection gave each group
-  half the space and cut every passage to 1,500 characters, so the critic lost text it had read
-  in round one. First-round passages are now kept whole and in retrieval order within two thirds
-  of the space (`src/agents/context.py`).
-- **Answers stopped at 1,024 output tokens** and were rejected as invalid. The limit per model
-  call is now 2,048 tokens (`MAX_OUTPUT_TOKENS`).
-
-Rerun of the 70 with both fixes (questions 1-52 in one run; 53-70, which a spending-cap bug
-refused, rerun after it was fixed): **31 answered** (25 before), 4 correctly declined, 1 error
-(2 before). Ten questions were gained and four lost; all four losses and six of the gains were
-answered in round two, so the round-two change helped some questions and probably cost others
-room for follow-up results. The gain is suggestive, not established: a 10-4 split arises by
-chance about 18% of the time.
-
-**Spending-cap bug.** The provider reserved each call's worst-case cost (input plus the full
-output limit) against the session cap and never released the unused part. With the 2,048-token
-output limit, a run reached its $2 cap after about 52 questions with $0.86 spent. A completed
-call now settles its reservation to its actual cost; failed calls keep the full reservation.
-
-**Excerpt size.** A result's excerpt is a 3,000-character BM25+ slice or, when the dense model
-also found the document, its ~500-token BGE passage (about 2,000-2,500 characters), which cannot
-be extended. `RAG_PASSAGE_CHARS` re-cuts each returned result from the whole document around the
-matched passage; the critic and answer step then keep excerpts up to that size, and round-two
-follow-ups up to half of it. Unset (the default), nothing changes.
-
-Longer excerpts were then tested live on the same 70 questions and on 25 development
-questions not used for tuning (`--count 95 --start 70`), against the fixed 3,000-character
-version (`RAG_PASSAGE_CHARS=6000 RAG_MAX_CONTEXT_CHARS=48000 RAG_MAX_TOKENS=32000`):
-
-| Questions | Answered, 3,000 | Answered, 6,000 | Gained / lost | Cost per question |
-| --- | ---: | ---: | --- | --- |
-| 70 tuning | 31 | **34** | 10 / 7 | $0.017 / $0.026 |
-| 25 fresh | 6 | **9** | 4 / 1 | $0.017 / $0.029 |
-
-Questions answered after the first search rose on both sets (24 to 31; 4 to 5), median time
-did not rise (69 to 56 s; 80 to 74 s), and errors did not increase. Over the 95 questions the
-14-8 split is not conclusive on its own (about 30% by chance), but both sets agree and match
-the excerpt test, so 6,000-character excerpts with a 48,000-character context and a
-32,000-token budget became the web app defaults. Against the original version the 70 rose
-from 25 to 34 answered (13 gained, 4 lost; about 5% by chance). The fresh questions were
-harder (8 of 25 never found, mostly reworded `semantic` questions).
+`python scripts/time_agent.py` sends development questions through the web app's own runtime
+in live mode (**paid**; uses the live-mode settings in `.env`) and records, per question, the
+time, searches, how it stopped, the cost, and where its reference documents were lost:
+`never_found` (in no search), `not_shown` (retrieved but not in the critic's context),
+`judged_insufficient` (the critic saw one and asked for more) or `no_answer_expected` (an
+`info_not_found` question, where "insufficient evidence" is right). Options: `--count N` (the
+10 questions of the 2026-10-21 agent record, then development questions sampled with seed
+5980), `--start N` (skip the first N, for questions not used for tuning), `--arms` (with
+and/or without the reranker), `--max-seconds` (let questions run past the app's limit to
+measure how long they need) and `--modes agentic,baseline` (adds Fixed RAG). Settings such as
+`RAG_PASSAGE_CHARS` or `RAG_TOP_K` can be set in front of the command for one run. Results,
+the diagnosis of unanswered questions and the fixes they led to are in
+[Experiments and results, Part 2](EXPERIMENTS.md#part-2-agent-experiments-live-runs).
 
 `python scripts/excerpt_coverage.py` measures, without searches or model calls, how often the
 excerpt the agent shows contains the reference answer's specific facts (numbers, dates, IDs,
