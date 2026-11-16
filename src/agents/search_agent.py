@@ -24,6 +24,7 @@ class AgentConfig(Contract):
     max_seconds: float = Field(default=60, gt=0)
     max_cost_usd: float = Field(default=0, ge=0)
     confidence_threshold: float = Field(default=0.8, ge=0, le=1)
+    passage_chars: int = Field(default=3000, ge=1)  # Longest excerpt kept per result.
 
 
 class SearchAgent:
@@ -117,7 +118,7 @@ class SearchAgent:
             # Reserve output/prompt room and reduce context under a tight allowance.
             # This is a sizing heuristic; provider token counting remains authoritative.
             context_limit = min(config.max_context_chars, max(1, (remaining - 1500) * 2))
-            context = context.model_copy(update={"evidence": tuple(select_agent_context(context, context_limit, initial_ids))})
+            context = context.model_copy(update={"evidence": tuple(select_agent_context(context, context_limit, initial_ids, config.passage_chars))})
             if not context.evidence:
                 return finish(reason, limitation)
             active_tool, began = "generate", self.clock()
@@ -192,8 +193,8 @@ class SearchAgent:
                 context_order = new_evidence + context_order
                 context = GenerationRequest(question=request.query, user=request.user,
                                             evidence=tuple(context_order))
-                selected = (select_agent_context(context, config.max_context_chars, initial_ids)
-                            if round_number > 1 else select_context(context, config.max_context_chars))
+                selected = (select_agent_context(context, config.max_context_chars, initial_ids, config.passage_chars)
+                            if round_number > 1 else select_context(context, config.max_context_chars, config.passage_chars))
                 context = context.model_copy(update={"evidence": tuple(selected)})
                 if not single_pass:
                     active_tool, began = "critic", self.clock()
@@ -204,7 +205,7 @@ class SearchAgent:
                         # than spending nearly all of it assessing more evidence.
                         critic_limit = min(config.max_context_chars, max(1, (remaining // 2 - 1500) * 2))
                         critic_pool = GenerationRequest(question=request.query, user=request.user, evidence=tuple(evidence.values()))
-                        context = critic_pool.model_copy(update={"evidence": tuple(select_agent_context(critic_pool, critic_limit, initial_ids))})
+                        context = critic_pool.model_copy(update={"evidence": tuple(select_agent_context(critic_pool, critic_limit, initial_ids, config.passage_chars))})
                     # An approval applies only to this exact evidence set. Use it
                     # for generation too, including the reduced final-round pool.
                     feedback, usage = model_call(self.critic.assess, context)

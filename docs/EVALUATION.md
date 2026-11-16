@@ -346,6 +346,24 @@ Two causes were mechanical and are fixed:
 - **Answers stopped at 1,024 output tokens** and were rejected as invalid. The limit per model
   call is now 2,048 tokens (`MAX_OUTPUT_TOKENS`).
 
+Rerun of the 70 with both fixes (questions 1-52 in one run; 53-70, which a spending-cap bug
+refused, rerun after it was fixed): **31 answered** (25 before), 4 correctly declined, 1 error
+(2 before). Ten questions were gained and four lost; all four losses and six of the gains were
+answered in round two, so the round-two change helped some questions and probably cost others
+room for follow-up results. The gain is suggestive, not established: a 10-4 split arises by
+chance about 18% of the time.
+
+**Spending-cap bug.** The provider reserved each call's worst-case cost (input plus the full
+output limit) against the session cap and never released the unused part. With the 2,048-token
+output limit, a run reached its $2 cap after about 52 questions with $0.86 spent. A completed
+call now settles its reservation to its actual cost; failed calls keep the full reservation.
+
+**Excerpt size.** A result's excerpt is a 3,000-character BM25+ slice or, when the dense model
+also found the document, its ~500-token BGE passage (about 2,000-2,500 characters), which cannot
+be extended. `RAG_PASSAGE_CHARS` re-cuts each returned result from the whole document around the
+matched passage; the critic and answer step then keep excerpts up to that size, and round-two
+follow-ups up to half of it. Unset (the default), nothing changes.
+
 `python scripts/excerpt_coverage.py` measures, without searches or model calls, how often the
 excerpt the agent shows contains the reference answer's specific facts (numbers, dates, IDs,
 names), at several excerpt sizes and for the whole document. With `--results` it also reports a

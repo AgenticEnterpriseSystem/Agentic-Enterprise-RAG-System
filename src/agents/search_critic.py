@@ -76,7 +76,7 @@ class EvidenceCritic:
         validate_evidence(request.user, request.evidence)
         if len(request.question) > self.config.max_question_chars:
             raise AgentError("Question exceeds the configured length limit.")
-        selected = select_context(request, self.config.max_context_chars)
+        selected = select_context(request, self.config.max_context_chars, self.config.passage_chars)
         if not selected:
             return CriticDecision(
                 sufficient=False, confidence=0, reason="No evidence fits the context budget.",

@@ -52,6 +52,7 @@ class Provider(Protocol):
 
 class GenerationConfig(Contract):
     max_context_chars: int = Field(default=24000, ge=1)
+    passage_chars: int = Field(default=3000, ge=1)  # Longest excerpt kept per result.
     max_question_chars: int = Field(default=8000, ge=1)
     retries: int = Field(default=1, ge=0, le=2)
     retry_delay_seconds: float = Field(default=0.5, ge=0, le=10)
@@ -69,9 +70,10 @@ def combined_usage(records):
     )
 
 
-def select_context(request, limit):
+def select_context(request, limit, passage_chars=None):
     from src.retrieval.passages import PASSAGE_CHARS, bounded_passage
 
+    passage_chars = passage_chars or PASSAGE_CHARS
     selected = []
     remaining = limit
     for item in request.evidence:
@@ -80,7 +82,7 @@ def select_context(request, limit):
         # Avoid sending a meaningless fragment when the remaining budget is tiny.
         if len(item.chunk.text) > remaining and remaining < 32:
             continue
-        item = bounded_passage(item, request.question, min(PASSAGE_CHARS, remaining))
+        item = bounded_passage(item, request.question, min(passage_chars, remaining))
         selected.append(item)
         remaining -= len(item.chunk.text)
     return selected
@@ -97,7 +99,7 @@ class GroundedGenerator:
             return Answer(
                 status="error", text="Question exceeds the configured length limit."
             ), zero
-        selected = select_context(request, self.config.max_context_chars)
+        selected = select_context(request, self.config.max_context_chars, self.config.passage_chars)
         if not selected:
             return Answer(
                 status="insufficient_evidence",

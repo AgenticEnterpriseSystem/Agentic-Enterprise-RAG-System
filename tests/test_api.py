@@ -357,3 +357,17 @@ def test_reranker_is_off_by_default_and_hybrid_only(monkeypatch):
     assert load_retriever(WebSettings(mode='retrieval', retrieval='bm25', reranker=on)) == 'retriever'
     assert load_retriever(WebSettings(mode='retrieval', reranker=on)) == 'reranked'
     assert attached == [on]
+
+
+def test_passage_chars_setting_reaches_search_critic_and_answer(monkeypatch):
+    for key in WebSettings.model_fields:
+        monkeypatch.delenv('RAG_' + key.upper(), raising=False)
+    monkeypatch.setenv('RAG_MODE', 'fixture')
+    assert WebSettings.from_env().passage_chars is None  # Unset by default.
+    monkeypatch.setenv('RAG_PASSAGE_CHARS', '6000')
+    settings = WebSettings.from_env().model_copy(update={'demo_access': True})
+    assert settings.hybrid_config().passage_chars == 6000
+    runtime = build_runtime(settings)
+    assert runtime.agent.config.passage_chars == 6000
+    assert runtime.agent.critic.config.passage_chars == 6000
+    assert runtime.agent.generator.config.passage_chars == 6000

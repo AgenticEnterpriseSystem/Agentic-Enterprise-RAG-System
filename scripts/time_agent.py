@@ -298,7 +298,8 @@ def main():
           f"windows each, on {settings.device}; model {settings.model}; cap ${args.budget_usd:g}; "
           f"{len(wanted)} questions; agent limit {settings.max_seconds:.0f}s, app limit {limit:.0f}s; "
           f"top {settings.top_k}, {settings.max_rounds} rounds, {settings.max_context_chars} context "
-          f"characters, {settings.max_tokens} tokens",
+          f"characters, {settings.max_tokens} tokens, excerpts "
+          f"{settings.passage_chars or 'default (3,000 BM25+ / BGE passage)'}",
           flush=True)
 
     results = {mode: {arm: [] for arm in arms} for mode in modes}
@@ -330,6 +331,7 @@ def main():
         "model": settings.model, "max_seconds": settings.max_seconds, "app_max_seconds": limit,
         "device": settings.device, "top_k": settings.top_k, "max_rounds": settings.max_rounds,
         "max_context_chars": settings.max_context_chars, "max_tokens": settings.max_tokens,
+        "passage_chars": settings.passage_chars,
         "reranker": reranked_retriever.manifest["reranker"],
         "rerank_config": reranked_retriever.manifest["config"], "results": results}, indent=2) + "\n")
     print(f"\nApp time limit per question: {limit:.0f}s (agent ran with {settings.max_seconds:.0f}s). "

@@ -178,10 +178,13 @@ class Runtime:
                 raise RuntimeConfigurationError('RAG_ALLOWED_DOC_IDS_FILE contains document IDs outside this index.')
             ids = frozenset(restricted)
         self.user = UserContext(user_id='benchmark-demo', allowed_doc_ids=ids)
-        generation = GenerationConfig(max_context_chars=settings.max_context_chars, retries=0)
+        passage_chars = max(settings.passage_chars or 0, 3000)  # Never below the default cap.
+        generation = GenerationConfig(max_context_chars=settings.max_context_chars,
+                                      passage_chars=passage_chars, retries=0)
         self.agent = (SearchAgent(retriever, EvidenceCritic(provider, generation),
             GroundedGenerator(provider, generation), config=AgentConfig(
                 max_rounds=settings.max_rounds, max_context_chars=settings.max_context_chars,
+                passage_chars=passage_chars,
                 max_tokens=settings.max_tokens, max_seconds=settings.max_seconds,
                 max_cost_usd=settings.question_budget_usd if settings.mode == 'live' else 0))
             if provider else None)

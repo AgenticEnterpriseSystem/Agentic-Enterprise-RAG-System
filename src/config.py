@@ -25,12 +25,15 @@ class RetrievalSettings(BaseModel):
     candidate_k: int = Field(default=50, ge=1, le=100)
     rerank_k: int = Field(default=50, ge=1, le=200)
     rrf_k: float = Field(default=60.0, ge=0)
+    # Excerpt size per result, cut from the whole document around the matched passage. Unset
+    # keeps each method's own excerpt: a 3,000-character BM25+ slice or a ~500-token BGE passage.
+    passage_chars: int | None = Field(default=None, ge=500, le=20000)
 
     def hybrid_config(self):
         from src.retrieval.hybrid import HybridConfig
         return HybridConfig(candidate_k=self.candidate_k, rerank_k=self.rerank_k,
                             rrf_k=self.rrf_k, bm25_weight=self.bm25_weight,
-                            dense_weight=1 - self.bm25_weight)
+                            dense_weight=1 - self.bm25_weight, passage_chars=self.passage_chars)
 
 
 class Settings(BaseModel):

@@ -783,3 +783,46 @@ def test_bm25_keeps_jax_off_the_gpu():
 
     # "cpu" unless the environment already chose a platform before the import.
     assert "JAX_PLATFORMS" in os.environ
+
+
+def test_passage_chars_recuts_excerpts_from_the_whole_document_around_the_match():
+    from src.retrieval.hybrid import HybridConfig, HybridRetriever
+
+    docs = {"a": "".join(f"w{i:04d} " for i in range(2000)), "b": "short document"}  # 12,000 / 14 chars
+
+    def passage(doc, start, end, method):
+        text = docs[doc][start:end]
+        chunk = Chunk(chunk_id=f"{doc}:{start}:{end}", doc_id=doc, source_type="slack", text=text,
+                      start_char=start, end_char=end)
+        return Evidence(citation_id=chunk.chunk_id, chunk=chunk, score=1, retrieval_method=method)
+
+    class Documents(Fixed):
+        def full_text(self, doc_id):
+            return docs.get(doc_id)
+
+    dense = passage("a", 6000, 7200, "dense")  # A 1,200-character BGE passage in the middle.
+    bm25 = Documents(passage("b", 0, 14, "bm25"))
+    plain = HybridRetriever(bm25, Fixed(dense), config=HybridConfig(bm25_weight=1, dense_weight=1))
+    wide = HybridRetriever(bm25, Fixed(dense), config=HybridConfig(bm25_weight=1, dense_weight=1,
+                                                                    passage_chars=3000))
+    before = {e.chunk.doc_id: e for e in plain.search(request(top_k=2))}
+    after = {e.chunk.doc_id: e for e in wide.search(request(top_k=2))}
+    assert len(before["a"].chunk.text) == 1200  # Unset: the BGE passage as it is.
+    chunk = after["a"].chunk
+    assert len(chunk.text) == 3000 and chunk.start_char <= 6000 and chunk.end_char >= 7200
+    assert chunk.text == docs["a"][chunk.start_char:chunk.end_char]
+    assert after["a"].citation_id == f"a:{chunk.start_char}:{chunk.end_char}"
+    assert after["b"].chunk.text == "short document"  # A short document stays whole.
+    assert wide.manifest["config"]["passage_chars"] == 3000
+
+
+def test_context_keeps_excerpts_up_to_the_configured_size():
+    from src.generation.generator import select_context
+    from src.contracts import GenerationRequest
+
+    text = "upload limits " * 500  # 7,000 characters
+    item = evidence("a", text=text)
+    req = GenerationRequest(question="upload limits", user=request().user, evidence=(item,))
+    assert len(select_context(req, 48000)[0].chunk.text) == 3000  # Default cap.
+    assert len(select_context(req, 48000, 6000)[0].chunk.text) == 6000
+    assert len(select_context(req, 4000, 6000)[0].chunk.text) == 4000  # Still within the budget.
