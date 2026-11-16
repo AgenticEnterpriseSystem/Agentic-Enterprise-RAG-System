@@ -282,6 +282,10 @@ class AnthropicProvider:
             input_tokens * config.input_usd_per_million
             + output_tokens * config.output_usd_per_million
         ) / 1_000_000
+        # The reply arrived, so its actual cost replaces the worst-case reservation. Calls
+        # that fail or lose their reply keep the full reservation. Without this, unused
+        # output allowance counted as spending and a session hit its cap far too early.
+        self.reserved_usd += cost - reservation
         if allowance:
             allowance.consume(tokens=input_tokens + output_tokens, cost_usd=cost,
                               seconds=time.monotonic() - began)

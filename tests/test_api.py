@@ -277,8 +277,10 @@ def test_shared_spending_reservations_reject_next_generation_without_paid_calls(
         second = client.post('/api/query', json={'question': 'policy'})
         assert second.status_code == 429
         assert second.json()['trace']['stop_reason'] == 'budget'
-        assert messages.created == 1 and provider.reserved_usd == pytest.approx(.0002)
-        assert client.get('/api/ready').json()['budget_remaining_usd'] == pytest.approx(.0001)
+        # The first call reserved .0002 worst case and settled at its actual cost, .00011; the
+        # next reservation (.0002) would exceed the .0003 cap, so it is refused.
+        assert messages.created == 1 and provider.reserved_usd == pytest.approx(.00011)
+        assert client.get('/api/ready').json()['budget_remaining_usd'] == pytest.approx(.00019)
 
 
 def test_agent_rejects_scope_violation_before_critic_or_generator():

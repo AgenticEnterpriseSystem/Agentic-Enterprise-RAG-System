@@ -183,6 +183,22 @@ class Messages:
         )
 
 
+def test_reservations_settle_to_actual_cost():
+    # Each call reserves .0003 worst case (100 input + 100 output tokens) but costs .00012.
+    # Settled reservations let six calls fit a .001 cap; unsettled ones would allow three.
+    messages = Messages()
+    provider = AnthropicProvider(AnthropicConfig(
+        model="explicit-model", allow_paid=True, budget_usd=0.001,
+        input_usd_per_million=1, output_usd_per_million=2, max_output_tokens=100,
+    ), client=SimpleNamespace(messages=messages))
+    for _ in range(6):
+        provider.complete("system", "prompt")
+    assert messages.created == 6
+    assert provider.reserved_usd == pytest.approx(6 * 0.00012)
+    with pytest.raises(ProviderError):
+        provider.complete("system", "prompt")
+
+
 def test_anthropic_budget_reservation_and_sdk_mapping():
     messages = Messages()
     config = AnthropicConfig(
