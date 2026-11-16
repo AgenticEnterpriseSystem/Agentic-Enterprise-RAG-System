@@ -34,7 +34,8 @@ class WebSettings(RetrievalSettings):
     input_price: float = Field(default=0, ge=0)
     output_price: float = Field(default=0, ge=0)
     question_budget_usd: float = Field(default=.1, gt=0)
-    max_seconds: float = Field(default=120, gt=0, le=300)
+    # 200 s leaves room for the reranker's ~20 s per search on a laptop CPU.
+    max_seconds: float = Field(default=200, gt=0, le=300)
     max_tokens: int = Field(default=16000, ge=256, le=64000)
     max_context_chars: int = Field(default=24000, ge=128, le=48000)
     max_rounds: int = Field(default=2, ge=1, le=5)

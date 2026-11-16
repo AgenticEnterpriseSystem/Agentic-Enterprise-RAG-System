@@ -176,10 +176,12 @@ RAG_RERANK_WEIGHT=0.7
 ```
 
 **Speed.** On a 16 GB laptop CPU it adds about 20 seconds **per search**. Fixed RAG searches
-once. The adaptive agent often searches four or five times, so it can exceed the 120-second
-limit (`RAG_MAX_SECONDS`): in a 10-question live run, 5 of 10 agent questions timed out with
-the reranker and none without it. On a laptop, use **Fixed RAG**, or turn the reranker off for
-the agent with `RAG_RERANKER=off`. A GPU (`RAG_DEVICE=cuda`) removes most of the delay.
+once. The adaptive agent often searches four or five times: in a 10-question live run its
+median time per question was 115 s with the reranker and 44 s without, and 5 of 10 exceeded
+the old 120-second limit. The limit (`RAG_MAX_SECONDS`) is now 200 seconds to leave room;
+`scripts/time_agent.py` measures how long questions take on your computer. For faster agent
+answers on a laptop, use **Fixed RAG** or `RAG_RERANKER=off`. A GPU (`RAG_DEVICE=cuda`) removes
+most of the delay.
 
 `RAG_RERANK_K` is how many candidates are re-sorted and `RAG_RERANK_MAX_WINDOWS` how many
 windows of each document are read. The first start downloads the model (about 1 GB for

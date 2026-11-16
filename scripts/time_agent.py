@@ -3,20 +3,28 @@
 Runs each question through the same runtime the app uses (hybrid search, critic, follow-up
 searches, answer), once without and once with the optional reranker, and records the total
 time, the number of searches, how each run stopped and its cost. A run longer than the app's
-time limit (RAG_MAX_SECONDS, default 120 s) would have timed out in the web app.
+time limit (RAG_MAX_SECONDS, default 200 s) would have timed out in the web app.
+
+To measure how much time questions really need, give the agent more room than the app's limit
+with --max-seconds (at most 300): every question then runs to its natural end, and the report
+says how many would exceed the app's limit and by how much. Up to the app's limit, the agent
+takes the same steps either way.
 
 **Paid:** it calls the Anthropic API with the key, model and prices in your .env (live-mode
 settings; see docs/WEB_APP.md). Expect about $0.02-0.04 per question per variant;
---budget-usd caps the total. Example (about 30-40 minutes on a laptop):
+--budget-usd caps the total. Examples:
 
-    python scripts/time_agent.py --budget-usd 1
+    python scripts/time_agent.py --budget-usd 1                     # 10 questions, both variants
+    python scripts/time_agent.py --count 20 --arms reranker --max-seconds 300 --budget-usd 1.5
 
-By default it uses the 10 development questions of the 2026-10-21 agent record, so search
-counts can be compared with that run. On macOS, set DYLD_LIBRARY_PATH as for the tests first.
+The first 10 questions are those of the 2026-10-21 agent record, so search counts can be
+compared with that run; --count above 10 adds development questions sampled with seed 5980.
+On macOS, set DYLD_LIBRARY_PATH as for the tests first.
 """
 import argparse
 import json
 import os
+import random
 import statistics
 import sys
 import time
@@ -32,11 +40,15 @@ from run_web import build_environment  # noqa: E402
 RECORD = ROOT / "evaluation/agent_development/20261021.json"
 
 
-def question_ids(args):
+def question_ids(args, development):
+    """The record's questions first, then a fixed sample of other development questions."""
     if args.question_ids:
         return args.question_ids
     record = json.loads(RECORD.read_text())
-    return [case["question_id"] for case in record["experiments"][0]["cases"]][: args.count]
+    chosen = [case["question_id"] for case in record["experiments"][0]["cases"]][: args.count]
+    others = sorted(set(development) - set(chosen))
+    random.Random(5980).shuffle(others)
+    return chosen + others[: max(0, args.count - len(chosen))]
 
 
 def run_one(runtime, question, mode):
@@ -62,11 +74,18 @@ def run_one(runtime, question, mode):
             "cost_usd": response.trace.usage.estimated_cost_usd}
 
 
-def describe(name, runs, limit):
+def describe(name, runs, limit, agent_limit):
     done = [r for r in runs if "error" not in r]
     if not done:
         print(f"  {name}: no completed runs")
         return
+    print(f"  {name}, seconds per question (longest first):")
+    for r in sorted(done, key=lambda r: -r["seconds"]):
+        cut = r["stop_reason"] == "budget" and r["seconds"] >= agent_limit
+        flag = (f"  needs more than {agent_limit:.0f}s (stopped)" if cut
+                else f"  {r['seconds'] - limit:+.0f}s over the {limit:.0f}s limit" if r["seconds"] > limit else "")
+        print(f"    {r['question_id']} {r['seconds']:6.1f}s  {r['searches']} searches "
+              f"({r['search_seconds']:.0f}s searching, {r['model_seconds']:.0f}s model)  {r['stop_reason']}{flag}")
     seconds = [r["seconds"] for r in done]
     searches = [r["searches"] for r in done]
     stops = {}
@@ -79,12 +98,26 @@ def describe(name, runs, limit):
           f"{statistics.median(searches):g}) | search time median "
           f"{statistics.median(r['search_seconds'] for r in done):.1f}s | answered "
           f"{sum(r['status'] == 'answered' for r in done)} | stops {stops} | cost ${cost:.3f}")
+    over = sorted(s for s in seconds if s > limit)
+    if over:
+        stopped = max(seconds) >= agent_limit
+        print(f"  -> {len(over)} of {len(done)} would time out at {limit:.0f}s; "
+              + (f"some were still running at the {agent_limit:.0f}s cap, so they need more than that"
+                 if stopped else f"a limit of {max(seconds):.0f}s would let all of them finish"))
+    else:
+        print(f"  -> all {len(done)} finished within {limit:.0f}s (longest {max(seconds):.0f}s)")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--question-ids", nargs="+", help="Development question IDs (default: the 2026-10-21 record)")
-    parser.add_argument("--count", type=int, default=10, help="How many of the default questions")
+    parser.add_argument("--count", type=int, default=10,
+                        help="How many questions (the record's 10, then sampled development questions)")
+    parser.add_argument("--arms", default="no reranker,reranker",
+                        help='Comma-separated variants: "no reranker", "reranker"')
+    parser.add_argument("--max-seconds", type=float,
+                        help="Agent time limit for this run (default: RAG_MAX_SECONDS); set it above "
+                             "the app's limit to measure how long questions really need")
     parser.add_argument("--modes", default="agentic", help="Comma-separated: agentic, baseline (Fixed RAG)")
     parser.add_argument("--reranker", default="bge-reranker-base", choices=["bge-reranker-base", "bge-reranker-v2-m3"])
     parser.add_argument("--rerank-k", type=int, default=20)
@@ -95,6 +128,9 @@ def main():
     modes = [m.strip() for m in args.modes.split(",") if m.strip()]
     if not set(modes) <= {"agentic", "baseline"}:
         parser.error("--modes takes agentic and/or baseline")
+    wanted_arms = [a.strip() for a in args.arms.split(",") if a.strip()]
+    if not wanted_arms or not set(wanted_arms) <= {"no reranker", "reranker"}:
+        parser.error('--arms takes "no reranker" and/or "reranker"')
 
     os.environ.update(build_environment(ROOT, os.environ, "hybrid"))
     os.environ["RAG_MODE"] = "live"
@@ -103,7 +139,10 @@ def main():
                                  attach_reranker, load_retriever)
     from src.evaluation.run_retrieval import load_questions
 
-    settings = WebSettings(**{**WebSettings.from_env().model_dump(), "budget_usd": args.budget_usd,
+    app_settings = WebSettings.from_env()
+    limit = app_settings.max_seconds  # The web app's limit, which results are judged against.
+    settings = WebSettings(**{**app_settings.model_dump(), "budget_usd": args.budget_usd,
+                              "max_seconds": args.max_seconds or limit,
                               "reranker": ""})  # The "no reranker" arm.
     if not (settings.allow_paid and settings.model and os.environ.get("ANTHROPIC_API_KEY")
             and settings.input_price > 0 and settings.output_price > 0 and settings.demo_access):
@@ -112,9 +151,9 @@ def main():
     reranked_settings = WebSettings(**{**settings.model_dump(), "reranker": args.reranker,
                                        "rerank_k": args.rerank_k,
                                        "rerank_max_windows": args.rerank_max_windows})
-    wanted = question_ids(args)
     questions = {q["question_id"]: q for q in load_questions(
         ROOT / ".cache/corpus/questions.jsonl", ROOT / "evaluation/splits.json", "development")}
+    wanted = question_ids(args, questions)
     missing = [q for q in wanted if q not in questions]
     if missing:
         parser.error(f"Not development questions: {missing}")
@@ -128,8 +167,11 @@ def main():
         max_output_tokens=1024, timeout_seconds=min(30, settings.max_seconds)))
     arms = {"no reranker": Runtime(settings, plain_retriever, provider),
             "reranker": Runtime(reranked_settings, reranked_retriever, provider)}
+    arms = {name: arms[name] for name in arms if name in wanted_arms}
     print(f"Reranker: {args.reranker}, {args.rerank_k} candidates, up to {args.rerank_max_windows} "
-          f"windows each, on {settings.device}; model {settings.model}; cap ${args.budget_usd:g}", flush=True)
+          f"windows each, on {settings.device}; model {settings.model}; cap ${args.budget_usd:g}; "
+          f"{len(wanted)} questions; agent limit {settings.max_seconds:.0f}s, app limit {limit:.0f}s",
+          flush=True)
 
     results = {mode: {arm: [] for arm in arms} for mode in modes}
     stopped = False
@@ -155,14 +197,16 @@ def main():
     output = args.output or ROOT / ".cache/agent-timing" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     output.mkdir(parents=True, exist_ok=True)
     (output / "results.json").write_text(json.dumps({
-        "model": settings.model, "max_seconds": settings.max_seconds, "device": settings.device,
+        "model": settings.model, "max_seconds": settings.max_seconds, "app_max_seconds": limit,
+        "device": settings.device,
         "reranker": reranked_retriever.manifest["reranker"],
         "rerank_config": reranked_retriever.manifest["config"], "results": results}, indent=2) + "\n")
-    print(f"\nTime limit per question: {settings.max_seconds:.0f}s. Results: {output / 'results.json'}")
+    print(f"\nApp time limit per question: {limit:.0f}s (agent ran with {settings.max_seconds:.0f}s). "
+          f"Results: {output / 'results.json'}")
     for mode in modes:
         print(f"\n{'Adaptive agent' if mode == 'agentic' else 'Fixed RAG'}:")
         for arm, runs in results[mode].items():
-            describe(arm, runs, settings.max_seconds)
+            describe(arm, runs, limit, settings.max_seconds)
 
 
 if __name__ == "__main__":

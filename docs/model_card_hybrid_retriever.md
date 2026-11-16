@@ -163,7 +163,7 @@ measured**; see the [system card](system_card.md) and [evaluation](EVALUATION.md
 | On average 28% of a question's reference documents are missed at top 10, 24% at top 20 | Show every source excerpt so users can check; answers report "insufficient evidence" when the critic finds gaps |
 | No reliable dates; can't pick the latest version | Date filters exclude undated documents instead of guessing; don't rely on it for "latest" questions |
 | BGE reads at most 512 tokens per passage; long documents are split | Titles added to every passage; BM25+ scores the whole document; a document's best passage is used |
-| The reranker adds about 20 s per search on a laptop CPU; agent questions can exceed the 120 s limit | Use Fixed RAG on a laptop, a GPU, or `RAG_RERANKER=off` |
+| The reranker adds about 20 s per search on a laptop CPU; agent questions took a median 115 s in a 10-question live run | Time limit raised from 120 s to 200 s; Fixed RAG, a GPU, or `RAG_RERANKER=off` are faster |
 | Reranker settings (20 candidates, 4 windows, weight 0.7) were chosen on development only | Not yet checked on calibration; final split kept untouched |
 | Weight 0.7 was tuned on development questions | Confirmed once on calibration; final split kept untouched for the end-of-project check |
 | Measured on a synthetic company only | Not for real data without re-evaluation; documented as out of scope above |

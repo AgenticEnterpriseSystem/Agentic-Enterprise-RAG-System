@@ -43,6 +43,7 @@ def test_optional_reranker_settings_and_attachment(monkeypatch):
         monkeypatch.delenv('RAG_' + key.upper(), raising=False)
     monkeypatch.setenv('RAG_MODE', 'retrieval')
     config = WebSettings.from_env()  # On by default, at the fast setting.
+    assert config.max_seconds == 200  # Room for the reranker on a laptop CPU.
     assert (config.reranker, config.rerank_k, config.rerank_max_windows, config.rerank_weight,
             config.rerank_window_chars) == ('bge-reranker-base', 20, 4, 0.7, 2000)
     assert RetrievalSettings().rerank_k == 50  # Evaluation defaults are unchanged.

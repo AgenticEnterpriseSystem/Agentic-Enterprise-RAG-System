@@ -147,7 +147,7 @@ Answer, source excerpts, and a trace of every step (latency, tokens, cost)
 | Limit | Default | Setting |
 | --- | --- | --- |
 | Queries at once | 1 (others get 429 "busy") | fixed |
-| Time per question | 120 s (504 after) | `RAG_MAX_SECONDS` |
+| Time per question | 200 s (504 after) | `RAG_MAX_SECONDS` |
 | Time per model call | 30 s | fixed |
 | Tokens per question | 16,000 | `RAG_MAX_TOKENS` |
 | Output tokens per model call | 1,024 | fixed |
