@@ -1,436 +1,186 @@
-# System
+<a id="system"></a>
+# How the system works
+
+This app searches workplace documents and answers questions using the documents a signed-in user can read. Its dataset describes a fictional company. It is a local course project, not a connection to a real company's Slack, email or Jira.
+
+**RAG** means *retrieval-augmented generation*: find useful evidence first, then give that evidence to a language model to help write an answer. The app can also ask for clarification or say that the available evidence is insufficient.
+
+Start with [setup](WEB_APP.md) to run it. See [current status](STATUS.md) for completed checks and open work, and the [system card](system_card.md) for risks and limitations.
 
 ## Request flow
 
+1. **Sign in.** A local account identifies the user. Its name, department or role does not automatically grant document access.
+2. **Ask a question.** The browser sends the question, workflow and optional platform/date filters. It cannot supply a trusted identity or add permissions.
+3. **Find the documents this user can read.** PostgreSQL checks the current account, session and reviewed document grants. This allowed set is called the request's **scope**.
+4. **Search within that scope.** Keyword search and meaning search rank permitted documents. The app fetches selected document text after these checks.
+5. **Choose evidence and answer.** Fixed RAG searches once. The adaptive workflow checks missing facts and can read more or search again before answering.
+6. **Check and show the result.** The server rechecks access and evidence identity. The UI shows the answer, exact source excerpts, citations and search steps.
+
 ```text
-React question form → FastAPI → configured retriever
-  Fixed RAG: search → generate cited answer
-  Agent:     search → check facts → read more/search again → cited answer or clarification
+Sign in → check document access → search → choose evidence
+  Fixed RAG:       → write answer
+  Adaptive agent:  → check requested facts → answer, clarify, or follow up
+                                              ↑                 │
+                                              └── check again ──┘
 ```
 
-The app serves the built frontend and `/api/*` from one origin. Both workflows
-use the same generator and `search(request) → evidence` retrieval interface.
-The backend loads one retriever at startup and shares it across requests.
-[Setup](WEB_APP.md) explains runtime modes and artifact configuration.
+A **round** can contain several searches or a structured operation. Fixed RAG has one round; it does not necessarily issue only one query. The managed adaptive workflow allows two rounds.
 
-## Components
+### Hybrid search: words and meaning
 
-| Location | Responsibility |
-| --- | --- |
-| `src/contracts.py` | Validated requests, evidence, answers and traces |
-| `src/db/`, `migrations/` | PostgreSQL foundation, immutable records, bounded runtime connections and forward migrations; application adoption remains pending |
-| `src/api/main.py`, `runtime.py` | HTTP lifecycle, demo scope, retriever/provider construction |
-| `src/agents/` | Search loop, evidence critic, routing and per-run budgets |
-| `src/generation/generator.py` | Provider calls, evidence-only generation and citation validation |
-| `src/retrieval/` | BM25, dense search, fusion, passage selection and optional reranker |
-| `frontend/src/` | Question form, answer, exact source excerpts and search steps |
-| `src/evaluation/`, `src/agents/pilot.py` | Retrieval scoring and development comparisons |
+**Hybrid retrieval** combines two rankings:
 
-BM25 scores documents; BGE uses their best matching passage. Hybrid combines
-rankings with weighted reciprocal rank fusion, deduplicating documents. The web
-runtime shares the corpus table between retrievers; its settings and compatibility
-requirements are in the [hybrid handoff](WEB_APP.md#hybrid-handoff).
+- **BM25+** is keyword search. Exact product names, error codes and IDs help it.
+- **BGE-base** is meaning search. It represents text as number vectors called **embeddings**, so differently worded questions can match similar text.
 
-Passage selection uses bounded exact text slices with original character offsets.
-The agent preserves passages cited for supported facts across rounds. It chooses
-the final context before assessment and reuses it for complete or partial answers.
-If a matching document is clipped, `read_more` reads one adjacent window of at
-most 3,000 characters from each of up to two already-retrieved documents. It uses
-the existing corpus table and preserves permissions, source/date filters and
-exact citation offsets. The parent hit's score is provenance, not a new score.
-Selection can still omit useful facts; these heuristics do not establish quality.
-The optional cross-encoder has a 512-token default input limit; the web app does
-not currently enable it.
+Each method supplies up to 50 document candidates. **Reciprocal rank fusion (RRF)** combines their positions in the lists, with weights 0.7 for BM25+ and 0.3 for dense search. Duplicate documents are merged. No reranker is enabled in the serving app. A reranker would be an additional model that reorders candidates.
 
-The critic assesses requested facts and their supporting passages. The adapter
-validates source IDs and derives sufficiency from the fact checklist. Claim
-summaries and scope decisions remain model judgments; valid IDs do not prove
-claim support. Generation receives the same evidence and assessed facts.
+Document embeddings are built ahead of time and shared across users. At request time the app embeds the question. It does not rebuild the documents' embeddings or keep a separate vector index for each account.
 
-The agent stops on sufficient evidence, clarification, no new evidence, limits or
-failure. Normal search stops can produce a cited partial answer; errors and
-exhausted budgets do not trigger fallback generation. Critic confidence is not
-calibrated answer accuracy. Clarification requests a distinguishing detail, such
-as an incident date. Conversation state and answer streaming are not implemented;
-submit a new complete question after clarification.
+### What the critic and follow-up search do
 
-The critic and generator receive each excerpt's citation ID, document ID, title,
-platform, date when known, and text. Excerpts that
-share a document ID can be read together, and titles are context, not proof. In the
-final round, the answer is generated from exactly the evidence the critic approved.
+The **router** turns the question into a search plan. It can use different wording or several queries from the first round. The **critic** checks the evidence against the facts the user asked for. Its checklist marks facts as supported, missing, conflicting or ambiguous; code derives the overall decision.
 
-## API
+If information is missing, the workflow can:
 
-| Endpoint | Result |
-| --- | --- |
-| `GET /api/health` | Liveness, including during index loading |
-| `GET /api/ready` | 200 when ready; 503 while loading or on setup failure |
-| `POST /api/query` | `QueryRequest` → `QueryResponse`: answer, sources, trace |
-| `GET /` | Built React app |
-| `GET /docs` | Generated API schema and interactive documentation |
+- **Reformulate the query:** search with more specific wording, names or entities.
+- **Read more:** fetch an adjacent window from an already permitted document when a useful part may have been cut off. An operation expands at most two documents, normally by up to 3,000 characters each.
+- **Ask for clarification:** request a distinguishing detail or a missing source.
 
-Query mode is `baseline` or `agentic`; questions contain 1–8000 nonblank characters.
-Source/date filters may narrow server scope. HTTP statuses distinguish validation
-(422), denied scope/origin (403), busy/budget (429), unavailable setup (503), timeout
-(504) and provider/agent errors (502). Agent errors retain permitted traces/evidence;
-boundary errors use `detail`. Responses do not expose provider exception text.
+The critic suggests actions; the router/search agent carries them out. Query reformulation is part of that existing workflow. Follow-up actions cannot widen document access.
 
-Defaults: top-k 5, two rounds, 120 seconds, 16,000 total model tokens, 24,000 context
-characters, and 1,024 maximum output tokens per model call. Search and loop limits
-use `RAG_*` settings in `src/api/runtime.py`; the provider output limit is fixed
-in code. These limits are not quality claims. Provider calls include token-count
-requests as well as generation.
+### How much evidence reaches the models
+
+The managed app selects **at most eight unique documents** for the shared critic/generator context. This ceiling is configurable to 5, 8 or 10. Several passages from one document count once. A native Jira record and passage from the same document share that slot. A computed count is one atomic evidence item, not a list limited to eight underlying rows.
+
+Eight is a maximum, not a target. Character and token budgets can leave fewer documents. Each text search requests up to the greater of `top_k` and this ceiling: eight hits in the managed profile. Multiple searches can collect a larger pool before shared selection. Earlier `top_k=5` therefore did not mean a global five-document context.
+
+The selector retains exact passages used for previously supported facts and reserves room for a possible answer before every critic call. The selected ordered evidence is then frozen: generation must use that same context. If supported evidence cannot fit, the system stops rather than silently dropping it. `trace.context_selection` reports selected, excluded and shortened passages. Source cards on an early error can show the larger collected pool; their count is not necessarily the model's input count.
 
 ## Access, spending and concurrency
 
-- `RAG_DEMO_ACCESS=true` enables the server-owned **benchmark-demo** identity.
-  It can read indexed synthetic documents; it is not sign-in or a production ACL.
-- `RAG_ALLOWED_DOC_IDS_FILE` can restrict IDs; an empty list denies all.
-  `RAG_ALLOWED_SOURCES` restricts platforms. Client identity/permission claims are
-  rejected. Retrieval, generation and final responses enforce this scope.
-- Dates require time zones. Corpus adapters lack reliable structured timestamps,
-  so date filters exclude undated evidence. A native Jira database adapter
-  provides authorized lookup and exact counts; live agent registration and
-  rendering its typed records remain WIRE-01 work.
-- Citation clicks show the response's exact authorized excerpts. Valid citation
-  IDs alone do not establish that a claim is supported. Evidence is untrusted;
-  reference answers are never supplied to the running agent.
-- One worker bounds expensive work; health checks remain responsive. Timed-out
-  synchronous work retains its slot until completion. SDK retries are disabled.
-  Token counting and cost reservations guard calls; limits around non-cooperating
-  synchronous tools are soft. Spending caps are process-local and reset on restart.
+### When permission checks happen
 
-See [Evaluation](EVALUATION.md) for measured outcomes and known answer failures.
+The server resolves document access **before searching or sending evidence to a model**. It builds a compact yes/no lookup, called a **permission mask**, in the same order as the shared document index.
 
-## Implementation contracts
+- BM25 applies the mask before selecting candidates.
+- Dense search checks the scope before encoding the question, then excludes unauthorized vector rows before similarity calculations and candidate selection.
+- PostgreSQL checks access again when text or native records are read.
+- Current-access checks run around long operations, model dispatch and final release.
 
-CONTRACT-01 defines opt-in interfaces for later implementation. It does **not**
-enable login, PostgreSQL, structured queries or a new retrieval backend. The
-current API keeps its existing response shape in the shared
-[contracts module](../src/contracts.py). Future APP-01 and WIRE-01 adopt
-snapshot-bound responses after their prerequisites pass.
+This avoids reading or sending denied document bodies. It does not remove their vectors from the shared files. Dense search still walks shared shards, so a smaller scope is not a promise of proportional disk, memory or latency savings. Full-corpus users get no permission-based reduction in eligible vectors.
 
-### Versions and source ownership
+Expiry, logout, account changes or a policy change can invalidate a request. Missing or unavailable permission state denies access. Checks cannot recall text already sent to a provider or already shown to a user.
 
-- Common wire types: [contracts.py](../src/contracts.py), with snapshot-bound wire version `2`.
-- Server identity/scope boundaries: `src/access/contracts.py`.
-- Storage/catalog/candidate boundaries: `src/storage/contracts.py`.
-- Public login/session DTOs: `src/auth/contracts.py`.
-- Runtime export versus external scoring: `src/evaluation/experiment_contracts.py`.
-- A synthetic mixed passage/zero-count example is in
-  [contracts.json](../tests/fixtures/contracts.json), under `grounded_response`.
+### Limits in the managed local deployment
 
-P owns these shared interfaces, database metadata/migrations, dependency pins,
-runtime/factory wiring and auth/UI. R implements retrieval against the accepted
-interfaces and fakes; R does not create alternate account or database schemas.
-Schema/migration changes belong to DB-01 and later explicit P tickets, not this
-contract handoff. Keep one migration head and immutable source/snapshot IDs.
+A **token** is a small text piece counted by a model; it is not necessarily a whole word.
 
-### Dataset and permission binding
+| Limit | Value | Meaning |
+| --- | ---: | --- |
+| Concurrent expensive requests | 1 | Others receive a busy response |
+| Agent rounds | 2 | Maximum search/check cycles |
+| Shared document ceiling | 8 | Subject to smaller text/token budgets |
+| Evidence characters | 24,000 | Evidence bodies/native JSON, not the whole prompt |
+| Model tokens per question | 16,000 | Inputs and outputs across stages |
+| Critic output | 2,048 tokens | A larger checklist can still fail |
+| Router/answer output | 1,024 tokens | Separate from the critic allowance |
+| Agent execution | 120 seconds | Inside the search workflow |
+| HTTP request wait | 180 seconds | Also allows for account/policy work |
+| Question cost | $0.10 | Checked before provider dispatch |
+| Provider budget per process | $0.50 in the reviewed local setup | Resets on restart |
+| Idle database transaction | 15 seconds managed; 5 seconds library default | Separate from SQL execution time |
+| SQL statement / lock wait | 5 seconds / at most 2 seconds | Not raised by the idle-timeout change |
 
-`SnapshotRef` contains snapshot ID, corpus-file SHA-256, ordered catalog SHA-256
-and document count. A matching ID alone is insufficient when hashes differ.
-DOC-01 must publish the canonical ordered-catalog digest alongside the import.
-The codec is frozen in `src/storage/fingerprints.py`: prefix `rag-catalog-v2\n`,
-then one compact UTF-8 JSON array per position-ordered row, followed by a newline.
-Each array is `[position, doc_id, revision_id, source_type, text_length,
-timestamp_or_null, metadata_origin]`. Timestamps use UTC with six fractional
-digits and `Z`; text and identifiers are not Unicode-normalized. SHA-256 covers
-the complete byte stream. `catalog_fingerprint(..., expected_count=...)` rejects
-position gaps and incomplete/excess catalogues without buffering the iterable.
-The database enforces document-ID uniqueness. `canonical_revision_id(text)`
-hashes the exact canonical UTF-8 text. Golden fixture digests lock this format;
-this ticket does not invent a fingerprint for existing unimported data.
+Settings live in [WebSettings](../src/api/runtime.py), [database settings](../src/db/runtime.py) and the explicit deployment configuration. Live operation needs a model/key, positive prices/budgets and paid mode enabled. Configuration alone does not authorize a new paid experiment.
 
-`ScopeBinding` adds a server-owned scope ID, user ID, policy revision and account
-session version. Revisions/counts use strict nonnegative integers, including zero;
-booleans, numeric strings and fractional values are rejected. A resolved scope
-never comes from a question, document, browser role field or model response.
+Provider calls count tokens and reserve worst-case cost before generation. API call counters include token-count requests as well as text generation; they are not a count of answers. SDK retries are disabled; unknown cost stays unknown. A timed-out HTTP request does not prove its worker stopped: the worker keeps the busy slot until it ends. Evaluation runners separately keep durable attempt reservations, so a restart does not authorize replaying an uncertain case.
 
-`ResolvedIdentity` contains trusted account metadata and a session row ID, never
-the raw session cookie. `RequestContext(identity, scope)` captures its binding and
-rejects a mismatched owner/session version. A scope cannot change its binding
-during a request. Role/department/project labels remain descriptive.
+## Components
 
-`AuthorizationScope` exposes `binding`, `permits(doc_id)` and
-`mask_for(snapshot, doc_ids)`. The mask preserves input order and duplicates;
-unknown IDs deny. A different snapshot/fingerprint must reject, not reuse a cached
-mask. `LegacySetScope` is the immutable small-fixture/reference adapter. Large
-catalog implementations may use compact bitmaps behind this interface.
+| Code | What it does |
+| --- | --- |
+| `frontend/src/` | Login, Search, source cards, traces and restricted Observability |
+| `src/api/` | HTTP requests, startup/readiness and authenticated runtime wiring |
+| `src/auth/`, `src/access/` | Accounts, sessions, grants and current-access checks |
+| `src/retrieval/` | Keyword/dense rankings, fusion and bounded candidate selection |
+| `src/agents/` | Search plans, critic checklist, follow-up actions and budgets |
+| `src/generation/` | Provider calls, answer writing and citation validation |
+| `src/storage/`, `src/db/`, `migrations/` | Canonical documents, native data, RLS and run metadata |
+| `src/contracts.py` | Validated request, evidence, answer and trace formats |
+| `src/evaluation/` | Reproducible runs and separate scoring inputs |
 
-`FreshnessGuard.assert_current(context)` must check current session/account
-validity, expiry, policy revision and artifact binding; it fails closed on absent
-authoritative state. It must not refresh or expand a scope. Guards run before
-sensitive operations and after long work before release. Operation-boundary
-checks do not recall information already dispatched to a provider or browser.
+## API
 
-### Text and computed evidence
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/health`, `GET /api/ready` | Liveness and whether the app is ready/busy |
+| `GET /api/auth/profile`, `GET /api/auth/csrf` | Auth mode and initial CSRF protection |
+| `POST /api/auth/login`, `GET /api/auth/me`, `POST /api/auth/logout` | Sign in, check session and sign out |
+| `POST /api/query` | Return answer, sources and trace |
+| `GET /api/runs/{run_id}` | Current owner's minimized run metadata |
+| `GET /api/observability/*` | Content-free diagnostics with separate admin permission |
+| `/`, `/observability`, `/docs` | Search UI, diagnostics UI and generated API docs |
 
-`PassageEvidence` preserves all V1 `Evidence` fields and adds `kind="passage"`,
-snapshot ID and document revision ID. Canonical text is the existing
-`document_text(title, content)` representation. Offsets are Unicode-character,
-zero-based and end-exclusive, never byte offsets. Preserve current citation IDs
-for the immutable corpus; store snapshot/revision identity with every result.
+Questions contain 1–8,000 nonblank characters. API workflow values are `baseline` and `agentic`; UI labels are **Fixed RAG** and **Adaptive agent**. Source/date filters narrow results; undated evidence fails date filters. A complete new question is needed after clarification: persistent chat memory and answer streaming are not implemented.
 
-`AggregateEvidence` has `kind="aggregate"`, artifact/citation IDs, scope binding,
-query template/version, unique typed filters, count, lineage digest, declared
-record coverage and an aware creation timestamp. It has no fabricated `Chunk`.
-Zero is a valid result; unknown/unavailable data is not converted to zero.
-Coverage is explicitly verified-record or synthetic-fixture coverage, not a claim
-that all enterprise source records are available.
-
-Filters accept strict strings, integers and booleans. They are structurally
-validated here; TOOL-01 must still enforce a template's supported fields,
-operations and values with parameterized queries over the complete authorized
-relation before pagination. Duplicate grant joins must not inflate counts.
-
-`validate_grounded_evidence` checks freshness/binding, snapshots, permitted
-passages and duplicate citations. Aggregate metadata alone cannot authorize a
-result: a trusted `AggregateRegistry` must resolve its ID to the exact canonical,
-owner/scope/version-bound artifact. TOOL-01 must persist the authorized-query
-lineage. Passage text/revision authenticity remains the trusted DocumentStore's
-responsibility; permission or a valid citation does not establish factual support.
-
-`QueryResponse` remains the single response model. Supplying `snapshot` opts
-into tagged passage/aggregate evidence, wire version `2`, and snapshot consistency
-checks; every source must then carry provenance. Snapshot-bound sources or a
-version without a snapshot are rejected. Existing responses omit both optional
-fields and retain their original wire shape. Citations must resolve to unique
-supplied sources in either form. Model validation checks structure; adapters must
-also enforce session authorization through `validate_grounded_evidence`.
-
-### Document-store interface and reference fixture
-
-`DocumentStore` exposes `snapshot()`, bounded `iter_catalog(batch_size=1000)`,
-internal `source_types()`, `read_passage(context, candidate, *, guard, filters)`
-and `read_more(context, anchors, *, guard, max_chars=3000, filters)`. Metadata
-iteration yields ordered batches, not document bodies or a public source list.
-
-`CatalogEntry` identifies an immutable revision, source, position, text length,
-nullable timestamp and metadata origin. `RankedCandidate` carries those matching
-IDs/spans plus a finite score, method and scorer/index provenance. A trusted store
-checks that metadata before fetching text. `ReadFilters` can narrow source/date
-scope only; unknown timestamps fail date filters. Source and date restrictions
-do not grant document access.
-
-Reads require an explicit freshness guard and recheck before release. Expansion
-validates every anchor, uses at most two already-authorized documents and returns
-one adjacent window per document. The default is 3,000 characters and the hard
-maximum is 6,000 per document, matching current adapter bounds. No adjacent text
-returns an empty tuple; score/method remain parent provenance.
-
-`src/storage/testing.py` provides an eager conformance fixture capped at 1,000
-documents. It is not a production storage or retrieval implementation. It makes
-denied pre-body reads, stale contexts, exact Unicode spans and bounded catalogue
-iteration executable for R before PostgreSQL exists. No ranking algorithm or
-full-corpus loader is part of this ticket.
-
-### Experiment and external-evaluator interface
-
-`ExperimentManifest` records an immutable arm/repetition, full source commit and
-dirty-tree digest when relevant, explicit split/question IDs, snapshot/scope,
-model/prompt/index/config identities and generation/evidence limits. The DTO
-provenance hashes are declarations. The offline exporter now verifies actual
-files, source checkout and a supplied effective runtime configuration;
-the contract itself performs no source-file or database I/O.
-
-`RuntimeCaseExport` records exact generated outcomes, trace/usage, generation
-inputs and retained sanitized errors. Unknown cost remains null. A clarification
-can cite assessed sources without a generator call; its generation evidence is
-empty. Error answers and error traces must agree. Runtime exports forbid extra
-reference/gold fields.
-
-`ScoringReference` and `ScoringInput` are a separate scoring-only join. They bind
-reference data to question identity and the canonical runtime-case digest after
-generation; they are not runtime requests. The offline export library and CLI
-are documented in [evaluation](EVALUATION.md#reproducible-offline-experiment-records).
-They add persistence and scoring handoff, without a judge or live generation runner.
-
-`validate_runtime_exports` distinguishes partial resumable output from a complete
-declared arm. `validate_resume_compatibility` rejects changed scientific settings.
-`validate_paired_arms` checks matched fixed/adaptive question sets, generator,
-scope, retrieval and budgets while permitting declared workflow/round/critic
-differences. Failed attempts remain outcomes. These helpers revalidate copied
-models; structural validity and matched settings do not establish answer quality.
-
-### Authentication HTTP contract — future routes
-
-| Route | Input/result | Later behavior |
-| --- | --- | --- |
-| `POST /api/auth/login` | `LoginRequest` → `SessionResponse` and cookie | Provisioned account; generic failed login; renew session token |
-| `GET /api/auth/me` | `SessionResponse` | Current display identity, expiry and CSRF value; no document grants or session digest |
-| `POST /api/auth/logout` | CSRF-protected request | Revoke server session, expire cookie, clear UI state |
-| Defined pre-login CSRF bootstrap | `CsrfResponse` | AUTH-01 implements its same-origin/login-CSRF lifecycle |
-
-The cookie name is `rag_session`; the CSRF header is `X-CSRF-Token`. Session tokens
-stay HttpOnly and server-managed; CSRF values intentionally reach JS memory.
-Credentials use `SecretStr` for redacted model/repr serialization, not for password
-hashing. AUTH-01 still implements Argon2id, expiry, throttling, cookie transport
-flags and CSRF checks. Login input rejects extra role/permission fields.
-
-Errors use `{detail: {code, message}}` with generic messages. Status codes:
-authentication required/invalid credentials/session expired → 401;
-scope denied/CSRF failed → 403; stale policy context → 409; unavailable policy
-store → 503. No error should reveal restricted source existence or provider text.
-Internal `SessionExpired`, `StaleContext`, `PolicyUnavailable` and `AccessDenied`
-carry explicit codes so later handlers do not inspect exception-message strings.
-
-### Acceptance and adoption
-
-Use the common contract checks in `tests/test_generation.py`, access checks in
-`tests/test_access.py`, store/fingerprint checks in `tests/test_storage.py`,
-experiment checks in `tests/test_evaluation.py`, and the existing full suite.
-They validate immutable/nested data, strict fields, denied and revoked contexts,
-exact text spans, snapshot mismatches, canonical aggregate provenance, export
-separation and V1 compatibility. They do not prove a database import, real login,
-full-corpus memory fit or answer-quality improvement.
-
-The private Lane P implementation has accepted CONTRACT-01 and the explicitly
-authorized MEM-01 profiling takeover. Wave 2 remains open until database, export
-and Lane R dense work pass together; interfaces and offline fixtures do not
-establish full-corpus memory fit. The ignored local plans hold actual revision
-and gate evidence.
-
+Errors distinguish sign-in failure (401), denied access/CSRF (403), stale scope (409), invalid input (422), busy/budget (429), model/agent failure (502), unavailable policy/setup (503) and HTTP timeout (504). Messages do not expose raw provider exceptions.
 
 ## Relational foundation
 
-The optional database profile and migration job are documented in
-[Setup](WEB_APP.md#database-foundation). The forward Alembic head, `0004_jira_feed`, owns 19 application tables in
-schema `rag`; the original14-table foundation remains frozen in
-`0001_foundation`. The initial migration is self-contained;
-future metadata changes do not rewrite historical revisions. Destructive
-downgrade is refused. Runtime can read migration version metadata for compatible
-readiness checks, but cannot change it.
+PostgreSQL stores canonical documents, accounts, sessions, explicit grants, native Jira data and minimized run/count records. The app uses a restricted shared database service role; each transaction binds the current application user. Application accounts are not separate PostgreSQL service-role logins.
 
-Catalog metadata contains no document bodies or titles and is internal to the
-server. Text/revisions, chunks, tickets, runs/steps and aggregates use RLS that
-denies absent, expired or stale context. Reviewed grants and a registered scope
-are required; a role label does not grant access. Database service roles are separate from application accounts.
-Published snapshot identity/content and stored aggregate provenance are immutable.
-Derived chunks may append against a fixed revision within canonical bounds.
-
-`Database.transaction(context)` accepts a server-resolved request context or an
-empty authority, binds identity locally, and commits/rolls back before returning
-the connection. A single bounded SQLAlchemy pool performs full session reset.
-Do not hold a transaction across retrieval or a model call. Authentication, scope
-freshness and grant decisions remain explicit AUTH/ACL responsibilities.
-[SQLAlchemy connection reset](https://docs.sqlalchemy.org/en/21/core/pooling.html#custom-reset-on-return-schemes),
-[PostgreSQL identities](https://www.postgresql.org/docs/17/functions-info.html),
-[Psycopg connection information](https://www.psycopg.org/psycopg3/docs/api/objects.html).
-
-
-### Canonical storage and import lifecycle
-
-Revision `0002_catalog_import` adds immutable-source checkpoints to the
-14-table foundation and supports exact null-containing canonical bodies. Operator
-import verifies every source hash, document order/revision and indexed span in
-bounded transactions. `PostgresDocumentStore` exposes lazy metadata and exact
-Unicode excerpts through the bounded nonowner pool; current policy/context is
-checked before and after body access, including all anchors before expansion.
-
-Exactly one canonical body representation is present: ordinary TEXT or original
-UTF-8 BYTEA for null-containing documents. Original hashes/offsets remain exact;
-binary data is validated and capped at1MiB. See [import setup](WEB_APP.md#canonical-document-import)
-for batch limits, rare binary physical reads and restart/verification commands.
-Default-deny behavior still applies without current reviewed authority. This ticket does not add login or activate the new
-store-backed web runtime.
-
-### Local account implementation
-
-`src/auth/accounts.py` provides interactive operator provisioning; sessions and
-bounded HTTP authentication are in `src/auth/sessions.py` and `src/api/auth.py`.
-The explicit local profile uses the nonowner runtime pool and a separate bounded
-auth executor, with server token digests, idle/absolute expiry, revocation,
-CSRF/origin checks and secure-cookie configuration. Account metadata never grants
-document access. The benchmark profile remains explicit and cannot satisfy a
-local-profile query as fallback. See [account setup](WEB_APP.md#local-account-api).
-
-These changes require no new migration or DOC schema dependency. Authenticated
-queries remain deny-all until ACL and application/store integration pass their
-own gates. This is actual local login, not enterprise SSO or completed user UI.
+**RLS means row-level security:** database rules check which rows the account can read. Python access checks and RLS both enforce the current session, allowed documents and policy version. An empty pooled connection context grants nothing. Runs and computed counts also require the correct owner and scope.
 
 ### Reviewed document permissions
 
-`PolicyResolver(database, snapshot, source_types=(), doc_ids=None)` resolves a
-trusted `ResolvedIdentity` into a frozen `RequestContext` and acts as its
-freshness guard. A direct user grant or an explicitly joined group grants a
-document. Compound groups require membership in the compound group and every
-declared base group; nesting, self-reference and cycles are rejected. Roles,
-department, projects and document prose grant nothing. Unknown documents deny.
-`doc_ids=None` imposes no operator document limit; an empty collection denies all.
+A direct grant or explicit group membership can permit a document. Special compound groups require their declared memberships; they are not a manager/folder inheritance system. Roles, departments, projects, folder paths and policy prose grant nothing automatically. Operator restrictions and query filters can only narrow access. There is no imported, verified enterprise access map; see [the data card](DATA_CARD.md#extraction-and-limitations).
 
-Each scope retains an immutable compact bitmap and shares a validated catalogue
-map. Bit position0 is the least-significant bit of byte0, matching PostgreSQL.
-An immutable `policy_scopes` record binds the bitmap to user/session version,
-policy epoch, complete snapshot and operator restriction identity. Its stable ID
-excludes the moving idle deadline, allowing reuse after authenticated activity.
-Both Python and SQL enforce the narrowed bitmap. SQL also rechecks actual grants,
-active user/session, current epoch and statement-time expiry. No protected read
-works through an empty pooled context. Runs/steps/aggregates additionally require
-the matching owner and scope binding. These are invoker policies, without an
-owner or SECURITY DEFINER bypass.
+Grant pages are fetched in short transactions. Python row conversion and bitmap work happen after commit/pool release. A fresh transaction checks the account, session and policy revision before each page is used, including final/empty pages. This avoids leaving a transaction idle during local processing.
 
-Reviewed operator patches use `PolicyRepository.dry_run/apply/revoke`. The
-`PolicyManifest` requires schema_version `"1"`, a unique manifest_id, exact
-SnapshotRef, origin (`operator` or `synthetic`), reviewed_by, nonempty provenance,
-and optional group/membership/grant arrays. Group records contain group_id,
-label and optional requires; memberships contain user_id/group_id; each grant
-contains explicit doc_ids and exactly one user_id or group_id. Application is
-additive and never relabels existing policy. Immutable `policy_changes` records
-and row ownership ensure revocation removes only the originating patch's rows.
-Group definitions/prerequisites remain intact. Actual grant/membership/requirement
-changes bump the global epoch atomically using statement transition tables;
-no-op writes do not bump it, rollback restores both state and epoch, and policy
-TRUNCATE is refused.
+### Local account implementation
 
-Benchmark principals have immutable account_kind `benchmark`. Their reviewed
-all-document grant is issued only by the separate operator operation, with an
-exclusive0600 credential file. Private credential verification yields an internal
-`ResolvedIdentity`; it emits no browser cookie or raw nonce. Public login and
-session authentication always reject benchmark accounts, including valid private
-passwords or known session nonces. Normal accounts remain kind `human`.
-See [operator setup](WEB_APP.md#reviewed-document-permissions). This component
-does not wire authenticated question serving; APP/SEC integration remains a
-separate gate.
+Local accounts use password hashes, expiring/revocable server sessions, an HttpOnly cookie and CSRF/origin checks. CSRF protects writes from being triggered by another site. Signing out clears displayed results and revokes the owned session. Failed local login never falls back to the separate benchmark/demo identity.
+
+### Canonical storage and import lifecycle
+
+**Canonical** means the verified text representation used for a document revision. Imports check source hashes, document order and exact spans before publishing a ready dataset. Published bodies/revisions are immutable. Text containing a null character is preserved as UTF-8 bytes rather than silently changed.
 
 ### Native Jira records and exact counts
 
-`src/data/structured.py` verifies typed Jira fields from the project's pinned
-upstream Git commit against the complete canonical Jira UUID/path/body-revision
-set. Git paths, blob IDs and raw file SHA256 values remain attached to each
-record. The canonical Parquet intentionally omits these typed fields; status,
-priority and project are never extracted from prose or invented as passage
-citations. Directory names and native-key prefixes do not determine project.
+The Jira adapter uses verified fields imported from 6,118 canonical source records; it does not query live Jira. Two source aliases are excluded and 575 native keys repeat, so a key can match several records. Counts mean permitted canonical source records, not necessarily unique live issues.
 
-The actual pinned source matches all 6,118 canonical Jira records. Two upstream
-aliases lie outside the canonical path set and are explicitly excluded. There
-are 575 repeated native keys, so canonical document UUIDs identify physical
-records and native-key lookup can return multiple authorized records. Counts
-mean canonical source records in this pinned benchmark, not unique live issues.
-Status/project/priority filters preserve exact source values; no definition of
-"open" is inferred from another status.
+An exact count queries the complete authorized relation, independently of the eight-document text context. It needs verified field coverage: unknown coverage is not zero. Unsupported filters and ambiguous lookups stop or ask for clarification. Records/counts have their own provenance rather than invented passage text.
 
-The independent immutable `ticket_feeds` manifest records complete record
-coverage and separate verified/missing/invalid counts for each typed field.
-Runtime can read its ready-feed header; the global path/UUID inventory and field
-totals remain operator-only through column privileges.
-Import commits bounded batches and publishes a ready feed only after canonical
-completeness and field counts pass. Interrupted imports remain unavailable and
-resume by verifying existing rows. An empty ticket table does not prove zero.
+## Implementation contracts
 
-`JiraTool.execute(request, context=..., guard=...)` uses the nonowner database
-pool, current snapshot/session/policy scope and existing RLS. The compatibility
-`request.user` grants no authority. Lookup ambiguity and missing-field checks
-use only the authorized relation; hidden record counts are never returned.
-Unsupported filters reject. Required missing fields produce unknown coverage,
-while a proven empty matching relation produces a valid zero. Counts ignore
-lookup limits and persist owner/scope-bound aggregate artifacts with exact
-filters, template version and deterministic full-relation lineage. Native
-records are rechecked against their authoritative rows before release; aggregate
-artifacts resolve through the existing evidence registry. Source metadata alone
-cannot authorize a copied or changed result.
+These details matter when extending or reproducing the system.
 
-The native adapter is separate from SearchAgent registration and web display.
-TOOL-01 acceptance records distinguish a Jira-only real-data snapshot from
-the later import into the complete 511,958-document application snapshot. See
-[operator import](WEB_APP.md#native-jira-feed).
+### Dataset and permission binding
+
+A **snapshot** identifies a fixed dataset through its ID, corpus-file hash, ordered catalog hash and document count. A hash is a fingerprint of exact bytes. Matching names alone are insufficient. A scope also binds the user, policy revision and account session version. Browser/model fields cannot create this authority.
+
+### Text and computed evidence
+
+Passages retain document/revision IDs and exact zero-based, end-exclusive Unicode character offsets. For example, `doc:10:20` refers to characters 10 through 19. Counts and typed records have separate evidence formats. Every answer citation must resolve to supplied evidence; this does not prove claim support.
+
+### Versions and source ownership
+
+[The contracts module](../src/contracts.py) is the shared wire definition. Snapshot-bound passage/count responses use version 2; native records require version 3. Legacy fixture formats remain supported. Account, access, storage and evaluation contracts live in their corresponding `src/` packages.
+
+### Document-store interface and reference fixture
+
+The store exposes bounded metadata iteration and authorized exact-text reads/expansion. Its small in-memory test implementation checks the same interface; passing it does not prove full-corpus performance.
+
+### Experiment and external-evaluator interface
+
+Runtime records freeze source/model/prompt/index/settings identities and actual outcomes. **Reference answers** are joined afterward for scoring and never given to the answering agent. Unknown cost and failed attempts remain visible. Compatible settings and valid files do not establish correctness. See [evaluation](EVALUATION.md).
+
+<a id="authentication-http-contract--future-routes"></a>
+### Authentication HTTP contract
+
+The implemented cookie is `rag_session`; authenticated writes use `X-CSRF-Token`. The browser holds its session, not database credentials or document grants. Internal server identity excludes the raw cookie. See [setup](WEB_APP.md) for local HTTP, HTTPS cookie settings and operator provisioning.
+
+### Acceptance and adoption
+
+Authenticated PostgreSQL/hybrid serving and the native Jira adapter are implemented, not future contract-only work. Current acceptance is 19 of 23 gates; remaining evaluation/release work is tracked in [status](STATUS.md). Functional UI checks do not establish answer-quality superiority or production readiness.

@@ -3,6 +3,7 @@ from pydantic import Field
 from src.contracts import Contract, Retriever, SearchRequest, validate_evidence
 from src.retrieval.fusion import reciprocal_rank_fusion
 from src.retrieval.passages import bounded_passage
+from src.observability import emit, span
 
 
 class HybridConfig(Contract):
@@ -49,31 +50,49 @@ class HybridRetriever:
         return result
 
     def search(self, request: SearchRequest):
-        if request.user.user_id is None or not request.user.allowed_doc_ids:
-            return ()
-        candidate_request = request.model_copy(update={"top_k": max(request.top_k, self.config.candidate_k)})
-        rankings = []
-        for retriever in (self.bm25, self.dense):
-            items = tuple(retriever.search(candidate_request))
-            # Fail closed on scope violations; filter stale/wrong-source results before scoring.
-            validate_evidence(request.user, items)
-            rankings.append(tuple(item for item in items if matches_filters(item, request)))
-        fused = reciprocal_rank_fusion(rankings, k=self.config.rrf_k,
-                    weights=(self.config.bm25_weight, self.config.dense_weight),
-                    limit=max(request.top_k, self.config.rerank_k))
-        fused = tuple(bounded_passage(item, request.query) for item in fused)
-        validate_evidence(request.user, fused)
-        result = (self.reranker.rerank(request.query, fused, request.top_k)
-                  if self.reranker is not None else fused[:request.top_k])
-        result = tuple(result)
-        candidates = {item.citation_id: item for item in fused}
-        if len(result) > request.top_k or any(
-            item.citation_id not in candidates
-            or item.chunk != candidates[item.citation_id].chunk
-            or item.retrieval_method != "hybrid"
-            or not matches_filters(item, request)
-            for item in result
-        ):
-            raise ValueError("Reranker returned evidence outside filtered candidates")
-        validate_evidence(request.user, result)
-        return result
+        with span('hybrid') as observed:
+            if request.user.user_id is None or not request.user.allowed_doc_ids:
+                observed.set(returned_count=0)
+                return ()
+            candidate_request = request.model_copy(update={"top_k": max(request.top_k, self.config.candidate_k)})
+            rankings = []
+            for stage, retriever in (('bm25', self.bm25), ('dense', self.dense)):
+                with span(stage) as branch:
+                    items = tuple(retriever.search(candidate_request))
+                    # Fail closed on scope violations; filter stale/wrong-source results before scoring.
+                    validate_evidence(request.user, items)
+                    ranking = tuple(item for item in items if matches_filters(item, request))
+                    rankings.append(ranking)
+                    branch.set(candidate_count=len(ranking),
+                               unique_document_count=len({item.chunk.doc_id for item in ranking}))
+            observed.set(candidate_count=sum(map(len, rankings)), bm25_candidate_count=len(rankings[0]),
+                         dense_candidate_count=len(rankings[1]),
+                         unique_document_count=len({item.chunk.doc_id for ranking in rankings for item in ranking}))
+            with span('fusion') as fusion:
+                fused = reciprocal_rank_fusion(rankings, k=self.config.rrf_k,
+                            weights=(self.config.bm25_weight, self.config.dense_weight),
+                            limit=max(request.top_k, self.config.rerank_k))
+                fusion.set(fused_count=len(fused))
+            with span('materialize') as materialized:
+                fused = tuple(bounded_passage(item, request.query) for item in fused)
+                validate_evidence(request.user, fused)
+                materialized.set(returned_count=len(fused))
+            if self.reranker is not None:
+                with span('rerank', reranker_enabled=True) as reranked:
+                    result = tuple(self.reranker.rerank(request.query, fused, request.top_k))
+                    reranked.set(candidate_count=len(fused), returned_count=len(result))
+            else:
+                emit('rerank', 'skipped', status='skipped', reason='disabled', reranker_enabled=False)
+                result = tuple(fused[:request.top_k])
+            candidates = {item.citation_id: item for item in fused}
+            if len(result) > request.top_k or any(
+                item.citation_id not in candidates
+                or item.chunk != candidates[item.citation_id].chunk
+                or item.retrieval_method != "hybrid"
+                or not matches_filters(item, request)
+                for item in result
+            ):
+                raise ValueError("Reranker returned evidence outside filtered candidates")
+            validate_evidence(request.user, result)
+            observed.set(fused_count=len(fused), returned_count=len(result), reranker_enabled=self.reranker is not None)
+            return result

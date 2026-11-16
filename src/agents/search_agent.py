@@ -1,13 +1,15 @@
 """Bounded search → evidence assessment → answer orchestration."""
 
+from contextlib import nullcontext
 import json
 import time
 from uuid import uuid4
 
 from pydantic import Field
 
-from src.agents.context import ContextBudgetError, select_agent_context
-from src.agents.budget import CallBudget, RunBudgetExceeded, call_budget
+from src.agents.context import (ContextBudgetError, select_agent_context, select_shared_context,
+    selection_stats, document_ids)
+from src.agents.budget import CallBudget, RunBudgetExceeded, call_budget, output_token_limit
 from src.agents.routing import Route, TextRouter
 from src.agents.search_critic import AgentError
 from src.access.contracts import (
@@ -19,7 +21,8 @@ from src.contracts import (
     QueryResponse, SearchRequest, StructuredRecord, ToolResult, Trace, TraceStep, Usage,
     validate_evidence,
 )
-from src.generation.generator import combined_usage, select_context
+from src.generation.generator import combined_usage, select_context, freeze_context, FrozenContextError
+from src.observability import emit, span
 
 
 class AgentConfig(Contract):
@@ -30,6 +33,9 @@ class AgentConfig(Contract):
     max_seconds: float = Field(default=60, gt=0)
     max_cost_usd: float = Field(default=0, ge=0)
     confidence_threshold: float = Field(default=0.8, ge=0, le=1)
+    evidence_doc_limit: int | None = Field(default=None, strict=True, ge=1, le=20)
+    critic_max_output_tokens: int | None = Field(default=None, strict=True, ge=1, le=8192)
+    generation_max_output_tokens: int | None = Field(default=None, strict=True, ge=1, le=8192)
 
 
 class SearchAgent:
@@ -40,6 +46,15 @@ class SearchAgent:
         self.config, self.clock = config or AgentConfig(), clock
 
     def run(self, request: SearchRequest, *, single_pass=False, context=None, guard=None,
+            run_id=None, retrieval_only=False, aggregates=None, record_validator=None) -> QueryResponse:
+        with span('agent') as observed:
+            response = self._admitted_run(request, single_pass=single_pass, context=context, guard=guard,
+                run_id=run_id, retrieval_only=retrieval_only, aggregates=aggregates, record_validator=record_validator)
+            observed.set(stop_reason=response.trace.stop_reason, reason_code=response.trace.stop_reason,
+                **response.trace.usage.model_dump())
+            return response
+
+    def _admitted_run(self, request: SearchRequest, *, single_pass=False, context=None, guard=None,
             run_id=None, retrieval_only=False, aggregates=None, record_validator=None) -> QueryResponse:
         if run_id is not None and (not isinstance(run_id, str) or not run_id.strip()):
             raise ValueError("A server-generated run ID must be nonempty")
@@ -61,6 +76,7 @@ class SearchAgent:
              run_id=None, retrieval_only=False, aggregates=None, record_validator=None) -> QueryResponse:
         started = self.clock()
         steps, usages, evidence = [], [], {}
+        selections = []
         trace_evidence = {}
         native_sources = {}
         feedback = None
@@ -129,9 +145,24 @@ class SearchAgent:
                 remaining_seconds=max(0, config.max_seconds - (self.clock() - started)),
                 remaining_cost_usd=max(0, config.max_cost_usd - (usage.estimated_cost_usd or 0)),
             )
-            with call_budget(allowance):
+            stage = {'route': 'route', 'assess': 'critic', 'generate': 'generate'}.get(getattr(operation, '__name__', ''), 'other')
+            output_limit = (config.critic_max_output_tokens if stage == 'critic'
+                            else config.generation_max_output_tokens)
+            output_scope = output_token_limit(output_limit) if output_limit is not None else nullcontext()
+            with call_budget(allowance), output_scope, span(stage, round_number=round_number) as observed:
                 try:
-                    return perform(operation, *args)
+                    result = perform(operation, *args)
+                    if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], Usage):
+                        observed.set(**result[1].model_dump())
+                        if isinstance(result[0], CriticDecision):
+                            observed.set(sufficient=result[0].sufficient, reason_code=('sufficient' if result[0].sufficient
+                                else 'read_more' if result[0].read_more_doc_ids else 'reformulation' if result[0].suggested_queries else 'missing_evidence'))
+                    return result
+                except BaseException as error:
+                    if isinstance(getattr(error, 'usage', None), Usage): observed.set(**error.usage.model_dump())
+                    observed.set(error_code=getattr(error, 'code', None),
+                        provider_stop_reason=getattr(error, 'provider_stop_reason', None))
+                    raise
                 finally:
                     if request_context is not None:
                         grounded(tuple(evidence.values()))
@@ -161,7 +192,7 @@ class SearchAgent:
                 sources=sources,
                 trace=Trace(run_id=run_id, steps=tuple(steps),
                             total_latency_ms=max(0, (self.clock() - started) * 1000),
-                            usage=combined_usage(usages), stop_reason=reason),
+                            usage=combined_usage(usages), stop_reason=reason, context_selection=tuple(selections)),
             )
             current()
             return response
@@ -210,7 +241,7 @@ class SearchAgent:
             if exhausted():
                 return finish("budget", "Search budget reached.")
             # Do not reselect or crop evidence after it has been assessed. The
-            # final-round selection already reserves room for answer generation;
+            # assessed context already reserves room for answer generation;
             # provider token counting still enforces the actual remaining budget.
             if last_context is None or not last_context.evidence:
                 return finish(reason, limitation)
@@ -228,6 +259,18 @@ class SearchAgent:
             answer = answer.model_copy(update={"status": "insufficient_evidence",
                 "text": answer.text + "\n\nSearch limitation: " + limitation})
             return finish(reason, "", answer, context.evidence)
+
+        def shared_context(pool, limit):
+            with span('context_select', round_number=round_number) as observed:
+                try:
+                    selected, stats = perform(select_shared_context, pool, limit, initial_ids,
+                        tuple(retained.values()), document_limit=config.evidence_doc_limit, round_number=round_number)
+                except ContextBudgetError as error:
+                    stats = selection_stats(pool, (), limit, config.evidence_doc_limit, round_number, failure_reason=error.reason)
+                    selections.append(stats); observed.set(**stats.model_dump(exclude={'evidence_sha256'}))
+                    raise
+                selections.append(stats); observed.set(**stats.model_dump(exclude={'evidence_sha256'}))
+                return freeze_context(pool.model_copy(update={'evidence': selected}))
 
         run_id = run_id or str(uuid4())
         if len(request.query) > config.max_question_chars:
@@ -258,7 +301,9 @@ class SearchAgent:
                     return finish("no_new_evidence", route.limitation)
                 if anchors and expand is not None:
                     active_tool, began = 'read_more', self.clock()
-                    expanded = tuple(perform(expand, request, anchors, max_chars=3000))
+                    with span('read_more', round_number=round_number) as observed:
+                        expanded = tuple(perform(expand, request, anchors, max_chars=3000))
+                        observed.set(returned_count=len(expanded), unique_document_count=len(document_ids(expanded)))
                     if any(e.chunk.doc_id not in {a.chunk.doc_id for a in anchors} for e in expanded):
                         raise AgentError('Document expansion returned an unrelated document.')
                     hits = accept(expanded, request.source_types)
@@ -274,7 +319,8 @@ class SearchAgent:
                 if request.source_types and not set(sources) <= set(request.source_types):
                     raise AgentError("Router tried to widen the source scope.")
                 # Validate every operation before executing any part of this plan.
-                searches = [SearchRequest(query=query, user=request.user, top_k=request.top_k,
+                text_k = max(request.top_k, config.evidence_doc_limit or request.top_k)
+                searches = [SearchRequest(query=query, user=request.user, top_k=text_k,
                                           source_types=sources, after=request.after, before=request.before)
                             for query in route.text_queries]
                 if any(len(search.query) > config.max_question_chars for search in searches):
@@ -290,13 +336,17 @@ class SearchAgent:
                     if exhausted():
                         return finish("budget", "Search budget reached.")
                     active_tool, began = "text_search", self.clock()
-                    hits = accept(perform(self.retriever.search, search), sources)
+                    with span('text_search', round_number=round_number) as observed:
+                        hits = accept(perform(self.retriever.search, search), sources)
+                        observed.set(returned_count=len(hits), unique_document_count=len(document_ids(hits)))
                     record(active_tool, began, query=search.query, hits=hits, sources=sources)
                 for call, spec, tool_request in calls:
                     if exhausted():
                         return finish("budget", "Search budget reached.")
                     active_tool, began = call.tool, self.clock()
-                    result = perform(spec.adapter.execute, tool_request)
+                    with span('tool', round_number=round_number) as observed:
+                        result = perform(spec.adapter.execute, tool_request)
+                        if isinstance(result, ToolResult): observed.set(returned_count=len(result.evidence) + len(result.records))
                     if not isinstance(result, ToolResult):
                         raise AgentError("Structured tool returned an invalid result.")
                     result = ToolResult.model_validate(result.model_dump(warnings=False))
@@ -338,24 +388,40 @@ class SearchAgent:
                 context_order = new_evidence + context_order
                 context = GenerationRequest(question=request.query, user=request.user,
                                             evidence=tuple(context_order))
-                selected = (perform(select_agent_context, context, config.max_context_chars, initial_ids, tuple(retained.values()))
-                            if round_number > 1 else perform(select_context, context, config.max_context_chars))
-                if request_context is not None:
-                    grounded(tuple(selected))
-                context = context.model_copy(update={"evidence": tuple(selected)})
+                if config.evidence_doc_limit is None:
+                    selected = (perform(select_agent_context, context, config.max_context_chars, initial_ids, tuple(retained.values()))
+                                if round_number > 1 else perform(select_context, context, config.max_context_chars))
+                    if request_context is not None: grounded(tuple(selected))
+                    context = context.model_copy(update={"evidence": tuple(selected)})
                 if not single_pass:
                     active_tool, began = "critic", self.clock()
-                    if round_number == config.max_rounds:
-                        usage_so_far = combined_usage(usages)
-                        remaining = config.max_tokens - usage_so_far.input_tokens - usage_so_far.output_tokens
-                        # Share the remaining allowance with the final answer rather
-                        # than spending nearly all of it assessing more evidence.
-                        # Reserve prompt/schema metadata and the extracted fact
-                        # checklist passed to generation, in addition to text.
+                    usage_so_far = combined_usage(usages)
+                    remaining = config.max_tokens - usage_so_far.input_tokens - usage_so_far.output_tokens
+                    # Every round can approve an immediate answer. Share the
+                    # remaining allowance with generation, including prompt/schema
+                    # metadata and its extracted fact checklist. Actual provider
+                    # token counting still enforces the complete run budget.
+                    if config.critic_max_output_tokens is None and config.generation_max_output_tokens is None:
+                        # Preserve the exact context selection of legacy callers.
                         critic_limit = min(config.max_context_chars, max(1, (remaining // 2 - 2500) * 2))
-                        critic_pool = GenerationRequest(question=request.query, user=request.user, evidence=tuple(evidence.values()))
-                        context = critic_pool.model_copy(update={"evidence": tuple(perform(select_agent_context,
-                            critic_pool, critic_limit, initial_ids, tuple(retained.values())))})
+                    else:
+                        critic_output = config.critic_max_output_tokens or 1024
+                        answer_output = config.generation_max_output_tokens or 1024
+                        # The old 5000-token reserve contained two 1024-token
+                        # outputs plus 2952 tokens of prompt/schema/assessment
+                        # headroom. A larger critic checklist is also repeated in
+                        # the generator input, so reserve its added size twice.
+                        reserve = critic_output + answer_output + 2952 + max(0, critic_output - 1024)
+                        # This shares a character-budget heuristic, not an exact
+                        # tokenizer. Provider token/cost counting remains binding.
+                        critic_limit = min(config.max_context_chars, max(1, (remaining - reserve) // 2 * 2))
+                    # Keep earlier rounds' newest-first ordering and the existing
+                    # final-round pool, including exact previously supported text.
+                    pool = tuple(evidence.values()) if round_number == config.max_rounds else tuple(context_order)
+                    critic_pool = GenerationRequest(question=request.query, user=request.user, evidence=pool)
+                    context = (shared_context(critic_pool, critic_limit) if config.evidence_doc_limit is not None
+                        else critic_pool.model_copy(update={"evidence": tuple(perform(select_agent_context,
+                            critic_pool, critic_limit, initial_ids, tuple(retained.values())))}))
                     # An approval applies only to this exact evidence set. Use it
                     # for generation too, including the reduced final-round pool.
                     feedback, usage = model_call(self.critic.assess, context)
@@ -381,6 +447,8 @@ class SearchAgent:
                     for fact in feedback.facts:
                         if fact.status == 'supported':
                             retained.update((cid, supplied[cid]) for cid in fact.citation_ids)
+                elif config.evidence_doc_limit is not None:
+                    context = shared_context(context, config.max_context_chars)
                 last_context = context
                 if exhausted():
                     return finish("budget", "Search budget reached.")
@@ -414,8 +482,14 @@ class SearchAgent:
                     return partial_answer("round_limit", "Search round limit reached before evidence was judged sufficient.")
             except AccessError:
                 raise
-            except ContextBudgetError:
-                return finish('budget', 'Supported evidence no longer fits the remaining context budget.')
+            except ContextBudgetError as error:
+                return finish('budget', 'Supported documents exceed the configured document limit.'
+                    if error.reason == 'retained_document_limit' else 'Supported evidence no longer fits the remaining context budget.')
+            except FrozenContextError:
+                emit(active_tool if active_tool in {'critic', 'generate'} else 'context_select', event='error',
+                    status='error', round_number=round_number, reason_code='frozen_context_mismatch')
+                record(active_tool + ':error', began, usage=Usage(estimated_cost_usd=None))
+                return finish('error', 'Selected model evidence changed before dispatch.')
             except RunBudgetExceeded as exc:
                 record(active_tool + ":budget", began, usage=exc.usage)
                 return finish("budget", "Model call exceeds remaining run budget.")

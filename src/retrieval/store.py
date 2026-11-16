@@ -30,6 +30,7 @@ from src.storage.contracts import (
     validate_read_more_bounds,
 )
 from src.storage.fingerprints import ValidatedCatalog, catalog_fingerprint
+from src.observability import emit, span
 
 
 def _query(query, top_k):
@@ -425,35 +426,56 @@ class StoreHybridRetriever:
 
     def search(self, context: RequestContext, query: str, *, guard: FreshnessGuard,
                top_k: int = 10, filters: ReadFilters = ReadFilters()) -> tuple[PassageEvidence, ...]:
-        self.bm25._current(context, guard)
-        self.dense._current(context, guard)
-        _query(query, top_k)
-        filters = _filters(filters)
-        config = self.config
-        candidate_k = max(top_k, config.candidate_k)
-        rankings = tuple(retriever.candidates(context, query, guard=guard,
-                    top_k=candidate_k, filters=filters) for retriever in (self.bm25, self.dense))
-        fused = reciprocal_rank_candidates(rankings, k=config.rrf_k,
-                    weights=(config.bm25_weight, config.dense_weight),
-                    limit=max(top_k, config.rerank_k) if self.reranker is not None else top_k)
-        # Validate every selected metadata item before reading the first body.
-        fused = tuple(self.bm25._checked_candidate(context, value, filters) for value in fused)
-        self.bm25._current(context, guard)
-        passages = tuple(self.bm25._materialize(context, value, query, guard, filters) for value in fused)
-        validate_grounded_evidence(context, passages, guard)
-        result = tuple(self.reranker.rerank(query, passages, top_k)) if self.reranker is not None else passages
-        self.bm25._current(context, guard)
-        result = tuple(self.bm25._checked_passage(context, value, filters) for value in result)
-        by_id = {value.citation_id: value for value in passages}
-        if len(result) > top_k:
-            raise EvidenceValidationError("Reranker exceeded the requested result limit")
-        for value in result:
-            candidate = by_id.get(value.citation_id)
-            if (candidate is None or value.chunk != candidate.chunk
-                    or value.snapshot_id != candidate.snapshot_id or value.revision_id != candidate.revision_id
-                    or value.retrieval_method != "hybrid"):
-                raise EvidenceValidationError("Reranker returned evidence outside its candidates")
-        validate_grounded_evidence(context, result, guard)
-        self.bm25._current(context, guard)
-        self.dense._current(context, guard)
-        return result
+        with span('hybrid') as observed:
+            self.bm25._current(context, guard)
+            self.dense._current(context, guard)
+            _query(query, top_k)
+            filters = _filters(filters)
+            config = self.config
+            candidate_k = max(top_k, config.candidate_k)
+            rankings = []
+            for stage, retriever in (('bm25', self.bm25), ('dense', self.dense)):
+                with span(stage) as branch:
+                    ranking = retriever.candidates(context, query, guard=guard,
+                                                  top_k=candidate_k, filters=filters)
+                    branch.set(candidate_count=len(ranking),
+                               unique_document_count=len({item.doc_id for item in ranking}))
+                    rankings.append(ranking)
+            observed.set(candidate_count=sum(map(len, rankings)),
+                         bm25_candidate_count=len(rankings[0]), dense_candidate_count=len(rankings[1]),
+                         unique_document_count=len({item.doc_id for ranking in rankings for item in ranking}))
+            with span('fusion') as fusion:
+                fused = reciprocal_rank_candidates(rankings, k=config.rrf_k,
+                            weights=(config.bm25_weight, config.dense_weight),
+                            limit=max(top_k, config.rerank_k) if self.reranker is not None else top_k)
+                fusion.set(fused_count=len(fused))
+            # Validate every selected metadata item before reading the first body.
+            with span('materialize') as materialized:
+                fused = tuple(self.bm25._checked_candidate(context, value, filters) for value in fused)
+                self.bm25._current(context, guard)
+                passages = tuple(self.bm25._materialize(context, value, query, guard, filters) for value in fused)
+                validate_grounded_evidence(context, passages, guard)
+                materialized.set(returned_count=len(passages))
+            if self.reranker is not None:
+                with span('rerank', reranker_enabled=True) as reranked:
+                    result = tuple(self.reranker.rerank(query, passages, top_k))
+                    reranked.set(candidate_count=len(passages), returned_count=len(result))
+            else:
+                emit('rerank', 'skipped', status='skipped', reason='disabled', reranker_enabled=False)
+                result = passages
+            self.bm25._current(context, guard)
+            result = tuple(self.bm25._checked_passage(context, value, filters) for value in result)
+            by_id = {value.citation_id: value for value in passages}
+            if len(result) > top_k:
+                raise EvidenceValidationError("Reranker exceeded the requested result limit")
+            for value in result:
+                candidate = by_id.get(value.citation_id)
+                if (candidate is None or value.chunk != candidate.chunk
+                        or value.snapshot_id != candidate.snapshot_id or value.revision_id != candidate.revision_id
+                        or value.retrieval_method != "hybrid"):
+                    raise EvidenceValidationError("Reranker returned evidence outside its candidates")
+            validate_grounded_evidence(context, result, guard)
+            self.bm25._current(context, guard)
+            self.dense._current(context, guard)
+            observed.set(fused_count=len(fused), returned_count=len(result), reranker_enabled=self.reranker is not None)
+            return result

@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 import hashlib
 from itertools import chain, islice
 import json
+import time
 from types import MappingProxyType
 from threading import Lock
 
@@ -29,13 +30,16 @@ from src.contracts import ScopeBinding, SnapshotRef
 from src.db import schema
 from src.db.clock import session_time
 from src.db.runtime import Database, DatabaseRoleError
+from src.observability import emit, span
 from src.storage.contracts import CatalogEntry
 from src.storage.fingerprints import ValidatedCatalog, catalog_fingerprint
 
 _CATALOG_FIELDS = tuple(CatalogEntry.model_fields)
 # Shared immutable byte decoder, not a per-principal expanded mask cache.
 _BYTE_BOOLEAN_BITS = tuple(tuple(bool(value & (1 << bit)) for bit in range(8)) for value in range(256))
-_GRANT_POSITIONS_SQL = """
+_GRANT_PAGE_SIZE = 8192
+_SAFE_DATABASE_SQLSTATES = frozenset({"25P03", "57014", "57P01", "08003", "08006", "53300", "55P03", "40001", "40P01"})
+_GRANT_DOCUMENTS_SQL = """
 WITH effective_groups AS MATERIALIZED (
  SELECT membership.group_id
  FROM rag.group_memberships membership
@@ -57,8 +61,10 @@ WITH effective_groups AS MATERIALIZED (
  JOIN rag.document_grants grant_row ON grant_row.group_id=effective.group_id
  WHERE grant_row.group_id IS NOT NULL AND grant_row.snapshot_id=:snapshot
 )
-SELECT document.position FROM authorized_documents authorized
-JOIN rag.documents document ON document.snapshot_id=:snapshot AND document.doc_id=authorized.doc_id
+SELECT authorized.doc_id FROM authorized_documents authorized
+WHERE (CAST(:after AS text) IS NULL OR authorized.doc_id > CAST(:after AS text))
+ORDER BY authorized.doc_id
+LIMIT :page_size
 """
 
 
@@ -201,8 +207,16 @@ class PolicyResolver:
         try:
             with self.database.transaction(context) as connection:
                 yield connection
-        except (sa.exc.SQLAlchemyError, DatabaseRoleError):
-            raise PolicyUnavailable("Authoritative policy is unavailable") from None
+        except (sa.exc.SQLAlchemyError, DatabaseRoleError) as error:
+            raise self._database_unavailable(error) from None
+
+    @staticmethod
+    def _database_unavailable(error):
+        # Never preserve driver messages, connection strings, SQL or parameters.
+        failure = PolicyUnavailable("Authoritative policy is unavailable")
+        state = getattr(getattr(error, "orig", error), "sqlstate", None)
+        failure.database_sqlstate = state if type(state) is str and state in _SAFE_DATABASE_SQLSTATES else None
+        return failure
 
     def _ready(self, connection):
         row = connection.execute(sa.select(schema.dataset_snapshots).where(
@@ -260,6 +274,10 @@ class PolicyResolver:
         return revision
 
     def resolve(self, identity: ResolvedIdentity) -> RequestContext:
+        with span("policy.resolve"):
+            return self._resolve(identity)
+
+    def _resolve(self, identity: ResolvedIdentity) -> RequestContext:
         if not isinstance(identity, ResolvedIdentity):
             raise EvidenceValidationError("Policy resolution requires a trusted identity")
         identity = ResolvedIdentity.model_validate(identity.model_dump(warnings=False))
@@ -267,31 +285,15 @@ class PolicyResolver:
             epoch = self._identity(connection, identity)
             cache_key = self._cache_key(identity, epoch)
             cached_scope = self._cached_scope(cache_key)
-            if cached_scope is None:
-                bits = bytearray(len(self._operator_bitmap))
-                # Direct and group branches use their separate subject/snapshot
-                # indexes. Repeated documents set the same bit, avoiding a broad
-                # DISTINCT sort and per-grant correlated group qualification.
-                result = connection.execution_options(stream_results=True).execute(sa.text(_GRANT_POSITIONS_SQL),
-                    {"snapshot": self.snapshot.snapshot_id, "user_id": identity.user_id})
-                try:
-                    while rows := result.fetchmany(1000):
-                        for row in rows:
-                            position = row[0]
-                            if not 0 <= position < self.snapshot.document_count:
-                                raise EvidenceValidationError("Grant position differs from the canonical catalogue")
-                            bit = 1 << (position % 8)
-                            if self._operator_bitmap[position // 8] & bit:
-                                bits[position // 8] |= bit
-                finally:
-                    result.close()
-                    connection.execution_options(stream_results=False)
-                self._identity(connection, identity, epoch=epoch)
         if cached_scope is not None:
             context = RequestContext(identity, cached_scope)
             self.assert_current(context)
             return context
-        bitmap = bytes(bits)
+        # No database transaction remains open during local bitmap work. Each
+        # bounded page rechecks the same live authority epoch; registration and
+        # release below recheck it again. Duplicate grants are harmless: skipping
+        # the rest of an equal-doc_id boundary cannot omit a different document.
+        bitmap = self._resolve_bitmap(identity, epoch)
         metadata = {"user_id": identity.user_id, "session_id": identity.session_id,
             "session_version": identity.session_version, "policy_revision": epoch,
             "snapshot": self.snapshot.model_dump(mode="json"), "restriction_sha256": self._restriction_sha256}
@@ -304,16 +306,119 @@ class PolicyResolver:
             "session_version": identity.session_version, "policy_revision": epoch,
             **self.snapshot.model_dump(), "allowed_positions": bitmap, "bitmap_sha256": scope.bitmap_sha256,
             "restriction_sha256": self._restriction_sha256}
-        with self._transaction(context) as connection:
-            self._identity(connection, identity, epoch=epoch)
-            connection.execute(pg_insert(schema.policy_scopes).values(**values).on_conflict_do_nothing(index_elements=["scope_id"]))
-            stored = connection.execute(sa.select(schema.policy_scopes).where(schema.policy_scopes.c.scope_id == scope_id)).mappings().one_or_none()
-            if stored is None or any((bytes(stored[key]) if key == "allowed_positions" else stored[key]) != value for key, value in values.items()):
-                raise EvidenceValidationError("Registered scope differs from its frozen decision")
-            self._identity(connection, identity, epoch=epoch)
+        with span("policy.register"):
+            with self._transaction(context) as connection:
+                self._identity(connection, identity, epoch=epoch)
+                connection.execute(pg_insert(schema.policy_scopes).values(**values).on_conflict_do_nothing(index_elements=["scope_id"]))
+                stored = connection.execute(sa.select(schema.policy_scopes).where(schema.policy_scopes.c.scope_id == scope_id)).mappings().one_or_none()
+                if stored is None or any((bytes(stored[key]) if key == "allowed_positions" else stored[key]) != value for key, value in values.items()):
+                    raise EvidenceValidationError("Registered scope differs from its frozen decision")
+                self._identity(connection, identity, epoch=epoch)
         self.assert_current(context)
         self._remember_scope(cache_key, scope)
         return context
+
+    def _resolve_bitmap(self, identity, epoch):
+        # Keep a constant number of events even for a full-corpus scope. Timings
+        # sum active DB/page-fetch work separately from local bitmap CPU work;
+        # neither observer I/O nor bitmap processing holds a DB transaction.
+        elapsed = {"policy.grants": 0.0, "policy.bitmap": 0.0}
+        pages, rows = 0, 0
+        phase, failure = "policy.bitmap", None
+        for stage in elapsed:
+            emit(stage, "start", status="in_progress", duration_is_cumulative=True)
+        try:
+            began = time.monotonic()
+            try:
+                bits = bytearray(len(self._operator_bitmap))
+            finally:
+                elapsed[phase] += (time.monotonic() - began) * 1000
+            pending = iter(self._grant_pages(identity, epoch))
+            while True:
+                phase, began = "policy.grants", time.monotonic()
+                try:
+                    documents = next(pending)
+                except StopIteration:
+                    break
+                finally:
+                    elapsed[phase] += (time.monotonic() - began) * 1000
+                pages += 1
+                rows += len(documents)
+                phase, began = "policy.bitmap", time.monotonic()
+                try:
+                    self._apply_grant_page(bits, documents)
+                finally:
+                    elapsed[phase] += (time.monotonic() - began) * 1000
+            phase, began = "policy.bitmap", time.monotonic()
+            try:
+                return bytes(bits)
+            finally:
+                elapsed[phase] += (time.monotonic() - began) * 1000
+        except BaseException as error:
+            failure = error
+            raise
+        finally:
+            for stage, milliseconds in elapsed.items():
+                active_failure = failure is not None and phase == stage
+                emit(stage, "error" if active_failure else "end",
+                    status=("error" if active_failure else "cancelled") if failure is not None else "ok",
+                    duration_ms=max(0, milliseconds), duration_is_cumulative=True,
+                    grant_page_count=pages, grant_row_count=rows,
+                    **({"error": failure, "database_phase": getattr(failure, "database_phase", None),
+                        "database_sqlstate": getattr(failure, "database_sqlstate", None)} if active_failure else {}))
+
+    def _grant_pages(self, identity, epoch):
+        after = None
+        while True:
+            result, phase = None, "execute"
+            try:
+                with self._transaction() as connection:
+                    self._identity(connection, identity, epoch=epoch)
+                    # psycopg's ordinary cursor buffers the server result at
+                    # execute. Keep Python row conversion/GC outside this TX.
+                    result = connection.execution_options(stream_results=False).execute(sa.text(_GRANT_DOCUMENTS_SQL), {
+                        "snapshot": self.snapshot.snapshot_id, "user_id": identity.user_id,
+                        "after": after, "page_size": _GRANT_PAGE_SIZE,
+                    })
+                phase = "materialize"
+                documents = self._materialize_grant_page(result)
+                phase = "revalidate"
+                # Fresh authority after materialization is mandatory even for
+                # the final/empty page; only then may any page enter the bitmap.
+                with self._transaction() as connection:
+                    self._identity(connection, identity, epoch=epoch)
+            except PolicyUnavailable as error:
+                error.database_phase = phase
+                raise
+            finally:
+                if result is not None:
+                    # Also release a buffered cursor if commit/revalidation fails.
+                    try:
+                        result.close()
+                    except Exception:
+                        pass
+            if not documents:
+                return
+            yield documents
+            if len(documents) < _GRANT_PAGE_SIZE:
+                return
+            after = documents[-1]
+
+    def _materialize_grant_page(self, result):
+        try:
+            with result:
+                return tuple(result.scalars().all())
+        except (sa.exc.SQLAlchemyError, DatabaseRoleError) as error:
+            raise self._database_unavailable(error) from None
+
+    def _apply_grant_page(self, bits, documents):
+        for doc_id in documents:
+            position = self._catalog.positions.get(doc_id)
+            if position is None or not 0 <= position < self.snapshot.document_count:
+                raise EvidenceValidationError("Grant differs from the canonical catalogue")
+            bit = 1 << (position % 8)
+            if self._operator_bitmap[position // 8] & bit:
+                bits[position // 8] |= bit
 
     def assert_current(self, context: RequestContext) -> None:
         if not isinstance(context, RequestContext) or not isinstance(context.scope, BitmapScope):

@@ -1,26 +1,38 @@
-# Tiny real-auth deployment smoke
+<a id="tiny-real-auth-deployment-smoke"></a>
 
-`fixture.py` prepares five explicitly synthetic canonical documents, a genuine
-BM25 index and the importer's real span artifact format. Its2D dummy arrays are
-labelled import-only and cannot be used as a registered query model. CI uses
-`INSTALL_HYBRID=false` and `RAG_RETRIEVAL=bm25`; no embedding/model is downloaded.
+# Database and Docker tests
 
-The fixture creates a genuine local Git commit for two native Jira source files,
-then uses the accepted canonical and native import libraries with explicit
-`synthetic_fixture` provenance. The app has real human Argon2 passwords, opaque
-cookies, CSRF, PostgreSQL storage and unchanged RLS. Roles grant no rights.
-No image or template contains a seeded account/password or benchmark identity.
+These checks use a tiny dataset to test installation and account behavior. They
+are for contributors; you do not need to run them before following the ordinary
+[app setup guide](../../docs/WEB_APP.md).
 
-The Compose override adds only an explicit fixture loader for empty volumes in
-the generated `rag-ci-fixture-*` project. Base staging remains strict. Generated
-role secrets live in the private `compose.env` outside the mounted operator
-directory. Human secrets/cookies stay600 in the operator directory, which is
-never mounted into the application. Do not upload that directory or diagnostics.
+A **fixture** is prepared test data. This fixture has five fake documents, real
+PostgreSQL storage, real password-based logins and the same permission checks as
+the app. Model responses are scripted locally. There are no paid model calls.
 
-Run from the repository root, with the base file first. The override explicitly
-extends `stage-artifacts` from the root `compose.yaml`; its reference follows the
-[base-file path rule](https://docs.docker.com/compose/how-tos/multiple-compose-files/extends/),
-not a path relative to `tests/deployment/`:
+## What CI checks automatically
+
+**CI** means the automated GitHub checks. The complete sequence is in
+[`.github/workflows/ci.yml`](../../.github/workflows/ci.yml):
+
+1. Build the app and a separate setup container.
+2. Create a disposable database and import the five documents and fake Jira data.
+3. Confirm the app refuses to start serving before required setup is complete.
+4. Create test accounts with different document access and check login/search.
+5. Stop the database and confirm requests stop safely while the app stays alive.
+6. Restore the database, restart services, and check that accounts, grants and
+   sessions still behave correctly.
+7. Remove only the generated disposable test installation.
+
+The test project has a generated `rag-ci-fixture-*` name. It is separate from a
+normal working installation. Its cleanup removes disposable data, so never copy
+that cleanup command into a working app's shutdown routine.
+
+## Check the fixture configuration locally
+
+Use Git, the Python environment in [Contributing](../../CONTRIBUTING.md), Docker
+and Compose v2.10 or later. Git is needed because the fixture creates a small
+test repository. Run from the repository root:
 
 ```sh
 python tests/deployment/fixture.py prepare --directory .cache/deployment-smoke
@@ -29,58 +41,66 @@ docker compose --env-file .cache/deployment-smoke/compose.env \
   --profile ci-fixture --profile operator config --quiet
 ```
 
-The remaining real service sequence is in `.github/workflows/ci.yml`. A successful
-static path/format test does not replace the actual Compose configuration gate.
+The first command creates a new directory; it does not overwrite an existing
+fixture. The second checks configuration. **These commands alone do not run the
+full deployment test.** Use the CI workflow for the complete build/import/start/
+restart sequence. Keep the root Compose file first because the override uses it
+as its base.
 
-CI checks closed preflight before schema/import, complete deployment preflight,
-real login and two distinct scopes, live DB-loss readiness/query503 with
-liveness200, recovery, and app+database restarts with the same account/grants and
-cookies. These are tiny functional checks; they do not prove full-corpus memory,
-latency, backup/restore or model quality. Root performs the full-corpus gate.
-
-The commands target Compose v2.10+ and use `up --wait`, without the newer
-wait-timeout flag. CI has an outer30-minute job timeout; local_stack bounds its
-application startup wait separately. Run the actual service sequence against
-the installed Compose version when verifying deployment compatibility.
+The generated environment and operator files contain private test credentials
+and cookies. Do not commit or share that directory.
 
 ## Real-account security acceptance
 
-`tests/test_access_end_to_end.py` runs two real Argon2 accounts through one HTTP
-application backed by disposable PostgreSQL. Its explicitly synthetic Git/Jira
-fixtures cover baseline and agentic modes, mixed passage/record/count inputs,
-complete count lineage, provider-input isolation, rejected expansion/injection,
-mid-request authority changes, and database permission failure/recovery. The
-providers are local scripts; these checks make no remote model calls. Supply the
-same three `RAG_TEST_*_URL` values used by the database suite, then run:
+`test_access_end_to_end.py` checks two real local accounts against a disposable
+PostgreSQL database, with scripted model responses. It covers permitted and
+forbidden evidence, counts, document expansion, permission changes during a
+request, and database failure/recovery.
+
+Set the three disposable-database URLs used by CI. They must all point to the
+**same database**, and its name must start with **`rag_test_`**:
+
+| Setting | Role |
+| --- | --- |
+| `RAG_TEST_ADMIN_URL` | Create and inspect the disposable test database |
+| `RAG_TEST_MIGRATION_URL` | Create schema and provision test data/accounts |
+| `RAG_TEST_RUNTIME_URL` | Run the app using an unprivileged login |
+
+Then run, from the repository root:
 
 ```sh
 python -m pytest tests/test_access_end_to_end.py tests/test_security_operator.py
 ```
 
-The opt-in full-corpus checks use an already prepared local Docker application:
+Without the required settings, database-dependent tests are skipped. Use the CI
+workflow as the exact connection/role example; never point these tests at the
+working application's database.
 
-- `security_operator.py` guards the reviewed `rag-ops01-full-20261104` project,
-  dedicated migrator role, schema, 511,958-document snapshot, and verified native
-  Jira feed. `seed` records private credentials and exact owned manifests before
-  provisioning intern/executive fixture humans with one versus two explicit
-  document grants. `inspect`, `revoke-intern`, and idempotent `cleanup` operate on
-  that same ledger; cleanup disables only those humans and revokes their own
-  grants/sessions. Corpus records and unrelated policy stay intact. Mount this
-  helper read-only into the operator job and set `RAG_SEC_COMPOSE_PROJECT` to the
-  independently checked project identity.
-- `security_http.py before`, `after-revoke`, and `logout` use `--state` for the
-  private ledger and a fresh `--reports` directory for each phase. They verify
-  exact document permissions, canonical metadata/spans, forbidden text/title/ID
-  markers, owner-only run metadata, permission refresh, and old-cookie replay.
-- `frontend/tests/live-security.mjs` drives real Chrome with that same `--state`
-  and a fresh `--outdir`. Its optional `--control` handshake lets the root
-  operator stop/recover only the owned database while the browser checks live
-  fail-closed behavior. The browser script itself performs no database writes.
-  CLI usage and handshake phases are documented at the top of that file.
+## Optional checks on the full dataset
 
-State and cookies are private 0600 files; credentials never enter command-line
-arguments. Reports contain hashes/counts and sanitized outcomes. The ordinary
-browser regression suite still uses its explicitly synthetic HTTP fixture;
-passing it alone is distinct from real-Docker account isolation. Scripted model
-input checks and retrieval-only full-corpus checks do not establish model answer
-quality or a production security certification.
+The helpers below are advanced operator tools for the already-prepared
+`rag-ops01-full-20261104` installation. They are not a generic teammate setup
+shortcut. Do not change their project guards to make them run elsewhere.
+
+| Helper | Purpose |
+| --- | --- |
+| `security_operator.py` | Create test humans with small explicit grants, inspect them, revoke a grant and clean up only those test accounts |
+| `security_http.py` | Check HTTP permissions before/after revocation, run ownership and logout |
+| `frontend/tests/live-security.mjs` | Check the real browser using the same private test-account record |
+
+The private record is the helper's **ledger**: it records the accounts, grants
+and sessions the helper owns. Cleanup acts on those recorded items, not unrelated
+users or corpus data. The browser helper can coordinate an operator-controlled
+database interruption; it does not write to the database itself. CLI options and
+that advanced sequence are documented in the helper source files.
+
+## Limits of these results
+
+The five-document deployment uses BM25 keyword search. Its small dummy embedding
+arrays exist only to test the import format; they are not a real searchable
+embedding model. No full model is downloaded for this fixture.
+
+Passing these checks does not establish performance on all 511,958 documents,
+backup/restore success, answer accuracy or production security. Use
+[Current status](../../docs/STATUS.md) for the separately recorded full-corpus
+checks and remaining work.

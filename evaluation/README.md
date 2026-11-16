@@ -1,31 +1,39 @@
-# Saved evaluation artifacts
+<a id="saved-evaluation-artifacts"></a>
+# Saved evaluation files
 
-See [Evaluation and results](../docs/EVALUATION.md) for interpretation, scoring
-and reproduction commands.
+This directory contains question splits and saved experiment results. Reading these files does not call a model. For what the numbers mean and how to run a new check, use [Evaluation](../docs/EVALUATION.md). For the current release state, use [Current status](../docs/STATUS.md).
 
-| Path | Contents |
+## Where to start
+
+1. Open a result directory's `summary.json` for its measurements and settings.
+2. Open `predictions.jsonl` to inspect individual questions and ranked document IDs, where that file is present.
+3. Check its manifest/provenance before comparing it with another run. Older unrestricted retrieval results and newer user-permission-aware results use different reference counts.
+
+| File or directory | What it contains |
 | --- | --- |
-| [splits.json](splits.json) | Frozen development (300), calibration (100) and final (100) question IDs, and the golden subset. Do not tune on the final split. |
-| [corpus_manifest.json](corpus_manifest.json) | Dataset revision, counts, coverage and fingerprints. Written by `python -m src.data.corpus`. |
-| [results/bm25_full_development/](results/bm25_full_development/) | Full-corpus BM25+ predictions and scores |
-| [results/dense_full_development/](results/dense_full_development/) | Full-corpus BGE-small predictions and scores |
-| [results/dense_titled_full_development/](results/dense_titled_full_development/) | BGE-small with the document title on every passage (experiment) |
-| [results/dense_base_titled_full_development/](results/dense_base_titled_full_development/) | BGE-base with the document title on every passage |
-| `results/hybrid_bge-base_*_full_development/` | BM25+ and BGE-base hybrids: RRF weights 0.5 and 0.7, and weight 0.7 with each reranker. Weight 0.7 without a reranker is the chosen setting. |
-| `results/*_full_calibration/` | Single calibration checks: BM25+ alone, BGE-base alone, Arctic alone, and the BGE-base and Arctic hybrids (BM25 weight 0.7) |
-| [results/screening/](results/screening/) | Embedding model screening on a 20,364-document sample (development questions): BM25+, BGE-base, GTE, Arctic and Qwen3, alone and as hybrids |
-| `results/*arctic-embed-l-v2.0*` | Arctic-embed-l-v2.0 on the full corpus: alone and in hybrids with BM25+ |
-| [agent_development/20261021.json](agent_development/20261021.json) | Historical live development measurements and provenance |
-| [agent_development/critic_before_scope.txt](agent_development/critic_before_scope.txt) | Saved prompt for repeatable development comparisons |
-| [../outputs/alex_evaluation/](../outputs/alex_evaluation/) | Answer-evaluation baseline: 20 curated development questions, their BM25 evidence, GPT-OSS answers, LLM-judge scores and the human/judge comparison workbook. See [Answer evaluation](../docs/ANSWER_EVALUATION.md). |
+| [splits.json](splits.json) | Frozen question IDs: 300 development, 100 calibration and 100 final, plus a golden development subset |
+| [corpus_manifest.json](corpus_manifest.json) | Dataset revision, document counts, coverage and fingerprints |
+| [results/bm25_full_development](results/bm25_full_development/) | Historical full-corpus BM25+ search results |
+| [results/dense_full_development](results/dense_full_development/) | Historical BGE-small + FAISS search results |
+| [results/dense_titled_full_development](results/dense_titled_full_development/) | BGE-small with a title on every passage |
+| [results/dense_base_titled_full_development](results/dense_base_titled_full_development/) | BGE-base with a title on every passage |
+| `results/hybrid_bge-base_*_full_development/` | BGE-base hybrids at BM25 weights 0.5/0.7 and the tested rerankers; the chosen setting is 0.7 without a reranker |
+| `results/*arctic-embed-l-v2.0*` | Arctic alone and combined with BM25+ |
+| `results/*_full_calibration/` | Single historical calibration checks for BM25, dense models and hybrids |
+| [results/screening](results/screening/) | Embedding-model checks on a 20,364-document sample using development questions |
+| [agent_development/20261021.json](agent_development/20261021.json) | Historical BM25/Haiku agent measurements with model, prompt and source identities |
+| [agent_development/critic_before_scope.txt](agent_development/critic_before_scope.txt) | Frozen historical comparison prompt; not the current default prompt |
+| [outputs/alex_evaluation](../outputs/alex_evaluation/) | Historical 20-question BM25/GPT-OSS answers, machine grades and comparison workbook |
 
-Large corpus/index files and full answer/evidence traces stay in ignored `.cache/`.
-Old local reduced-corpus experiments are not the full-corpus results above. Review
-selection files and empty review templates do not establish completed human review.
+[Full-corpus results](../docs/FULL_CORPUS.md) explains the historical retrieval experiments. [Answer evaluation](../docs/ANSWER_EVALUATION.md) explains the older GPT-OSS workflow.
 
-Hybrid, reranker, model-screening and Arctic results are documented in [Retrieval results](../docs/FULL_CORPUS.md).
+## Avoid these comparison mistakes
 
-Use a new output directory for every run and retain failed attempts. Current
-agent safeguards and historical development results are described separately in
-[Evaluation](../docs/EVALUATION.md); a model status or empty review template is not
-independent human validation.
+- Do not tune on the final question split.
+- A retrieved reference document is not proof of a correct answer.
+- A model's `answered` status or critic decision is not a human label.
+- Blank review sheets do not mean review is complete.
+- A current source fix does not change what an older saved experiment measured.
+- New runs need new output directories. Keep failures and unknown costs visible.
+
+Large document/index/model files and private execution/review records are excluded from Git. A fresh checkout therefore does not contain every local experiment. The sanitized [status page](../docs/STATUS.md) describes the current 30-outcome baseline, three-case external-judge pilot, pending human critic review and functional browser checks without requiring private local folders.

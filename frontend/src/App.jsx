@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createAuthLifecycle } from "./auth.js";
+import Observability from "./Observability.jsx";
 import "./style.css";
 
 const stops = {
@@ -18,6 +19,24 @@ const platforms = ["slack", "gmail", "linear", "google_drive", "hubspot", "firef
 const nativeFields = { native_key: "Jira key", status: "Status", priority: "Priority", project_id: "Project" };
 const coverageLabel = (coverage) => coverage === "verified_records" ? "Verified source records"
   : coverage === "synthetic_fixture" ? "Synthetic fixture" : "Coverage unavailable";
+
+function EvidenceContext({ selections }) {
+  const nonnegative = n => typeof n === "number" && Number.isFinite(n) && n >= 0;
+  if (!Array.isArray(selections) || !selections.length) return null;
+  const selected = selections.slice(0, 10).filter(s => nonnegative(s.round_number) && nonnegative(s.selected_documents)
+    && nonnegative(s.selected_passages));
+  if (!selected.length) return null;
+  return <details className="evidence-context"><summary>Evidence context</summary>
+    <p className="fine-print">Several passages may come from one document. A configured limit is a maximum; it does not guarantee enough relevant evidence.</p>
+    <ul>{selected.map((s, i) => <li key={i}>Round {s.round_number}: {s.selected_documents} documents
+      {nonnegative(s.document_limit) ? ` (limit ${s.document_limit})` : ""}, {s.selected_passages} passages
+      {s.selected_native_items > 0 ? `, ${s.selected_native_items} native items` : ""}.
+      {s.excluded_documents > 0 ? ` ${s.excluded_documents} documents excluded from this context.` : ""}
+      {s.excluded_passages > 0 ? ` ${s.excluded_passages} passages excluded.` : ""}
+      {s.cropped_passages > 0 ? ` ${s.cropped_passages} passages shortened to fit the context budget.` : ""}
+    </li>)}</ul>
+  </details>;
+}
 
 function FilterList({ filters = [] }) {
   return filters.length ? <dl className="native-filters">{filters.map(({ field, value }) =>
@@ -106,6 +125,7 @@ function citedText(text, ids, openCitation) {
 }
 
 function App() {
+  const observabilityPage = window.location.pathname.replace(/\/$/, "") === "/observability";
   const [ready, setReady] = useState(null),
     [connection, setConnection] = useState("");
   const [question, setQuestion] = useState(""),
@@ -115,6 +135,7 @@ function App() {
     [result, setResult] = useState(null),
     [error, setError] = useState("");
   const [selected, setSelected] = useState("");
+  const [requestId, setRequestId] = useState("");
   const [auth, setAuth] = useState({ status: "checking", enabled: null, error: "" });
   const [login, setLogin] = useState(""), [password, setPassword] = useState("");
   const cards = useRef({}), authClient = useRef(null), queryController = useRef(null);
@@ -144,12 +165,12 @@ function App() {
       queryController.current?.abort();
       queryController.current = null;
       setQuestion(""); setSource(""); setResult(null); setSelected(""); setError("");
-      setLoading(false); setLogin(""); setPassword(""); cards.current = {};
+      setLoading(false); setLogin(""); setPassword(""); setRequestId(""); cards.current = {};
     } });
     authClient.current = client;
     client.start();
-    refresh();
-    const timer = setInterval(refresh, 5000);
+    if (!observabilityPage) refresh();
+    const timer = observabilityPage ? null : setInterval(refresh, 5000);
     return () => { clearInterval(timer); client.dispose(); queryController.current?.abort(); };
   }, []);
   useEffect(() => {
@@ -161,7 +182,7 @@ function App() {
       questionInput.current?.focus();
   }, [auth.status, auth.error, ready?.status, connection]);
   useEffect(() => {
-    if (["authenticated", "benchmark"].includes(auth.status)) refresh();
+    if (!observabilityPage && ["authenticated", "benchmark"].includes(auth.status)) refresh();
   }, [auth.status]);
 
   async function submit(event) {
@@ -176,6 +197,7 @@ function App() {
     queryController.current = controller;
     setLoading(true);
     setError("");
+    setRequestId("");
     setResult(null);
     setSelected("");
     try {
@@ -193,6 +215,8 @@ function App() {
       let body = {};
       try { body = await response.json(); } catch { /* generic failure below */ }
       if (!current()) return;
+      const responseId = response.headers.get("X-Request-ID") || "";
+      setRequestId(/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(responseId) ? responseId : "");
       if (response.status === 401) { client.start(); return; }
       if (response.status === 403 && body.detail?.code === "csrf_failed") { client.revalidate(); return; }
       if (body.answer && body.trace && Array.isArray(body.sources)) {
@@ -255,13 +279,17 @@ function App() {
           <span className="brand-mark">R</span> Redwood{" "}
           <span className="brand-sub">/ Knowledge search</span>
         </a>
-        <span className={`connection ${isReady ? "online" : ""}`}>
+        <nav className="page-nav" aria-label="Main navigation">
+          <a href="/" aria-current={!observabilityPage ? "page" : undefined}>Search</a>
+          <a href="/observability" aria-current={observabilityPage ? "page" : undefined}>Observability</a>
+        </nav>
+        <span className={`connection ${(observabilityPage ? auth.status === "authenticated" : isReady) ? "online" : ""}`}>
           <i />
-          {isReady ? "Ready" : "Not ready"}
+          {observabilityPage ? (auth.status === "authenticated" ? "Signed in" : "Sign in required") : isReady ? "Ready" : "Not ready"}
         </span>
       </header>
       <main>
-        <section className="intro">
+        {!observabilityPage && <section className="intro">
           <div>
             <p className="eyebrow">Enterprise knowledge assistant</p>
             <h1>
@@ -297,7 +325,7 @@ function App() {
               </small>
             )}
           </div>
-        </section>
+        </section>}
         {auth.status === "benchmark" && <div className="scope">
           <strong>Benchmark demo identity</strong>
           <span>No real sign-in. {typeof ready?.allowed_documents === "number"
@@ -331,7 +359,7 @@ function App() {
         {auth.error && <div className="notice" role="alert" tabIndex={-1} ref={authError}>{auth.error}{" "}
           {auth.status === "unavailable" && <button type="button" className="text-button"
             onClick={() => authClient.current.start()}>Retry sign-in status</button>}</div>}
-        {(connection || ready?.status === "not_ready") && (
+        {!observabilityPage && (connection || ready?.status === "not_ready") && (
           <div className="notice" role="status">
             {connection || ready.message}{" "}
             <button type="button" className="text-button" onClick={refresh}>
@@ -339,6 +367,7 @@ function App() {
             </button>
           </div>
         )}
+        {observabilityPage ? <Observability auth={auth} authClient={authClient.current} /> : <>
         <form className="question-card" onSubmit={submit}>
           <label htmlFor="question">What would you like to know?</label>
           <textarea
@@ -441,6 +470,7 @@ function App() {
             {error}
           </div>
         )}
+        {(error || result) && requestId && <p className="request-reference">Request ID: <code>{requestId}</code></p>}
         {result && canAccess && (
           <div className="results">
             <div className="answer-column">
@@ -508,6 +538,7 @@ function App() {
                     <strong>{result.trace.usage.api_calls}</strong>
                   </div>
                 </div>
+                <EvidenceContext selections={result.trace.context_selection} />
                 {ready?.mode === "live" && (
                   <p className="fine-print">
                     Cost is an estimate for this request. Server reservations
@@ -643,6 +674,7 @@ function App() {
             </p>
           </section>
         )}
+        </>}
       </main>
       <footer>
         Redwood Inference{" "}

@@ -76,8 +76,23 @@ class DatabaseSettings(BaseModel):
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None):
-        url = database_url(environ=environ)
-        return cls(dsn=url.render_as_string(hide_password=False))
+        values = os.environ if environ is None else environ
+        overrides = {}
+        name = "RAG_DB_IDLE_TRANSACTION_TIMEOUT_MS"
+        if name in values:
+            raw = values[name]
+            message = name + " must be a decimal integer from 1 through 60000."
+            if type(raw) is not str or not raw.isascii() or not raw.isdecimal():
+                raise DatabaseConfigurationError(message)
+            try:
+                parsed = int(raw)
+            except ValueError:
+                raise DatabaseConfigurationError(message) from None
+            if not 1 <= parsed <= 60000:
+                raise DatabaseConfigurationError(message)
+            overrides['idle_transaction_timeout_ms'] = parsed
+        url = database_url(environ=values)
+        return cls(dsn=url.render_as_string(hide_password=False), **overrides)
 
 
 _ROLE_CHECK = """

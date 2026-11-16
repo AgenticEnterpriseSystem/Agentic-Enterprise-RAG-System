@@ -758,3 +758,30 @@ footer {
     animation: none !important;
   }
 }
+
+.page-nav { display: flex; gap: 18px; margin-left: auto; margin-right: 28px; }
+.page-nav a { color: #617267; text-decoration: none; padding: 9px 0; border-bottom: 2px solid transparent; }
+.page-nav a[aria-current="page"] { color: #254e40; border-bottom-color: #254e40; font-weight: 650; }
+.request-reference { font-size: .8125rem; color: #64715e; overflow-wrap: anywhere; }
+.observability-intro { max-width: 54rem; color: #64715e; }
+.observability-toolbar, .observability-pagination { display: flex; gap: 16px; align-items: center; margin: 22px 0; }
+.observability-toolbar span { color: #6c786f; font-size: .875rem; }
+.observability-toolbar button, .observability-pagination button { border: 1px solid #cdd7ca; border-radius: 6px; background: white; padding: 8px 14px; color: #254e40; }
+.observability-table-wrap { overflow-x: auto; border: 1px solid #dde2db; border-radius: 8px; background: white; }
+.observability-table { border-collapse: collapse; width: 100%; font-size: .8125rem; }
+.observability-table caption { text-align: left; padding: 16px; font-size: 1rem; font-weight: 650; }
+.observability-table th, .observability-table td { text-align: left; vertical-align: top; padding: 12px 14px; border-top: 1px solid #e4e8df; }
+.observability-table th { background: #edf1ea; white-space: nowrap; }
+.request-link { overflow-wrap: anywhere; text-align: left; font-family: ui-monospace, monospace; font-size: .75rem; }
+.observation-detail { background: white; border: 1px solid #dde2db; padding: 24px; border-radius: 10px; margin-top: 24px; }
+.observation-detail h2 { margin-top: 0; }
+.observation-counts { display: grid; grid-template-columns: minmax(130px, max-content) minmax(0, 1fr); gap: 4px 16px; font-size: .875rem; }
+.observation-counts dt { color: #64715e; }.observation-counts dd { margin: 0; overflow-wrap: anywhere; }
+.observation-stages { padding-left: 22px; }.observation-stages > li { border-top: 1px solid #e4e8df; padding: 16px 0; }
+.observation-stages > li > div { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.evidence-context { border-top: 1px solid #e4e8df; padding-top: 12px; font-size: .875rem; }
+@media (max-width: 760px) {
+  header { height: auto; min-height: 76px; flex-wrap: wrap; gap: 6px 14px; padding-top: 10px; padding-bottom: 10px; }
+  .page-nav { margin-right: 0; gap: 12px; font-size: .8125rem; }.connection { font-size: .75rem; }
+  .observability-toolbar { align-items: flex-start; flex-direction: column; }.observation-detail { padding: 16px; }
+}

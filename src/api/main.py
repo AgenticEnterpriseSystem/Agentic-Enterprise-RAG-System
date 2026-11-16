@@ -5,6 +5,7 @@ import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
+from contextvars import copy_context
 import threading
 import time
 
@@ -18,6 +19,8 @@ from src.api.runtime import (AuthenticatedRuntime, WebSettings, RuntimeConfigura
 from src.access.contracts import (AccessDenied, AccessError, EvidenceValidationError,
                                  PolicyUnavailable, SessionExpired, SnapshotMismatch, StaleContext)
 from src.contracts import QueryRequest, QueryResponse
+from src.observability import Recorder, current_observation, emit, span
+from src.api.diagnostics import QueryObservationMiddleware, create_diagnostics_router
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +39,9 @@ def create_app(settings=None, runtime_factory=None, *, auth_settings=None, auth_
             raise RuntimeConfigurationError('Local mode conflicts with disabled authentication.')
         auth_enabled = auth_enabled or flag in {'true', '1'}
     auth_worker, owned_auth_database = None, None
+    # Two rounds with four hybrid text searches each need more than 128 stage
+    # events; retain a fixed bound without losing the final generation stages.
+    recorder = Recorder(max_events_per_request=256)
     if auth_service is not None and not auth_enabled:
         raise RuntimeConfigurationError('Injected authentication requires enabled local authentication settings.')
     if auth_enabled:
@@ -66,7 +72,23 @@ def create_app(settings=None, runtime_factory=None, *, auth_settings=None, auth_
         def submit_work(operation):
             # Retain the real future: cancelling an HTTP waiter cannot release
             # admission or close the shared pool while its thread still runs.
-            work = state.executor.submit(operation)
+            observation = current_observation()
+            def observed_operation():
+                if observation is not None:
+                    observation.worker_start()
+                try:
+                    result = operation()
+                except BaseException as error:
+                    if observation is not None:
+                        observation.worker_finish(status='denied' if isinstance(error, (AccessDenied, SessionExpired))
+                            else 'error', error=error)
+                    raise
+                if observation is not None:
+                    failed = isinstance(result, QueryResponse) and result.answer.status == 'error'
+                    observation.worker_finish(status='error' if failed else 'ok',
+                        usage=result.trace.usage if isinstance(result, QueryResponse) else None)
+                return result
+            work = state.executor.submit(copy_context().run, observed_operation)
             state.active_work = work
 
             def finished(done):
@@ -127,6 +149,7 @@ def create_app(settings=None, runtime_factory=None, *, auth_settings=None, auth_
             state.executor.shutdown(wait=False, cancel_futures=True)
             if auth_worker is not None:
                 await auth_worker.aclose()
+            recorder.close()
             if owned_auth_database is not None:
                 def close_when_idle():
                     # Auth has a separate executor, but uses the same pool.
@@ -145,10 +168,15 @@ def create_app(settings=None, runtime_factory=None, *, auth_settings=None, auth_
                     state.database_cleanup.start()
 
     app = FastAPI(title='Redwood Knowledge Search', version='0.1.0', lifespan=lifespan)
+    app.state.observability = recorder
     origins = auth_settings.allowed_origins if auth_enabled else settings.allowed_origins
     app.add_middleware(CORSMiddleware, allow_origins=list(origins),
                        allow_methods=['GET', 'POST'], allow_credentials=auth_enabled,
-                       allow_headers=['Content-Type', 'X-CSRF-Token'] if auth_enabled else ['Content-Type'])
+                       allow_headers=['Content-Type', 'X-CSRF-Token'] if auth_enabled else ['Content-Type'],
+                       expose_headers=['X-Request-ID'])
+    app.add_middleware(QueryObservationMiddleware, recorder=recorder)
+    app.include_router(create_diagnostics_router(settings, recorder, auth_service=auth_service,
+        auth_worker=auth_worker, auth_settings=auth_settings))
 
     @app.get('/api/auth/profile')
     async def authentication_profile():
@@ -159,6 +187,8 @@ def create_app(settings=None, runtime_factory=None, *, auth_settings=None, auth_
 
         @app.exception_handler(AuthError)
         async def authentication_error(_request, error):
+            emit('auth.authenticate', 'error', status='denied' if error.status in (401, 403)
+                else 'error', error=error, error_code=error.code)
             return JSONResponse(status_code=error.status,
                 content={'detail': {'code': error.code, 'message': error.message}},
                 headers={'Cache-Control': 'no-store'})
@@ -202,6 +232,8 @@ def create_app(settings=None, runtime_factory=None, *, auth_settings=None, auth_
     @app.post('/api/query', response_model=QueryResponse)
     async def query(body: QueryRequest, request: Request):
         def failure(status, code, message, headers=None):
+            emit('http', 'error', status='denied' if status in (401, 403) else
+                'timeout' if status == 504 else 'error', error_code=code)
             values = dict(headers or {})
             if auth_enabled:
                 values['Cache-Control'] = 'no-store'
@@ -214,7 +246,8 @@ def create_app(settings=None, runtime_factory=None, *, auth_settings=None, auth_
             token = request.cookies.get('rag_session')
             if not token:
                 raise failure(401, 'authentication_required', 'Authentication is required.')
-            session = await auth_worker.call(auth_service.authenticate, token, touch=False)
+            with span('auth.authenticate'):
+                session = await auth_worker.call(auth_service.authenticate, token, touch=False)
             validate_auth_origin(request, auth_settings, required=True)
             supplied_csrf = request.headers.get('X-CSRF-Token', '')
             if (not origin or origin not in origins or not hmac.compare_digest(
@@ -231,7 +264,8 @@ def create_app(settings=None, runtime_factory=None, *, auth_settings=None, auth_
             if auth_enabled:
                 # Only an admitted real query counts as activity. Resolution
                 # and all synchronous policy/retrieval work stay off ASGI.
-                admitted = auth_service.authenticate(token, touch=True)
+                with span('auth.authenticate'):
+                    admitted = auth_service.authenticate(token, touch=True)
                 return runtime.query(body, admitted.identity)
             return runtime.query(body)
         try:
@@ -240,7 +274,10 @@ def create_app(settings=None, runtime_factory=None, *, auth_settings=None, auth_
             app.state.busy = False
             raise failure(503, 'not_ready', 'Document search is unavailable.') from None
         try:
-            response = await asyncio.wait_for(asyncio.shield(future), timeout=settings.max_seconds)
+            # Permission resolution and run admission happen before the agent's
+            # own clock starts. Give that work a separate configured deadline.
+            response = await asyncio.wait_for(asyncio.shield(future),
+                timeout=settings.effective_request_timeout_seconds)
         except asyncio.TimeoutError:
             raise failure(504, 'timeout', 'Query timed out. Its worker may still be finishing; further queries remain blocked until it exits.') from None
         except RuntimeErrorResponse as exc:
@@ -323,6 +360,7 @@ def create_app(settings=None, runtime_factory=None, *, auth_settings=None, auth_
         app.mount('/assets', StaticFiles(directory=settings.frontend_dist / 'assets'), name='assets')
 
     @app.get('/', include_in_schema=False)
+    @app.get('/observability', include_in_schema=False)
     async def index():
         file = settings.frontend_dist / 'index.html'
         if not file.is_file():

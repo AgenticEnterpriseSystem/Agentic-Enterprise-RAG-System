@@ -162,6 +162,37 @@ class Usage(Contract):
     estimated_cost_usd: Nonnegative | None = None  # None means unknown, not free.
 
 
+class ContextSelectionStats(Contract):
+    """Counts for one final context selection; no document identities or text.
+
+    Excluded passages contribute no selected text; cropping counts selected
+    subranges, so these counts are not a partition when one passage is split.
+    Aggregates are atomic native items, not their underlying document count.
+    """
+    round_number: Annotated[int, Field(strict=True, ge=1)]
+    document_limit: Annotated[int, Field(strict=True, ge=1, le=20)] | None = None
+    pool_documents: Annotated[int, Field(strict=True, ge=0)]
+    pool_passages: Annotated[int, Field(strict=True, ge=0)]
+    selected_documents: Annotated[int, Field(strict=True, ge=0)]
+    selected_passages: Annotated[int, Field(strict=True, ge=0)]
+    selected_native_items: Annotated[int, Field(strict=True, ge=0)]
+    selected_chars: Annotated[int, Field(strict=True, ge=0)]
+    char_budget: Annotated[int, Field(strict=True, ge=1)]
+    excluded_documents: Annotated[int, Field(strict=True, ge=0)]
+    excluded_passages: Annotated[int, Field(strict=True, ge=0)]
+    cropped_passages: Annotated[int, Field(strict=True, ge=0)]
+    exclusion_reasons: dict[Literal["document_limit", "char_budget", "cropped", "retained_document_limit", "retained_char_budget"],
+        Annotated[int, Field(strict=True, ge=0)]] = Field(default_factory=dict)
+    evidence_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+
+    @model_validator(mode="after")
+    def bounded_selection(self):
+        if (self.document_limit is not None and self.selected_documents > self.document_limit
+                or self.selected_chars > self.char_budget or self.selected_documents > self.pool_documents):
+            raise ValueError("Context selection exceeds its actual pool or limits")
+        return self
+
+
 class TraceStep(Contract):
     round_number: int = Field(ge=1)
     query: Identifier
@@ -178,6 +209,7 @@ class Trace(Contract):
     steps: tuple[TraceStep, ...] = ()
     total_latency_ms: Nonnegative = 0
     usage: Usage = Field(default_factory=Usage)
+    context_selection: tuple[ContextSelectionStats, ...] = Field(default=(), exclude_if=lambda value: not value)
     stop_reason: Literal[
         "sufficient", "round_limit", "no_new_evidence", "budget", "error", "single_pass", "clarification"
     ]
@@ -384,6 +416,7 @@ class GenerationRequest(Contract):
     question: Identifier
     user: UserContext
     evidence: tuple[GroundedEvidence | Evidence, ...] = ()
+    frozen_evidence_sha256: Sha256 | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def authorized(self):

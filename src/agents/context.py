@@ -3,8 +3,8 @@ import math
 import re
 from collections import Counter
 
-from src.contracts import AggregateEvidence, Evidence, StructuredRecord, validate_evidence
-from src.generation.generator import evidence_chars, select_context
+from src.contracts import AggregateEvidence, ContextSelectionStats, Evidence, StructuredRecord, validate_evidence
+from src.generation.generator import evidence_chars, evidence_fingerprint, select_context
 from src.retrieval.passages import bounded_passage, slice_passage
 
 _STOP = frozenset('a an and are as at be by do does for from how i in is it of on or our should that the this to was we what when where which who why with'.split())
@@ -16,6 +16,102 @@ def terms(text):
 
 class ContextBudgetError(ValueError):
     """Previously supported evidence cannot fit without silently dropping facts."""
+
+    def __init__(self, message, *, reason="retained_char_budget"):
+        super().__init__(message)
+        self.reason = reason
+
+
+def evidence_document(item):
+    if isinstance(item, Evidence):
+        return item.chunk.doc_id
+    if isinstance(item, StructuredRecord):
+        return item.doc_id
+    return None  # An aggregate remains atomic; its relation cardinality is not a cap input.
+
+
+def document_ids(items):
+    return tuple(dict.fromkeys(doc for item in items if (doc := evidence_document(item)) is not None))
+
+
+def _contributes(parent, selected):
+    if not isinstance(parent, Evidence):
+        return parent == selected
+    if not isinstance(selected, Evidence):
+        return False
+    a, b = parent.chunk, selected.chunk
+    left, right = max(a.start_char, b.start_char), min(a.end_char, b.end_char)
+    return (a.doc_id == b.doc_id and a.source_type == b.source_type and a.title == b.title
+        and a.timestamp == b.timestamp and a.metadata_origin == b.metadata_origin
+        and getattr(parent, 'snapshot_id', None) == getattr(selected, 'snapshot_id', None)
+        and getattr(parent, 'revision_id', None) == getattr(selected, 'revision_id', None)
+        and left < right and a.text[left-a.start_char:right-a.start_char] == b.text[left-b.start_char:right-b.start_char])
+
+
+def selection_stats(request, selected, limit, document_limit, round_number, *, capped_docs=(), failure_reason=None):
+    passages = tuple(item for item in request.evidence if isinstance(item, Evidence))
+    used = tuple(item for item in selected if isinstance(item, Evidence))
+    omitted = tuple(item for item in request.evidence if not any(_contributes(item, value) for value in selected))
+    cropped = sum(not any(item == parent for parent in passages) for item in used)
+    reasons = {}
+    if failure_reason:
+        reasons[failure_reason] = 1
+    else:
+        by_cap = sum(evidence_document(item) in capped_docs for item in omitted)
+        if by_cap: reasons['document_limit'] = by_cap
+        if len(omitted) > by_cap: reasons['char_budget'] = len(omitted) - by_cap
+        if cropped: reasons['cropped'] = cropped
+    return ContextSelectionStats(round_number=round_number, document_limit=document_limit,
+        pool_documents=len(document_ids(request.evidence)), pool_passages=len(passages),
+        selected_documents=len(document_ids(selected)), selected_passages=len(used),
+        selected_native_items=sum(isinstance(item, (AggregateEvidence, StructuredRecord)) for item in selected),
+        selected_chars=sum(evidence_chars(item) for item in selected), char_budget=limit,
+        excluded_documents=len(set(document_ids(request.evidence)) - set(document_ids(selected))),
+        excluded_passages=sum(not any(_contributes(item, value) for value in selected) for item in passages),
+        cropped_passages=cropped, exclusion_reasons=reasons, evidence_sha256=evidence_fingerprint(selected))
+
+
+def select_shared_context(request, limit, initial_ids, retained=(), *, document_limit, round_number=1):
+    """Apply a global document ceiling after existing relevance/diversity ranking.
+
+    This is a ceiling, never a quota: documents not selected by the current
+    character-budgeted ranking are not padded into context. Exact supported
+    passages/native items take precedence and are never silently discarded.
+    """
+    if type(document_limit) is not int or not 1 <= document_limit <= 20:
+        raise ValueError('Document limit must be an integer from1 through20')
+    retained_docs = document_ids(retained)
+    if len(retained_docs) > document_limit:
+        raise ContextBudgetError('Supported documents exceed the configured document limit', reason='retained_document_limit')
+    ranked = tuple(select_agent_context(request, limit, initial_ids, retained))
+    ranked_docs = tuple(dict.fromkeys((*retained_docs, *document_ids(ranked))))
+    chosen_docs = list(retained_docs)
+    original_docs = frozenset(evidence_document(item) for item in request.evidence if item.citation_id in initial_ids)
+    original = tuple(doc for doc in ranked_docs if doc in original_docs)
+    followup = tuple(doc for doc in ranked_docs if doc not in original_docs)
+    if len(ranked_docs) > document_limit and original and followup:
+        # The ranked output lists the initial group first. Applying a simple
+        # prefix cap there would erase useful follow-up evidence even though
+        # the character selector explicitly reserves room for both groups.
+        for group, quota in ((original, document_limit // 2), (followup, document_limit - document_limit // 2)):
+            available = max(0, quota - sum(doc in group for doc in chosen_docs))
+            for doc in group:
+                if available == 0 or len(chosen_docs) == document_limit: break
+                if doc not in chosen_docs: chosen_docs.append(doc); available -= 1
+    for doc in ranked_docs:
+        if len(chosen_docs) == document_limit: break
+        if doc not in chosen_docs: chosen_docs.append(doc)
+    allowed = frozenset(chosen_docs)
+    capped = frozenset(ranked_docs) - allowed
+    if capped:
+        pool = tuple(item for item in request.evidence if evidence_document(item) is None or evidence_document(item) in allowed)
+        reduced = request.model_copy(update={'evidence': pool})
+        selected = tuple(select_agent_context(reduced, limit, initial_ids, retained))
+    else:
+        selected = ranked
+    if len(document_ids(selected)) > document_limit or any(item not in selected for item in retained):
+        raise ContextBudgetError('Supported context cannot satisfy the configured document limit', reason='retained_document_limit')
+    return selected, selection_stats(request, selected, limit, document_limit, round_number, capped_docs=capped)
 
 
 def select_agent_context(request, limit, initial_ids, retained=()):

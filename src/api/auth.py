@@ -2,6 +2,7 @@
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 import json
 import threading
 
@@ -41,7 +42,7 @@ class AuthWorker:
                 raise AuthError("busy", 429, "Authentication is busy. Try again shortly.", retry_after=2)
             self._pending += 1
             try:
-                future = self._executor.submit(function, *args, **kwargs)
+                future = self._executor.submit(copy_context().run, function, *args, **kwargs)
             except BaseException:
                 self._pending -= 1
                 raise

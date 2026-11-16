@@ -1,524 +1,409 @@
-# Baseline retrieval results
+<a id="baseline-retrieval-results"></a>
 
-BM25+ and BGE-small searched all **511,958 documents**. Each returned its top 20
-for **300 development questions**; 18 lack reference-document labels, leaving
-**282 scored questions**. These are retrieval scores, not answer-quality scores.
+# Full dataset, indexes and retrieval results
+
+Use this page to understand which data files the app needs, how search uses them,
+and what the earlier retrieval experiments measured. To install the app, follow
+[the setup guide](WEB_APP.md). For the latest application checks and unfinished
+work, read [Current status](STATUS.md).
+
+The **corpus** is the collection of documents being searched. An **index** is a
+saved structure used to search that collection. Neither is included in a normal
+Git clone. Accounts, passwords and document permissions are also separate from Git.
+
+## 1. Get the files before installing
+
+The app needs three inputs:
+
+| Input | Suggested host location | Purpose |
+| --- | --- | --- |
+| Document file and prebuilt indexes | `.cache/hybrid-artifacts/` | Canonical text, keyword index and dense vectors |
+| Cached embedding model | `.cache/models/` | Converts new questions into vectors locally |
+| Pinned upstream source checkout | `.cache/local-source/` | Supplies original native Jira records |
+
+An **embedding** is a numeric representation of text used for semantic similarity.
+The document vectors in the index do not include the model weights needed to
+encode a new question. Copy both the index and the complete model cache.
+
+Get the team's `files_web_app` bundle and follow the exact directory layout in
+[Get the three input directories](WEB_APP.md#get-the-artifacts). The current web
+profile uses `BAAI/bge-base-en-v1.5`; an Arctic index from an experiment is not a
+replacement for the configured BGE-base index. Do not combine shards from
+separate model builds.
+
+Use a machine with 16 GiB of memory and about 8 GiB available to Docker. Docker
+copies the verified inputs into managed volumes, so budget disk space for the
+originals, copies, images, database and backups. The setup guide explains the
+build and copy headroom checks. A Git clone or successful download alone does
+not establish that the app is installed.
+
+## 2. Know which dataset is being used
+
+The synthetic EnterpriseRAG-Bench dataset contains **511,958 canonical documents
+from nine platforms**. “Canonical” means the one selected version of each document
+that the database and citation offsets use.
+
+| Item | Recorded value |
+| --- | --- |
+| Upstream revision | `d36685e273713975ee20299bbf1ab64165575b3c` |
+| Count and content fingerprint | [`evaluation/corpus_manifest.json`](../evaluation/corpus_manifest.json) |
+| Development / calibration / final split | 300 / 100 / 100 questions |
+| Scored historical retrieval questions | 282 development; 94 calibration |
+
+The upstream checkout contains 511,962 files. Four document IDs each appear in
+two files; import keeps the file selected by upstream's `uuid_index.json`.
+Eighteen development questions and six calibration questions lack reference-document
+labels, so those historical retrieval tables use the smaller scored
+counts above. Reference answers and reference documents are evaluation labels;
+they are not supplied to the answering agent.
+
+The dataset does not supply an authoritative company-wide access hierarchy for
+this app. An operator must explicitly review and grant the documents a user can
+access. For a teammate's full fictional-benchmark QA account, use the optional
+[reviewed QA recipe](WEB_APP.md#full-benchmark-qa-access). That is a testing policy,
+not an inferred real-company permission system.
+
+## 3. Understand the current search path
+
+The running app combines two searches:
+
+1. **BM25+** scores keyword matches across a whole document.
+2. **Dense search** compares a question vector with stored passage vectors.
+3. **Reciprocal rank fusion (RRF)** combines their ranked lists. The current
+   weights are 0.7 for BM25+ and 0.3 for dense search, with RRF constant 60.
+4. The app reads exact permitted text for the winning documents. Live mode may
+   then critique the evidence, read more or search again, and generate an answer.
+
+Each branch requests up to 50 candidate documents. A **candidate** is a possible
+match before the final evidence is selected. The managed factory has no reranker
+enabled. A reranker would read candidate text and assign a new ordering.
+
+Documents the user cannot access are excluded before BM25 selects candidates
+and before dense similarity scoring. BM25 still computes shared-index scores
+before applying its permission mask. Text reads also pass application checks and PostgreSQL
+row-level security: database checks that reject unauthorized rows. Access and
+snapshot freshness are checked again around model work and final output. A
+cached catalogue contains metadata, not document bodies or permission authority.
+
+The default shared evidence ceiling is eight unique documents, configurable as
+5, 8 or 10. Several passages from one document count once. The character and
+16,000-token question budgets may allow fewer documents; eight is not a quota.
+The critic and generator use the same frozen selected evidence. The native tool's
+`top_k=5`, each retriever's 50 candidates and this evidence ceiling are different
+limits. See [application settings](WEB_APP.md#model-request-and-database-limits).
+
+The current app has real login, hybrid retrieval and an adaptive workflow.
+Historical retrieval tables below do not measure the current agent's answer
+accuracy, its permission-specific recall or a controlled comparison of five
+versus eight documents. Those limits and the actual live checks are in
+[Current status](STATUS.md).
+
+<a id="findings"></a>
+
+## 4. Read the historical retrieval scores correctly
+
+**Recall@10** measures how many reference documents appear in the first ten
+results. **nDCG@10** also rewards placing relevant documents nearer the top.
+These are document-retrieval metrics, not answer accuracy or citation correctness.
+Scores below come from the recorded full-corpus experiments on 282 scored
+development questions, unless a table says otherwise.
 
 | Method | Recall@5 | Recall@10 | Recall@20 | nDCG@10 |
 | --- | ---: | ---: | ---: | ---: |
-| BM25+ | 0.625 | 0.692 | 0.747 | **0.604** |
-| BGE-small + FAISS | 0.382 | 0.468 | 0.525 | 0.367 |
+| BM25+ | 0.625 | 0.692 | 0.747 | 0.604 |
+| BGE-small | 0.382 | 0.468 | 0.525 | 0.367 |
 | BGE-small, title on every passage | 0.398 | 0.481 | 0.555 | 0.385 |
 | BGE-base, title on every passage | 0.448 | 0.487 | 0.562 | 0.416 |
 | Arctic-embed-l-v2.0, title on every passage | 0.493 | 0.554 | 0.627 | 0.468 |
-| **Hybrid: BM25+ and BGE-base (RRF, BM25 weight 0.7)** | **0.641** | 0.722 | 0.760 | 0.604 |
-| Hybrid: BM25+ and Arctic (RRF, BM25 weight 0.7) | 0.638 | **0.723** | **0.768** | **0.628** |
+| Hybrid BM25+ / BGE-base, BM25 weight 0.7 | 0.641 | 0.722 | 0.760 | 0.604 |
+| Hybrid BM25+ / Arctic, BM25 weight 0.7 | 0.638 | 0.723 | 0.768 | 0.628 |
 
-Recall measures the share of reference documents found; nDCG also rewards higher
-ranks. **The BM25+ and BGE-base hybrid is the team's chosen setting**, confirmed on the
-calibration split (see [Hybrid search and reranking](#hybrid-search-and-reranking)). The
-Arctic hybrid scored marginally higher, but the difference is too small to justify
-switching for now (see [Full-corpus Arctic](#full-corpus-arctic-embed-l-v20)). Historical query times were about 20 ms for BM25 on CPU and 130 ms for BGE
-on GPU. Builds took roughly five minutes and two hours respectively. Hardware
-and run settings differ, so these are not controlled latency comparisons.
+BGE-base remains the configured dense model. The Arctic hybrid's Recall@10 gain
+over it was too small to establish a useful improvement in those tests.
 
-## Findings
+BM25+ beat the original BGE-small on Recall@10 for 88 questions, lost on 14 and
+tied on 180. The mean difference was 0.22, with a 95% bootstrap confidence
+interval of 0.17 to 0.28. BGE-small found reference documents for 10 of the 72
+questions BM25+ missed completely in its top ten; both missed 62.
 
-- BM25 had higher average scores in every scored category. It won on Recall@10
-  for 88 questions; BGE won on 14; 180 tied. The documented mean gap was 0.22
-  (95% confidence interval 0.17–0.28).
-- BGE retrieved reference documents for 10 of the 72 questions where BM25 found
-  none in its top 10. Both methods failed on 62 questions.
-- A historical saved-ranking merge scored 0.686 with equal weights and 0.705
-  with BM25 weights of 0.6–0.8 (11 questions better, four worse than BM25).
-  Those weights were chosen on development; improvement needs held-out validation.
-  This is not a measurement of the current hybrid pipeline and its defaults.
-- Reworded questions remain difficult: Recall@10 was 0.413 for BM25 and 0.160
-  for BGE. Internal IDs/codenames and closely scored similar documents are possible
-  explanations, not established causes. Earlier analysis reproduced BGE scores
-  on ten missed questions; reference documents ranked below returned documents.
-
-Live hybrid/reranker and LLM answer quality remain unmeasured. **C3 is paused**;
-the final 100 questions remain untouched until settings are frozen.
+Reworded questions remained difficult: BM25+ Recall@10 was 0.413, original
+BGE-small was 0.160 and the selected BGE-base hybrid was 0.400. Internal codes,
+similar documents and source selection are possible explanations, not established
+causes. These results do not show that reformulation has solved the problem.
 
 <details>
-<summary>Detailed category scores</summary>
+<summary>Historical question-type scores: BM25+ versus original BGE-small</summary>
 
-| Question type | Questions | BM25+ Recall@10 | BGE Recall@10 | BM25+ nDCG@10 | BGE nDCG@10 |
+| Type | Questions | BM25+ R@10 | BGE R@10 | BM25+ nDCG@10 | BGE nDCG@10 |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| **Overall** | 282 | **0.692** | 0.468 | **0.604** | 0.367 |
-| Basic | 105 | **0.771** | 0.505 | **0.674** | 0.375 |
-| Semantic (reworded) | 75 | **0.413** | 0.160 | **0.281** | 0.084 |
-| Intra-document reasoning | 24 | **1.000** | 0.750 | **0.911** | 0.641 |
-| Project related | 24 | **0.676** | 0.543 | **0.634** | 0.475 |
-| Constrained | 18 | **0.917** | 0.861 | **0.820** | 0.705 |
-| Completeness | 12 | **0.497** | 0.334 | **0.516** | 0.369 |
-| Conflicting info | 12 | **0.792** | 0.625 | **0.810** | 0.512 |
-| Miscellaneous | 12 | **0.917** | 0.750 | **0.886** | 0.641 |
+| Basic | 105 | 0.771 | 0.505 | 0.674 | 0.375 |
+| Semantic/reworded | 75 | 0.413 | 0.160 | 0.281 | 0.084 |
+| Intra-document reasoning | 24 | 1.000 | 0.750 | 0.911 | 0.641 |
+| Project related | 24 | 0.676 | 0.543 | 0.634 | 0.475 |
+| Constrained | 18 | 0.917 | 0.861 | 0.820 | 0.705 |
+| Completeness | 12 | 0.497 | 0.334 | 0.516 | 0.369 |
+| Conflicting information | 12 | 0.792 | 0.625 | 0.810 | 0.512 |
+| Miscellaneous | 12 | 0.917 | 0.750 | 0.886 | 0.641 |
 
-Recall at other cutoffs:
-
-| | Recall@5 | Recall@10 | Recall@20 |
-| --- | ---: | ---: | ---: |
-| BM25+ | **0.625** | **0.692** | **0.747** |
-| BGE-small | 0.382 | 0.468 | 0.525 |
-
-Categories with 12–24 questions are small, so treat their scores as rough.
+The categories with 12–24 questions are small; treat their estimates cautiously.
 
 </details>
 
-## Saved results
+<a id="saved-results"></a>
 
-[BM25 results](../evaluation/results/bm25_full_development/),
-[BGE results](../evaluation/results/dense_full_development/),
-[titled BGE results](../evaluation/results/dense_titled_full_development/), and
-[BGE-base results](../evaluation/results/dense_base_titled_full_development/) each contain:
-`summary.json` (scores and slices), `predictions.jsonl` (top 20 IDs/scores), and
-`upstream_answers.jsonl` (top ten in benchmark format). These files do not contain
-the corpus or indexes. Reproduction commands are in
-[Evaluation](EVALUATION.md#run-checks-and-experiments); dataset provenance is in the
-[Data Card](DATA_CARD.md).
+## Where the saved research outputs live
 
-## Reproducibility details
+Historical result folders under [`evaluation/results/`](../evaluation/results/)
+include `bm25_full_development`, `dense_full_development`,
+`dense_titled_full_development` and `dense_base_titled_full_development`.
+Each completed run has `summary.json` for metrics, `predictions.jsonl` for top-20
+IDs/scores and `upstream_answers.jsonl` for top-ten benchmark-format results.
+Those small files are not the document corpus, model cache or indexes.
 
-- **Dataset version:** upstream commit `d36685e273713975ee20299bbf1ab64165575b3c`.
-  Counts and a content fingerprint are in `evaluation/corpus_manifest.json`.
-- **Duplicate IDs:** the upstream repository has 511,962 files, but four document
-  IDs are each used by two different files. We keep the file that upstream's own
-  index (`uuid_index.json`) points to.
-- **BM25+ settings:** k1=1.5, b=0.75, delta=1, lowercase word tokens. Our index
-  builder is tested to produce the same scores as the `bm25s` library's own
-  indexer.
-- **BGE settings:** model `BAAI/bge-small-en-v1.5` at revision
-  `5c38ec7c405ec4b44b94cc5a9bb96e735b38267a`; 500-token passages with 50-token
-  overlap; half precision (fp16) on the GPU; BGE's standard query prefix; exact
-  cosine search.
-- **Runs:** BM25+ ran on 4 CPUs. BGE ran on a Colab T4 from commit `e924855`. The
-  BGE index's corpus file hash differs from the local one because the file was
-  rebuilt on Colab; the document content fingerprint is identical.
+See [Evaluation](EVALUATION.md) for current scoped commands and metric denominators,
+[the Data Card](DATA_CARD.md) for provenance and [the documentation map](README.md)
+for terminology. The final 100-question split remains reserved for settings that
+have been frozen; earlier development tuning is not a final-test result.
 
-## Experiment: title on every passage
+<a id="reproducibility-details"></a>
 
-**Result: a small, not statistically clear improvement.** In the original BGE run,
-only a document's first passage contains its title, so later passages of a long
-email, ticket, or CRM record lose the customer or feature name.
-`python -m src.retrieval.corpus_dense --title-every-passage` prefixes the title
-(capped at 48 tokens) to every passage; spans still point into the original text.
-It was run with `TITLE_EVERY_PASSAGE = True` in
-[`notebooks/dense_baseline_colab.ipynb`](../notebooks/dense_baseline_colab.ipynb)
-on a Colab High-RAM T4, from commit `2ab9ec8` (26 shards, all 511,958 documents).
+## Technical reference: original index settings
 
-| | Recall@5 | Recall@10 | Recall@20 | nDCG@10 | Reference doc ranked first |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| BGE-small, original | 0.382 | 0.468 | 0.525 | 0.367 | 86 questions |
-| BGE-small, title on every passage | 0.398 | 0.481 | 0.555 | 0.385 | 93 questions |
-| BM25+ (for reference) | **0.625** | **0.692** | **0.747** | **0.604** | **155 questions** |
+| Component | Recorded configuration |
+| --- | --- |
+| BM25+ | k1=1.5, b=0.75, delta=1, lowercase word tokens; builder checked against `bm25s` |
+| BGE-small | `BAAI/bge-small-en-v1.5`, revision `5c38ec7c405ec4b44b94cc5a9bb96e735b38267a` |
+| BGE-base | `BAAI/bge-base-en-v1.5`, revision `a5beb1e3e68b9ab74eb54cfd186867f64f240e1a`, 768 dimensions |
+| Passage construction | 500 tokens with 50-token overlap; later builds prefix the title on every passage, capped at 48 tokens |
+| Dense scoring | Exact cosine similarity; each document receives its best passage score |
+| Original GPU precision | fp16 for BGE; bf16 for the full Arctic build |
 
-- Per question (Recall@10): 17 improved, 13 got worse, 252 unchanged. Mean change
-  +0.013, 95% bootstrap confidence interval −0.019 to +0.045, so the gain may be noise.
-- Recall@10 by type: conflicting info 0.625 → 0.708, constrained 0.861 → 0.917,
-  intra-document 0.750 → 0.792, basic 0.505 → 0.533; semantic 0.160 → 0.133 and
-  project related 0.543 → 0.532 dropped slightly. Most categories have 12–24
-  questions, so these are rough.
-- Merged with BM25+ (saved rankings, RRF k=60), Recall@10 was 0.690 with equal
-  weights and 0.701 with BM25 weight 0.7, the same as with the original BGE run.
-- Query time was unchanged (median 127 ms on GPU).
+BM25+ originally ran on four CPUs. BGE-small ran on a Colab T4 from `e924855`;
+the titled build used `2ab9ec8`, and BGE-base used `d11eb1b`. Colab rebuilt the
+corpus file, so its file hash differed while its document-content fingerprint
+matched. Historical GPU query times were about 130 ms for BGE-small and 250 ms
+for BGE-base; BM25+ was about 20 ms on CPU. Hardware and run settings differed.
+These are not controlled speed comparisons or current CPU web-app latencies.
 
-An earlier pilot (40 development questions, each ranking only about 40 candidate
-documents) had predicted a jump from 0.367 to 0.507. Titles help BGE choose among
-a few similar candidates, but on the full corpus the reference document often never
-reaches BGE's top 20 at all. Small-pool pilots are useful for screening ideas but
-overstate full-corpus gains. The passage format is not BGE-small's main weakness;
-the model itself is.
+<a id="experiment-title-on-every-passage"></a>
+<a id="experiment-bge-base"></a>
 
-Results: [`evaluation/results/dense_titled_full_development/`](../evaluation/results/dense_titled_full_development/).
+## Earlier experiments: passage titles and BGE-base
 
-## Experiment: BGE-base
+Putting the title on every BGE-small passage raised Recall@10 by 0.013. Its 95%
+paired bootstrap interval was −0.019 to +0.045: 17 questions improved, 13 worsened
+and 252 stayed the same. This was not a statistically clear overall improvement.
+A small 40-question pilot with roughly 40 candidates per question had suggested
+0.367 → 0.507, overstating the benefit seen across the whole corpus.
 
-**Result: better ranking near the top, about the same coverage; still well behind
-BM25+.** `python -m src.retrieval.corpus_dense --model bge-base --title-every-passage`
-builds the same index with `BAAI/bge-base-en-v1.5` (768-d vectors) at revision
-`a5beb1e3e68b9ab74eb54cfd186867f64f240e1a`; searching loads the model and revision
-recorded in the index `manifest.json`. It ran with `MODEL = "bge-base"` in
-[`notebooks/dense_baseline_colab.ipynb`](../notebooks/dense_baseline_colab.ipynb) on a
-Colab T4 with High-RAM, from commit `d11eb1b` (26 shards, all 511,958 documents). Query
-time was about 250 ms on GPU, twice BGE-small's.
+BGE-base improved Recall@5 over titled BGE-small by 0.050 (interval +0.017 to
++0.085; 28 better, 11 worse). Recall@10 changed by only +0.005 (−0.031 to +0.041;
+22 better, 16 worse). It found a reference for seven of BM25+'s 72 complete
+misses, compared with nine for titled BGE-small.
 
-| | Recall@5 | Recall@10 | Recall@20 | nDCG@10 | Reference doc ranked first |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| BGE-small, title on every passage | 0.398 | 0.481 | 0.555 | 0.385 | 93 questions |
-| BGE-base, title on every passage | 0.448 | 0.487 | 0.562 | 0.416 | 103 questions |
-| BM25+ (for reference) | **0.625** | **0.692** | **0.747** | **0.604** | **155 questions** |
+Merging the saved BGE-base and BM25+ top-20 lists gave Recall@10 of 0.695 with
+equal weights and 0.712 with BM25 weight 0.7. The latter gain over BM25+ was
++0.020 (+0.006 to +0.036; 12 better, two worse). Together the lists contained
+77.7% of reference documents somewhere in their top twenties. This saved-list
+merge is a different protocol from retrieving 50 candidates per branch below.
+Earlier BGE-small merges scored 0.686 with equal weights and about 0.705 for
+BM25 weights 0.6–0.8; the titled-small 0.7 merge was 0.701.
 
-- Compared with titled BGE-small, Recall@5 rose by 0.050 (95% bootstrap confidence
-  interval +0.017 to +0.085; 28 questions better, 11 worse). Recall@10 rose by only
-  0.005 (−0.031 to +0.041; 22 better, 16 worse), which may be noise.
-- Recall@10 by type: project related 0.532 → 0.603, conflicting info 0.708 → 0.792,
-  miscellaneous 0.750 → 0.833, completeness 0.334 → 0.399; semantic 0.133 → 0.093 and
-  constrained 0.917 → 0.861 dropped. Most categories have 12–24 questions, so these are rough.
-- Of the 72 questions where BM25+ finds no reference document in its top 10, BGE-base
-  finds one for 7 (titled BGE-small: 9). The larger model ranks documents better but does
-  not reach many documents BM25+ misses.
-
-**Merged with BM25+** (saved top-20 rankings, RRF k=60), Recall@10 was 0.695 with equal
-weights and **0.712 with BM25 weight 0.7**: +0.020 over BM25+ alone (95% confidence
-interval +0.006 to +0.036; 12 questions better, two worse). This is the first merge whose
-gain over BM25+ is clearly above zero, but it is small, and the 0.7 weight was chosen on
-development questions, so it must be confirmed on the calibration split. Together, the
-two top-20 lists contain 77.7% of the reference documents (Recall@10 measures 69–71%),
-so a re-ranker over these candidates has more room than further BGE sizes.
-
-Results: [`evaluation/results/dense_base_titled_full_development/`](../evaluation/results/dense_base_titled_full_development/).
-
-## Hybrid search and reranking
-
-**Result: BM25+ combined with BGE-base beats BM25+ alone, confirmed on held-out
-questions; the cross-encoder rerankers made results worse.**
-
-The historical `python -m src.evaluation.run_hybrid` run used `HybridRetriever` over the
-BM25+ and BGE-base (titled) indexes. Each question is searched once per method (top 50
-documents out of all 511,958), and every variant reuses those results. It ran with
-[`notebooks/hybrid_colab.ipynb`](../notebooks/hybrid_colab.ipynb) on a Colab T4 with
-High-RAM, from commit `4856894`, with no errors. Both searches together took about
-0.9 seconds per question. Current entry points require an authenticated principal
-and ready PostgreSQL snapshot and use the accepted bounded store-backed factory.
-See [scoped evaluation commands](EVALUATION.md#match-the-web-retriever) for their
-input/output and metric-denominator rules. This loader change does not replace
-or relabel the historical measurements below.
-
-**Development** (282 scored questions); changes are in Recall@10:
-
-| Run | Recall@5 | Recall@10 | Recall@20 | nDCG@10 | Change in Recall@10 |
-| --- | ---: | ---: | ---: | ---: | --- |
-| BM25+ alone | 0.625 | 0.692 | 0.747 | 0.604 | — |
-| Hybrid, equal weights | 0.627 | 0.700 | 0.744 | 0.579 | +0.008 vs BM25+ (−0.024 to +0.041; 21 better, 19 worse) |
-| **Hybrid, BM25 weight 0.7** | **0.641** | **0.722** | **0.760** | **0.604** | **+0.029 vs BM25+ (+0.005 to +0.055; 19 better, 7 worse)** |
-| Hybrid 0.7 + `bge-reranker-base` | 0.551 | 0.637 | 0.716 | 0.520 | −0.084 vs hybrid (−0.129 to −0.041; 14 better, 46 worse) |
-| Hybrid 0.7 + `bge-reranker-v2-m3` | 0.602 | 0.669 | 0.715 | 0.560 | −0.053 vs hybrid (−0.093 to −0.012; 15 better, 37 worse) |
-
-Ranges are 95% bootstrap confidence intervals over questions. The rerankers rescored the
-50 fused candidates in fp16 with a 512-token limit, at revisions
-`2cfc18c9415c912f9d8155881c133215df768a70` (base, +0.37 s per question) and
-`953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e` (v2-m3, +1.3 s per question). With 50
-candidates per method, the live hybrid scored slightly higher than the earlier estimate
-from saved top-20 lists (0.712).
-
-**Calibration** (one check of the chosen setting; 94 of 100 questions scored):
-
-| Run | Recall@5 | Recall@10 | Recall@20 | nDCG@10 |
-| --- | ---: | ---: | ---: | ---: |
-| BM25+ alone | 0.653 | 0.712 | 0.792 | 0.592 |
-| BGE-base alone | 0.425 | 0.487 | 0.584 | 0.389 |
-| **Hybrid, BM25 weight 0.7** | **0.658** | **0.767** | **0.821** | **0.625** |
-
-- The hybrid raised calibration Recall@10 by 0.056 (95% confidence interval +0.013 to
-  +0.106; 7 questions better, two worse), confirming the development result on questions
-  not used to choose it. Recall@5 barely changed (+0.004), so the gain comes from
-  reference documents entering ranks 6–10.
-- On development, gains came from basic (0.771 → 0.819), conflicting info (0.792 →
-  0.917), completeness (0.497 → 0.567), constrained (0.917 → 0.972) and project-related
-  (0.676 → 0.716) questions; semantic questions did not improve (0.413 → 0.400).
-- The fusion weight was chosen on development; calibration is now used once for this
-  setting and should not be used to tune it further. The final split is untouched.
-
-**Why the rerankers hurt.** They often moved reference documents from the top five to
-below rank 20. Of the 45 reference documents that the base reranker dropped from the
-hybrid's top five out of its top ten, 43 are longer than 3,000 characters (one meeting
-transcript has 28,600). The reranker sees only one section of each document: the best
-3,000-character window, or the 500-token BGE passage when both methods found the
-document, then cut to 512 tokens. BGE passages omit the title, and in about a third of
-these cases the BM25 window did too. BM25 scores whole documents, so a section that
-lacks the answer or the customer or project name can turn a strong match into a weak
-one. Possible fixes to test on development: score several sections per document and
-keep the best, always prefix the title, allow longer inputs (v2-m3 accepts more than
-512 tokens), or blend the reranker score with the fusion score.
-
-Results: `evaluation/results/hybrid_bge-base_*_full_development/`, and on calibration
-`bm25_full_calibration/`, `dense_bge-base_full_calibration/` and
-`hybrid_bge-base_w0.7_full_calibration/`.
-
-## Embedding model screening on a sample
-
-**Result: Arctic-embed-l-v2.0 and Qwen3-Embedding-0.6B are much stronger than BGE-base on
-their own and find three times as many of BM25+'s misses; their hybrids with BM25+ improve
-more modestly.** Arctic is the first candidate for a full-corpus run.
-
-Embedding the full corpus takes hours per model, so candidates were compared on a fixed
-sample of 20,364 documents built by `python -m src.data.sample`: all 431 reference
-documents of the development questions, the 9,933 other documents that BM25+ or BGE-base
-ranked in their top 20 for those questions on the full corpus, and 10,000 seeded random
-documents (document list SHA-256 `6e6eeccc…`). No calibration or final question was used.
-`python -m src.evaluation.screen_models` scored each model on the 282 scored development
-questions, alone and merged with BM25+ (RRF, BM25 weight 0.7, top 50 per method). It ran with
-[`notebooks/model_screening_colab.ipynb`](../notebooks/model_screening_colab.ipynb) on a
-Colab T4 (fp16, 500-token passages with the title on every passage, as for BGE-base), from
-commit `5bf0525`, with no errors. An earlier partial run (commit `aa7a4ac`, without Qwen3)
-gave identical scores for the models in both.
-
-| Model (parameters) | Alone R@5 | Alone R@10 | Alone R@20 | BM25+ misses found | Hybrid R@10 | Hybrid nDCG@10 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| BM25+ alone | 0.635 | 0.680 | 0.774 | — | — | 0.595 |
-| BGE-base (110M) | 0.448 | 0.487 | 0.562 | 8 of 74 | 0.715 | 0.605 |
-| `gte-modernbert-base` (149M) | 0.535 | 0.633 | 0.705 | 18 of 74 | 0.724 | **0.635** |
-| `arctic-embed-l-v2.0` (568M) | **0.571** | **0.670** | **0.752** | 24 of 74 | 0.739 | 0.632 |
-| `qwen3-embedding-0.6b` (596M) | 0.533 | 0.643 | 0.711 | **25 of 74** | **0.743** | 0.627 |
-
-"BM25+ misses found": of the 74 questions where BM25+ has no reference document in its top
-10, how many the model alone finds. Ranges below are 95% bootstrap confidence intervals over
-questions, paired on the same questions.
-
-- **Alone, every candidate beats BGE-base clearly** on Recall@10: Arctic +0.183 (+0.134 to
-  +0.233; 65 questions better, 13 worse), Qwen3 +0.156 (+0.100 to +0.213; 63 better, 21
-  worse), GTE +0.146 (+0.098 to +0.194; 59 better, 15 worse). Arctic alone nearly matches
-  BM25+ (0.670 vs 0.680). BGE-base scores 0.487 on the sample, the same as on the full
-  corpus.
-- **Semantic (reworded) questions** improved most: Recall@10 0.093 for BGE-base, 0.307 for
-  GTE and Arctic, 0.347 for Qwen3 (BM25+: 0.387). Completeness questions stayed weak for all
-  dense models (0.33–0.40), and Qwen3 dropped on project-related questions (0.470 vs 0.603
-  for BGE-base).
-- **Hybrids:** against BM25+ alone, Qwen3 adds +0.063 (+0.026 to +0.102) and Arctic +0.059
-  (+0.024 to +0.096); BGE-base adds +0.036 (−0.003 to +0.074). Against the BGE-base hybrid
-  the gains are smaller and not yet clear: Qwen3 +0.028 (−0.008 to +0.064), Arctic +0.023
-  (−0.010 to +0.058), GTE +0.009. BM25+ already finds most of what the stronger models add.
-- Arctic and Qwen3 find different BM25+ misses (35 between them), so a three-way hybrid may
-  add more.
-
-**Caveat:** the sample keeps BM25+'s and BGE-base's own top competitors from the full corpus
-but not the new models', so the new models' standalone gains are probably overstated. Only a
-full-corpus run settles them.
-
-**Next (done):** Arctic was chosen for a full-corpus run (strongest alone, fewest questions
-worse than BGE-base, no drop on project questions); see the next section. Qwen3 was the
-second candidate.
-
-Results: `evaluation/results/screening/` (one folder per run, each with the sample manifest
-in `summary.json`).
-
-## Full-corpus Arctic-embed-l-v2.0
-
-**Result: Arctic is clearly better than BGE-base on its own, but the hybrid with BM25+ is
-only marginally better. BGE-base stays the team's dense model for now.**
-
-`arctic-embed-l-v2.0` (revision `ac6544c8a46e00af67e330e85a9028c66b8cfd9a`, `query: `
-prefix) embedded all 511,958 documents with the same passages as BGE-base (500-token
-windows, title on every passage), in bf16 on a Colab L4 (103 shards of 5,000 documents),
-from commit `38489e0`. The hybrid ran with
-[`notebooks/hybrid_colab.ipynb`](../notebooks/hybrid_colab.ipynb) from commit `62002a6`,
-without a reranker. There were no errors. Both searches together took about 1.2 seconds per
-question (BGE-base hybrid: about 0.9).
-
-**Arctic alone (development, 282 questions):** Recall@5 0.493, Recall@10 0.554, Recall@20
-0.627, nDCG@10 0.468. Against BGE-base alone, Recall@10 rose by 0.067 (95% confidence
-interval +0.026 to +0.108; 35 questions better, 20 worse). It finds a reference document
-for 11 of the 72 questions BM25+ misses (BGE-base: 7). Semantic questions rose from 0.093
-to 0.160. On calibration (94 questions) Arctic alone scored 0.580 vs 0.487 for BGE-base
-(+0.093, interval +0.008 to +0.181).
-
-**The sample overstated the gain.** On the screening sample Arctic alone scored 0.670 and
-found 24 BM25+ misses; on the full corpus, 0.554 and 11. BGE-base scored 0.487 in both,
-because the sample contained its own top competitors but not Arctic's. Treat sample gains
-as an upper bound: the model ranking held, but only about a third of the gain survived.
-
-**Hybrids with BM25+ (RRF, top 50 per method):**
-
-| Split | Run | Recall@5 | Recall@10 | Recall@20 | nDCG@10 |
-| --- | --- | ---: | ---: | ---: | ---: |
-| Development | BM25+ and BGE-base, weight 0.7 | 0.641 | 0.722 | 0.760 | 0.604 |
-| Development | BM25+ and Arctic, equal weights | 0.642 | 0.703 | 0.761 | 0.612 |
-| Development | BM25+ and Arctic, weight 0.7 | 0.638 | 0.723 | 0.768 | 0.628 |
-| Calibration | BM25+ alone | 0.653 | 0.712 | 0.792 | 0.592 |
-| Calibration | BM25+ and BGE-base, weight 0.7 | 0.658 | 0.767 | 0.821 | 0.625 |
-| Calibration | BM25+ and Arctic, weight 0.7 | 0.690 | 0.788 | 0.822 | 0.655 |
-
-- Development, Arctic hybrid vs BGE-base hybrid: Recall@10 +0.001 (−0.021 to +0.023; 9
-  better, 10 worse), a tie; nDCG@10 +0.023 (+0.002 to +0.046), slightly better ranking.
-- Calibration, Arctic hybrid vs BGE-base hybrid: Recall@10 +0.020 (−0.018 to +0.060) and
-  nDCG@10 +0.030 (−0.014 to +0.076), the same direction but not established on 94 questions.
-  Against BM25+ alone, the Arctic hybrid added +0.076 (+0.030 to +0.130).
-- This was the calibration split's second and last single check (the first was the BGE-base
-  hybrid). It should not be used to tune these settings further; the final split is untouched.
-- Offline estimates from the saved top-20 lists matched: BM25+ and BGE-base 0.712, BM25+ and
-  Arctic 0.710, all three together 0.713. Including Arctic raises the share of reference
-  documents found somewhere in the combined top-20 lists from 0.775 to 0.805, so it adds
-  candidates for a later step that reads them (an LLM selector, the agent, or a fixed reranker).
-
-**Decision:** BGE-base remains the dense model; Arctic is kept as a ready alternative. Better
-embeddings have stopped moving the merged top-10 recall; the next gains are expected from
-steps that read the candidates.
-
-Results: `evaluation/results/dense_arctic-embed-l-v2.0_titled_full_development/`,
-`hybrid_arctic-embed-l-v2.0_*_full_development/`, `hybrid_arctic-embed-l-v2.0_w0.7_full_calibration/`
-and `dense_arctic-embed-l-v2.0_full_calibration/`.
-
-## Measure the existing loader
-
-`scripts/profile_retrieval.py` observes the current loader without changing its
-ranking, corpus, model revision or precision. Run one attempt at a time, using
-explicit artifact paths and a new output directory:
+The existing build commands are:
 
 ```sh
-python scripts/profile_retrieval.py --mode hybrid \
-  --corpus /data/documents.parquet \
-  --bm25-index /data/indexes/bm25 \
-  --dense-index /data/indexes/dense-bge-base \
-  --output .cache/resource-profile/hybrid-attempt
+python -m src.retrieval.corpus_dense --title-every-passage --help
+python -m src.retrieval.corpus_dense --model bge-base --title-every-passage --help
 ```
 
-Modes `inventory`, `corpus`, `model` and `bm25` isolate verification, Arrow loading,
-query-encoder loading/encoding, and lexical retrieval. Mode `dense` measures the
-existing model/FAISS component without corpus text; any completed queries are
-rank-only timings, not evidence materialization or hybrid serving. Inventory checks every
-declared shard and hashes the complete artifact files; it does not load vector
-payloads into a search index. Hybrid uses the real factory, shared corpus,
-manifest-selected model and every dense shard. Searches call the retriever
-directly using three existing question-only development workloads, broad/narrow/
-denied benchmark scopes, repeated queries, source filters and bounded expansion.
-No generator, critic, judge or login is invoked.
+These show required paths/options. Building embeds the full dataset and needs a
+separate resource plan; it is not necessary for installing the prebuilt bundle.
+The [dense notebook](../notebooks/dense_baseline_colab.ipynb) records the GPU path.
 
-Outputs preserve source fingerprints, settings, phase events, raw memory samples,
-worker logs and a summary, including failed attempts. Existing output directories
-are rejected. A watchdog bounds RSS, cgroup usage, VM headroom and wall time;
-use an independently enforced container memory/swap ceiling for full-corpus
-experiments. These limits terminate this attempt's worker only. Offline model
-flags are set before imports; the pinned model must already be cached at the
-source checkout's `.cache/models`. Record the exact container image, source SHA,
-mounts, limits and any excluded dependencies with the experiment. Disable an
-inherited HTTP healthcheck when the container runs this non-HTTP profiler.
+<a id="hybrid-search-and-reranking"></a>
 
-First-query timings are process-first measurements. Hash verification reads
-corpus files, and existing filesystem caches are not cleared, so these runs do
-not establish cold-disk latency. Raw cgroup totals include file cache; the Docker
-CLI's memory display subtracts some cache. Keep process RSS, sampled cgroup
-maxima and available kernel high-water counters separate. Missing counters remain
-unknown, and exit 137 alone does not establish OOM.
-[Docker memory reporting](https://docs.docker.com/reference/cli/docker/container/stats/),
-[container limits](https://docs.docker.com/engine/containers/resource_constraints/),
-[cgroup counters](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html).
+## Earlier experiments: fusion and reranking
 
-Machine-specific measurements and acceptance decisions belong in ignored
-`docs/local/`, with raw attempts under ignored `.cache/`. A resource profile is
-not an answer-quality score or full-stack Docker acceptance.
+The historical hybrid run at `4856894` searched all documents once per branch,
+kept 50 candidates from each, and reused them for each variant. It used a Colab
+T4 and [the hybrid notebook](../notebooks/hybrid_colab.ipynb). The weights were
+chosen on development questions.
 
+| Development run | Recall@5 | Recall@10 | Recall@20 | nDCG@10 |
+| --- | ---: | ---: | ---: | ---: |
+| Equal-weight hybrid | 0.627 | 0.700 | 0.744 | 0.579 |
+| BM25 weight 0.7 | 0.641 | 0.722 | 0.760 | 0.604 |
+| Weight 0.7 + `bge-reranker-base` | 0.551 | 0.637 | 0.716 | 0.520 |
+| Weight 0.7 + `bge-reranker-v2-m3` | 0.602 | 0.669 | 0.715 | 0.560 |
 
-## Bounded dense candidate search
+The selected hybrid improved Recall@10 over BM25+ by +0.029 (+0.005 to +0.055;
+19 questions better, seven worse). Equal weights changed it by +0.008 (−0.024 to
++0.041; 21 better, 19 worse). The base reranker reduced it by 0.084 (interval
+−0.129 to −0.041; 14 better, 46 worse); v2-m3 reduced it by 0.053 (−0.093 to
+−0.012; 15 better, 37 worse).
 
-`src/retrieval/sharded_dense.py` adds a model-free exact scanner for existing
-version-1 dense artifacts. `ShardedDense.load(directory, snapshot=..., catalog=...,
-block_rows=8192)` binds a trusted snapshot and ordered metadata-only catalog to
-`doc_ids.json` and every declared `.npy`/`.parquet` pair. It never loads canonical
-bodies or builds an accumulating FAISS index. The existing `CorpusDense` remains
-the reference implementation; application/factory wiring is a later integration
-step, so adding this component alone does not change the running web app.
+The rerankers read 50 fused candidates in fp16 with a 512-token limit. Revisions
+were `2cfc18c9415c912f9d8155881c133215df768a70` for base and
+`953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e` for v2-m3. Only one bounded window
+per document was supplied. Of 45 references the base reranker moved from the
+hybrid's top five to below its top ten, 43 exceeded 3,000 characters. Missing
+sections or titles may explain some failures; the experiment does not prove a
+single cause. Multi-window scoring, longer inputs and blending are ideas to test,
+not current enabled behavior.
 
-`candidates_vector(vector, top_k, scope=..., filters=...)` returns frozen
-`RankedCandidate` spans after snapshot-aligned permission and source/date filters.
-Unknown dates fail date bounds. `rank_vector(vector, top_k, mask=None)` is a
-trusted offline parity interface returning document IDs/scores; its optional
-mask is not an HTTP permission resolver. Query encoding belongs to the adapter.
-An empty permitted selection does not scan vectors.
+The first held-out calibration check used 94 scored questions:
 
-Stored fp16/fp32 rows are copied into bounded float32 blocks and L2-normalized
-with the same primitive as the reference loader. Query vectors are used as
-supplied, matching the reference vector API. Every document retains its best
-passage across all blocks/shards before document top-k. Exact equal scores use
-document-ID ordering and then earliest `(start_char, end_char)` passage; floating
-point differences between BLAS and FAISS are assessed with a numerical tolerance,
-not collapsed into artificial tie groups.
+| Calibration run | Recall@5 | Recall@10 | Recall@20 | nDCG@10 |
+| --- | ---: | ---: | ---: | ---: |
+| BM25+ | 0.653 | 0.712 | 0.792 | 0.592 |
+| BGE-base | 0.425 | 0.487 | 0.584 | 0.389 |
+| Selected hybrid | 0.658 | 0.767 | 0.821 | 0.625 |
 
-Memory includes document metadata, per-document best scores/spans, the vector
-block, Arrow batches, mappings and filesystem cache. For 8,192×768 float32 values,
-the vector payload is 24MiB; this is a calculation, not process/cgroup peak.
-The original manifest has no cryptographic per-shard digests or catalog revision
-identity. Structural/order/span checks and an externally verified snapshot do
-not prove that vectors were computed from the claimed text. Full-corpus parity,
-combined app/database memory and the accepted120s startup/30s first/10s warm
-search targets still require measured acceptance in the later integration gates.
-Historical retrieval/answer quality results above are unchanged.
+The hybrid gained +0.056 Recall@10 over BM25+ (+0.013 to +0.106; seven better,
+two worse). Gains mostly appeared at ranks 6–10; semantic questions did not
+improve on development. This supports that historical retrieval setting, not
+current adaptive answer-quality superiority. Do not keep tuning on calibration.
 
+<a id="embedding-model-screening-on-a-sample"></a>
 
-## Full-corpus PostgreSQL import validation
+## Earlier experiments: screening stronger embedding models
 
-A local LinuxARM64 Docker import on2026-11-03 stored and verified all511,958
-canonical documents and1,746,899 indexed passage spans from26 dense shards.
-All37 null-containing bodies were preserved byte-for-byte. Ordered catalog
-fingerprint: `5b27411a79bb1f04e6b67c5f86039864ac45aaf8ad312598f24f1c7bd8b6fa03`.
+A 20,364-document screening set kept all 431 development reference documents,
+9,933 other BM25+/BGE top-20 documents and 10,000 seeded random documents. Its
+list digest starts `6e6eeccc`. No calibration or final questions were used.
+`src.evaluation.screen_models` ran from `5bf0525` on a Colab T4 with the same
+500-token titled passages. The [screening notebook](../notebooks/model_screening_colab.ipynb)
+and `evaluation/results/screening/` retain the procedure and sample manifests.
 
-The operator job used a768MiB memory/swap ceiling and2 CPUs; PostgreSQL used384MiB
-and1 CPU with32MiB shared buffers. Initial migration, file verification, import
-and full canonical/span verification took1,334.76seconds. Linux process high-water
-RSS was352,040KiB; true cgroup peak was unavailable. The job exited0 with
-DockerOOMKilled=false. Its8MiB canonical-payload batch target observed8,388,490
-bytes maximum; largest document42,339bytes. These are import measurements, not
-combined retrieval/model serving measurements or startup-latency acceptance.
+| Model | Alone R@5 | Alone R@10 | Alone R@20 | BM25+ misses found | Hybrid R@10 | Hybrid nDCG@10 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| BM25+ | 0.635 | 0.680 | 0.774 | — | — | 0.595 |
+| BGE-base, 110M parameters | 0.448 | 0.487 | 0.562 | 8 / 74 | 0.715 | 0.605 |
+| GTE-modernbert-base, 149M | 0.535 | 0.633 | 0.705 | 18 / 74 | 0.724 | 0.635 |
+| Arctic-embed-l-v2.0, 568M | 0.571 | 0.670 | 0.752 | 24 / 74 | 0.739 | 0.632 |
+| Qwen3-Embedding-0.6B, 596M | 0.533 | 0.643 | 0.711 | 25 / 74 | 0.743 | 0.627 |
 
-A persistent-volume restart retained every count and the complete checkpoint.
-The built minimal image also verified the entire catalog through the nonowner
-runtime pool; protected body count remained0 and a synthetic permitted-context
-read was rejected by RLS. No production allow policy or real login was inferred
-from that check. The database occupied3,527,521,971bytes after import, excluding
-separate WAL/volume overhead. Cache was warmed by source verification, and other
-unit checks ran during the import. No cold-disk performance claim is made.
+Compared with BGE-base alone, Recall@10 gains were Arctic +0.183 (+0.134 to
++0.233), Qwen3 +0.156 (+0.100 to +0.213) and GTE +0.146 (+0.098 to +0.194).
+The gains over the BGE-base *hybrid* were smaller: Qwen3 +0.028 (−0.008 to
++0.064), Arctic +0.023 (−0.010 to +0.058) and GTE +0.009. The first two intervals
+include zero.
 
-Local evidence is ignored under `.cache/platform-validation/doc-01-20261103/`;
-reproduction/import commands are in [setup](WEB_APP.md#canonical-document-import).
-The web runtime still needs the later authentication/policy/integration gates.
+The sample included the original models' strongest competing documents, but
+not the new models' competitors. It therefore favored the new models. Use it
+for screening, not as a full-corpus quality estimate.
 
-## Store-backed retrieval adapters
+<a id="full-corpus-arctic-embed-l-v20"></a>
 
-`src/retrieval/store.py` provides `StoreBM25Retriever`, `StoreDenseRetriever` and
-`StoreHybridRetriever` over the frozen `DocumentStore` contract. Each operation
-accepts an explicit server `RequestContext` and `FreshnessGuard`; browser role
-labels and legacy allowed-ID sets are not converted into authority. Source/date
-filters and snapshot-aligned scope masks apply before ranking. Current context
-is checked around encoding, scoring, each body read and final output.
+## Earlier experiments: Arctic on the whole corpus
 
-BM25 retains its mmap score/ranking behavior and adds a metadata-only candidate
-helper. Hybrid fusion applies the existing weighted RRF arithmetic to metadata
-before materializing final winners (or explicit reranker candidates), retaining
-document deduplication, dense-passage preference and deterministic ties. An
-optional shared catalog avoids retaining duplicate dense catalog objects.
+Arctic used revision `ac6544c8a46e00af67e330e85a9028c66b8cfd9a`, the `query: `
+prefix and titled 500-token passages. It ran in bf16 on a Colab L4 from `38489e0`,
+with 103 shards of 5,000 documents; the hybrid ran from `62002a6` without a reranker.
+BGE-base used 26 shards. All 511,958 documents were included.
 
-Full-hybrid construction can now share one sealed `ValidatedCatalog` from
-`PostgresDocumentStore(..., retain_catalog=True)`. Its `validated_catalog()`
-getter checks live snapshot readiness before and after returning the retained
-metadata. The default remains `retain_catalog=False`, preserving streaming
-verification for storage/import jobs that do not need the full metadata table.
-The capsule contains no bodies or permissions. Exact issuance and complete
-snapshot identity are checked before its entries, IDs or read-only position map
-are reused; ordinary iterables still take the full validation/fingerprint path.
+Arctic alone improved development Recall@10 over BGE-base by +0.067 (+0.026 to
++0.108; 35 better, 20 worse). It found 11 of BM25+'s 72 complete misses, compared
+with seven for BGE-base. On calibration it scored 0.580 versus 0.487 (+0.093,
++0.008 to +0.181). Its sample Recall@10 of 0.670 fell to 0.554 on the full corpus,
+showing how much the screening sample had overstated coverage.
 
-`ShardedDense.load(catalog=handle, ...)` keeps the existing tuple `index.catalog`
-and exposes the issued handle as `index.catalog_handle`. Both store-backed
-retrievers share that handle's entries, IDs and positions. Policy resolvers use
-their own small identity wrappers over the same immutable metadata, preserving
-scope/issuer/freshness checks. Manifest/document order and every shard's vectors,
-finite values, spans, dimensions and counts are still validated during loading.
+| Split | Hybrid | Recall@5 | Recall@10 | Recall@20 | nDCG@10 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Development | BGE-base, weight 0.7 | 0.641 | 0.722 | 0.760 | 0.604 |
+| Development | Arctic, equal weights | 0.642 | 0.703 | 0.761 | 0.612 |
+| Development | Arctic, weight 0.7 | 0.638 | 0.723 | 0.768 | 0.628 |
+| Calibration | BGE-base, weight 0.7 | 0.658 | 0.767 | 0.821 | 0.625 |
+| Calibration | Arctic, weight 0.7 | 0.690 | 0.788 | 0.822 | 0.655 |
 
-Materialization streams exact overlapping3000-character windows with the existing
-query-match/tie heuristic, retaining only the current/best window. This preserves
-legacy hybrid output without requiring a full Arrow body table. It can perform
-many bounded reads for a long winning document; bounded requests do not imply
-constant I/O or a particular backend's physical-read size. `read_more` stays in
-matched authorized documents and preserves snapshot/revision identity.
+Arctic's hybrid gain over BGE-base was +0.001 Recall@10 on development (−0.021
+to +0.023; nine better, ten worse), and +0.020 on calibration (−0.018 to +0.060).
+Development nDCG@10 gained +0.023 (+0.002 to +0.046); calibration gained +0.030
+(−0.014 to +0.076). This did not establish a calibration recall improvement.
+Against BM25+ alone, Arctic's calibration gain was +0.076 (+0.030 to +0.130).
 
-Standalone dense candidates retain the full winning embedding span and ranking.
-Standalone returned excerpts are now capped at3000characters, whereas the legacy
-standalone dense retriever emitted its full selected span. This declared excerpt
-change is separate from document-ranking parity; the hybrid selector already had
-that bound. Existing legacy retrievers remain available for comparison.
+This was the second recorded calibration check, after BGE-base. Preserve that
+history; do not treat it as untouched tuning data. Saved top-20 three-way fusion
+scored 0.713 versus 0.712 for BGE-base hybrid and 0.710 for Arctic hybrid. Adding
+Arctic increased top-20 union reference coverage from 0.775 to 0.805, but did not
+establish a better merged top-ten setting. BGE-base remains configured.
 
-Fixture checks use real tiny BM25/NumPy/Parquet indexes and compare existing
-fusion/window/hybrid/expansion behavior, including revocation boundaries and
-embedded null Unicode text. These checks do not establish a live PostgreSQL,
-HTTP factory, full-corpus memory/latency or answer-quality result. APP-01/PARITY-01
-still perform the concrete integration and measurement.
+<a id="bounded-dense-candidate-search"></a>
+<a id="store-backed-retrieval-adapters"></a>
 
-## Reproducible full-corpus parity protocol
+## Technical reference: bounded search and exact text reads
 
-`scripts/compare_retrieval_backends.py` runs four separate offline stages. It
-does not import or call an answer provider. Use the nonowner runtime database
-configuration and the isolated0600 benchmark credential file from the reviewed
-ACL operation; reference reads also pass through actual PostgreSQL policy/RLS.
+`ShardedDense` searches the existing version-1 `.npy` vector files in bounded
+blocks instead of building one accumulating in-memory FAISS index. It validates
+metadata, document order, finite vectors, spans, dimensions and counts against a
+verified snapshot. A block of 8,192 × 768 float32 values contains 24 MiB of vector
+payload; this is a calculation, not total process memory.
+
+Each document keeps its best passage across every block and shard before top-k
+selection. Exact-score ties use document ID, then earliest character span.
+Numerical tolerances in cross-implementation checks do not create artificial
+ties. An empty permitted selection skips vector scanning. Full access still
+searches the complete shared vector collection; authorization is not a separate
+index or duplicate embedding set per user.
+
+The original dense manifest lacks per-shard cryptographic digests and a canonical
+text revision proof. Structural validation and a verified external snapshot do
+not prove which original text produced each embedding. Keep this provenance
+limitation separate from the observed numerical parity below.
+
+`StoreBM25Retriever`, `StoreDenseRetriever` and `StoreHybridRetriever` use a
+`DocumentStore` and server-issued request context. The shared `ValidatedCatalog`
+contains immutable metadata only and remains snapshot-checked. It saves duplicate
+catalogue copies; it does not cache permission decisions or bypass freshness.
+
+Hybrid text selection streams exact overlapping 3,000-character windows, using
+the existing query-match/tie rule. A long document can require many bounded reads;
+a bounded read size does not guarantee constant I/O. `read_more` expands only
+matched authorized documents under the same snapshot/revision checks.
+Standalone dense excerpts are capped at 3,000 characters; the legacy standalone
+retriever returned its full winning span. That declared excerpt difference is
+separate from document-ranking parity. Legacy retrievers remain available as
+comparison components, not the current web factory.
+
+<a id="full-corpus-postgresql-import-validation"></a>
+
+## Recorded database import check
+
+A Linux ARM64 Docker run on November 3, 2026 imported and verified all 511,958
+documents and 1,746,899 indexed passage spans from 26 shards. All 37 bodies
+containing NUL characters were preserved exactly. The ordered catalogue digest
+was `5b27411a79bb1f04e6b67c5f86039864ac45aaf8ad312598f24f1c7bd8b6fa03`.
+
+The operator had a 768 MiB memory/no-extra-swap limit and two CPUs; PostgreSQL
+had 384 MiB, one CPU and 32 MiB shared buffers. Migration, verification and import
+took 1,334.76 seconds. Linux high-water RSS was 352,040 KiB; a true cgroup peak
+was unavailable. Exit status was zero and `OOMKilled=false`.
+
+The 8 MiB payload-batch target observed a maximum of 8,388,490 bytes; the largest
+document was 42,339 bytes. Database size was 3,527,521,971 bytes, excluding
+separate WAL/volume overhead. A persistent-volume restart retained all counts
+and the completed checkpoint. The restricted runtime pool could verify metadata
+but could not read protected bodies without permission. No login or access
+policy was inferred from importing data.
+
+These are import checks with warmed file caches, not serving or answer-quality
+results. Use [the setup guide](WEB_APP.md#canonical-document-import) for imports;
+use [Status](STATUS.md) for later authentication and current application checks.
+
+<a id="reproducible-full-corpus-parity-protocol"></a>
+
+## Advanced: compare the old and bounded search implementations
+
+**Parity** means that two implementations return the same required rankings and
+source text. It does not mean the answers are correct. The existing
+`scripts/compare_retrieval_backends.py` protocol has four stages and calls no
+answer provider. It needs a ready imported snapshot, restricted runtime database
+configuration, pinned local model and reviewed private benchmark credentials.
+This is an operator experiment, not a beginner installation step.
+
+Run in a prepared environment with the paths below mounted or replaced by your
+actual inputs. Keep credentials mode 600. The reference implementation's text
+reads also pass real PostgreSQL permission checks.
 
 ```sh
 python -m scripts.compare_retrieval_backends encode \
@@ -528,187 +413,156 @@ python -m scripts.compare_retrieval_backends encode \
   --bm25-directory /artifacts/indexes/bm25 --output /reports/shared
 python -m scripts.compare_retrieval_backends reference \
   --shared /reports/shared --credentials-file /private/benchmark-credentials.json \
-  --corpus /artifacts/documents.parquet --dense-directory /artifacts/indexes/dense-bge-base \
+  --corpus /artifacts/documents.parquet \
+  --dense-directory /artifacts/indexes/dense-bge-base \
   --bm25-directory /artifacts/indexes/bm25 --output /reports/reference
 python -m scripts.compare_retrieval_backends candidate --scope full \
+  --file-cache-policy retain \
   --shared /reports/shared --credentials-file /private/benchmark-credentials.json \
-  --corpus /artifacts/documents.parquet --dense-directory /artifacts/indexes/dense-bge-base \
+  --corpus /artifacts/documents.parquet \
+  --dense-directory /artifacts/indexes/dense-bge-base \
   --bm25-directory /artifacts/indexes/bm25 --output /reports/candidate-full
 ```
 
-Run `candidate` again in fresh processes with `--scope narrow` and `--scope empty`
-and new output paths. The default `--file-cache-policy discard` retains the
-accepted scanner behavior. The explicit `--file-cache-policy retain` experiment
-keeps consumed dense pages eligible for OS file-cache reuse, while still
-releasing mmap pages and closing mappings, metadata readers and file descriptors.
-It suppresses only POSIX_FADV_DONTNEED advice. Retained file-cache pages count
-toward cgroup/VM memory, so this mode requires a new measured resource run under
-the same limits; it does not establish fit. The manifest records the policy,
-and all three candidate processes must use the same policy for comparison.
-Every output directory is exclusive. Interrupted runs stay
-incomplete; the tool does not overwrite or silently resume them. Frozen shared
-question/vector/config digests and completed case digests are checked before
-comparison. Package and executed source hashes are retained. An early frozen
-encode snapshot may have a different driver hash; its actual query encoder
-implementation must still match, and candidate encodings must be byte-equal to
-the frozen vectors. Reference and final candidate source hashes must match.
+Repeat `candidate` in fresh processes with `--scope narrow` and `--scope empty`,
+new output paths and the same explicit file-cache policy. `retain` allows consumed
+pages to remain eligible for operating-system cache reuse; memory sampling must
+include that cache. The tool's default is `discard`. Do not combine policies and
+call the result one comparable run. Neither policy establishes cold-disk timing.
 
-The predeclared ten development IDs are qst_0001,qst_0431,qst_0412,qst_0384,
-qst_0471,qst_0482,qst_0301,qst_0451,qst_0342,qst_0176. The32-document scope is
-the union of their14 referenced documents and the first18 other document IDs in
-lexical order. This is a reproducible access fixture, not an unbiased retrieval
-quality sample. Full-scope cases also exercise the declared query source hints
-and an after2020-01-01 UTC filter; unknown timestamps fail date filters.
-No calibration/final selection or answer judging is performed.
+The ten development IDs are `qst_0001`, `qst_0431`, `qst_0412`, `qst_0384`,
+`qst_0471`, `qst_0482`, `qst_0301`, `qst_0451`, `qst_0342` and `qst_0176`.
+The narrow access fixture has 32 documents: their 14 references plus the first
+18 other IDs in lexical order. It is a reproducible permission test, not an
+unbiased retrieval-quality sample. Full-access cases also test source hints and
+after-January-1-2020 date filters; unknown dates fail a date bound.
 
-The primary oracle scores every passage and retains each document's exact
-maximum before top-k/deduplication. It uses an independent FAISS1.15.1 native
-reference, including the global thread partitions and1024-row BLAS tiles needed
-to reproduce full-index scores. Arbitrary small FlatIP blocks can switch native
-kernels and cause ULP rank differences; that failed approach is retained in the
-development evidence. The bounded matching helper is tested against full native
-indexes with bitwise score checks, odd/even row counts, dimensions64/768,
-fp16/fp32 and multiple thread counts. Unsupported dispatch settings fail.
+The independent reference uses FAISS 1.15.1 document-maximum scores, including its
+thread partitions and 1,024-row BLAS tiles. The candidate scans bounded blocks.
+Comparison requires exact document/span ordering and source text, with score
+`atol=rtol=2e-6`. Near scores do not excuse ranking mismatches. Both paths must
+have matching query-encoder implementations; candidate encodings must be
+byte-equal to the frozen vectors. All corpus, index, question, package and
+executed-source fingerprints remain part of the reports.
 
-Primary ties use exact score equality, lexical document IDs and earliest
-start/end offsets. Score tolerance is atol=rtol=2e-6; all score deltas are retained,
-and a rank-ID or canonical-span mismatch fails rather than being hidden as a
-near-tie. Secondary exhaustive-FAISS representative differences are explicitly
-reported only with exact document-maximum/tie proof and both excerpts checked
-against canonical source. Native BM25 ranks feed an independent weighted RRF
-oracle (weights0.7/0.3,rrf60,candidate50,no reranker). Metadata rank prefixes5,10,20
-are compared; the real timed hybrid call materializes top5.
+Rank prefixes 5, 10 and 20 are checked for dense and hybrid results. The historical
+timed hybrid call materializes five documents; that protocol is not the current
+eight-document web setting. The independent RRF oracle uses weights 0.7/0.3,
+constant 60, 50 candidates and no reranker. Source checks include exact Unicode
+offsets, revisions, titles, provenance and adjacent expansions.
 
-Each candidate process has one active resolver, a resident manifest-matched CPU
-fp16 BGE model, mmap BM25 and bounded dense search. Timing includes actual input
-verification, imports/model/backend initialization, fresh scope resolution,
-adapter-invoked real query encoding, guards and PostgreSQL materialization plus
-bounded adjacent reads. Authorized empty/date-filter paths skip encoding/scoring
-as the accepted adapter does; the model remains resident. Shared vectors control
-numerical comparison, while fresh encoding work is measured and verified.
-Startup/first/warm thresholds are120/30/10seconds with three warm repeats. Only
-request_index0 in each fresh scope process receives the30-second first limit;
-every later request, including new questions and source/date cases, receives
-the10-second warm limit. Records carry a contiguous process-wide request_index.
-Startup uses Linux process age (driver-entry fallback outside procfs). These
-are first-process/warm measurements, not a cold-disk claim. Reference setup with
-three workload resolvers is recorded as harness overhead and is not app readiness.
-Candidate setup explicitly retains one store-issued catalogue; the reference's
-three resolver-local wrappers share the same capsule. Manifests report one
-retained catalogue and the separate resolver count. The independent reference
-keeps its own metadata/oracle validation and scoring path.
-Nested startup events and `startup_components` separate input verification,
-database/identity/store/policy setup, imports, catalogue retrieval, dense/BM25
-loading, model loading and adapter initialization. Request events and component
-fields separate native BM25/dense ranking, materialization, adjacent reads and
-freshness-guard calls. These durations are inclusive: guard time overlaps
-materialization and adjacent reads, so component totals must not be summed.
-Every guard still calls the same authoritative resolver; timing adds no cache
-or authorization shortcut.
+Each candidate process has one resolver and a resident CPU/fp16 BGE model.
+Nonempty requests really re-encode questions. Timing includes input verification,
+model/index initialization, fresh permission resolution, protected text reads and
+expansion. Empty access/date-filter paths skip encoding and ranking when no
+results can be admitted. The historical gates were startup ≤120 seconds, first
+request ≤30 seconds and every later request ≤10 seconds, with three warm repeats.
+These component gates differ from current agent/HTTP deadlines. Nested timings
+are inclusive; do not sum overlapping guard and materialization times.
 
-Finally, `compare --shared ... --reference ... --candidate ...` accepts the three
-candidate directories, `--corpus`, three `--resources` files and a new `--output`.
-Source evidence is deduplicated across repeats and verified in one bounded scan
-of the selected canonical Parquet row groups. Exact Unicode text, revisions,
-titles, source/date/provenance, citation offsets and adjacent excerpts are checked.
-The command exits nonzero if numerical/text, matrix, latency or resource gates fail.
-Missing resource evidence never becomes an acceptance result.
+A supervising process must also produce a resource report for each scope, bound
+to that candidate manifest. It records paired app/database samples every second,
+raw sampler/supervisor digests, complete coverage, no triggered guard and OOM
+counter changes. The acceptance envelope is app 6 GiB/no-extra-swap/two CPUs,
+PostgreSQL 384 MiB/one CPU, paired sampled total ≤6.5 GiB, available VM memory
+≥256 MiB and no OOM increase. Unknown kernel peaks remain unknown; never add
+separately observed component maxima and call that a simultaneous peak.
 
-Each external resource report binds `scope` and `candidate_manifest_sha256` to
-one completed candidate. It includes complete=true,guard_status=not_triggered,
-measurement_kind=sampled_sequential_app_db_cgroup_1s,sample_count,
-raw_sampler_sha256,app_supervisor_sha256,peak_aggregate_bytes,
-min_vm_available_bytes and oom_events_delta. The aggregate is the maximum of
-paired app/database samples, never the sum of isolated component maxima. Require
-aggregate<=6.5GiB,VMavailable>=256MiB and no OOM increase. Unknown values remain
-unknown; sampled counters do not establish an unavailable true kernel peak.
+After producing all three candidate and resource reports, compare them:
 
-### I/O placement is a measured prerequisite
+```sh
+python -m scripts.compare_retrieval_backends compare \
+  --shared /reports/shared --reference /reports/reference \
+  --candidate /reports/candidate-full \
+  --candidate /reports/candidate-narrow \
+  --candidate /reports/candidate-empty \
+  --corpus /artifacts/documents.parquet \
+  --resources /reports/full-resource.json \
+  --resources /reports/narrow-resource.json \
+  --resources /reports/empty-resource.json --output /reports/comparison
+```
 
-The initial read-only Mac bind-mount preflight has already failed the120-second
-startup target:388.334seconds for full hybrid. Its first request took122.065seconds
-and the first warm repeat110.580seconds, failing both serving limits. The run was
-then deliberately stopped and remains an incomplete preflight. App peak RSS was
-2,673,369,088bytes; sampled cgroup maximum2,807,717,888bytes; actual paired
-app/database sample maximum3,172,130,816bytes. No memory guard or OOM fired.
-The separate encode component took
-239.623seconds, of which209.690seconds were input hashing. These are component/
-incomplete preflight observations, not completed query, resource or parity
-acceptance. Preserve their raw profiles and failures.
+Every output path must be new. Interrupted outputs stay incomplete; no automatic
+resume or overwrite occurs. Missing resource evidence or a matrix, ranking,
+text, latency or resource failure makes comparison fail. A reference setup with
+three resolvers is harness overhead, not application readiness.
 
-The completed managed-index run retained the raw Parquet on the Mac bind and
-the default discard policy. It covered all 120 full-profile requests, with
-startup 139.509 seconds, first request 15.098 seconds, and 35 later requests
-above the 10-second limit (maximum 24.418 seconds). The worker exited 0 with
-no memory guard and no app OOM increase. Peak RSS was 2,678,919,168 bytes,
-sampled app cgroup maximum 3,068,968,960 bytes, and sampled paired app/database maximum
-3,452,321,792 bytes. This is a completed candidate profile with failed serving
-gates; numerical parity still requires the independent reference/comparison.
-Sampled per-request I/O shows each unfiltered warm request reading
-2,683,293,696 bytes from storage under unconditional dense cache-discard advice.
+<a id="io-placement-is-a-measured-prerequisite"></a>
+<a id="accepted-full-corpus-retrieval-measurement"></a>
 
-Before APP integration, measure verified read-only Docker volumes for both
-indexes and raw Parquet, and the explicit retain-cache policy. Keep all26 dense
-shards,511,958 documents, pinned model/weights and the same app/database/VM limits;
-record storage headroom and prove identical digests. This is an I/O-placement
-and cache-budget experiment, not corpus reduction or extra RAM. The managed
-index-only placement substantially improved latency but did not meet every gate.
-The next results must establish whether retaining the approximately 2.68 GB raw
-dense cache improves warm latency while fitting the existing memory limits.
-Input checks remain inside the
-measured boundary unless a separately reviewed immutable-deployment receipt
-protocol is explicitly introduced after evidence. Numerical, serving and
-resource acceptance requires the complete protocol; the accepted run is recorded below.
+## Recorded search parity and resource results
 
-Startup margin also remains an explicit gate. The optimized full-profile run
-at source `51bd422` completed all 120 requests with startup 96.652 seconds,
-first request 12.716 seconds and maximum later request 9.648 seconds. A fresh
-empty-scope process of the same source took 138.474 seconds to initialize and
-therefore failed the 120-second startup target, despite correctly skipping
-encoding and evidence for denied requests. A passing full profile does not
-override that failure. Reusing the validated catalogue removes repeated metadata
-SQL scans, model validation and fingerprinting; it does not skip raw input hashes,
-model loading or shard checks. The accepted catalogue-only prerequisite built
-all 511,958 entries in 13.227 seconds, with no additional metadata queries for
-three policy resolvers. That component result is not full-runtime acceptance;
-the changed retrieval consumers required fresh full/narrow/empty and independent
-reference measurements under the unchanged limits. Those subsequent measurements
-passed at source `a51e6a9`.
+The complete November 3 run at source `a51e6a9` passed the protocol above across
+all 511,958 documents, 1,746,899 passages and 26 shards. All 200 candidate cases
+matched reference rankings at prefixes 5, 10 and 20. Checks verified 164 distinct
+excerpts/expansions against canonical text. There were no paid model calls.
 
-### Accepted full-corpus retrieval measurement
-
-The November 3 local run at `a51e6a9` passed the complete protocol: 511,958
-documents, 1,746,899 passages and all 26 dense shards. All 200 candidate cases
-matched the independent reference at rank prefixes 5, 10 and 20 for dense and
-hybrid results, with the declared score tolerances and exact document/span
-ordering. Canonical source verification checked 164 distinct excerpts and
-expansions, including exact text and Unicode offsets. No LLM answer generation
-or paid model call was involved.
-
-| Access scope | Process startup | First request | Maximum later request | Maximum paired app + DB sample |
+| Documents the fixture allowed | Process startup | First request | Maximum later request | Maximum paired app + DB sample |
 | --- | ---: | ---: | ---: | ---: |
-| Full | 64.746s | 8.809s | 7.477s | 5.35GiB |
-| Narrow | 55.932s | 3.340s | 2.588s | 5.30GiB |
-| Empty | 54.628s | 2.096s | 0.818s | 5.05GiB |
+| Full | 64.746 s | 8.809 s | 7.477 s | 5.35 GiB |
+| Narrow | 55.932 s | 3.340 s | 2.588 s | 5.30 GiB |
+| Empty | 54.628 s | 2.096 s | 0.818 s | 5.05 GiB |
 
-These are fresh-process/warm-request measurements, without a cold-disk claim.
-Each process used the same six-GiB/no-extra-swap/two-CPU application limit,
-384-MiB PostgreSQL service and unchanged Docker VM allocation. The parent
-sampler began before each process and verified paired app/database coverage;
-all resource proofs passed with zero OOM counter increases. The kernel did not
-provide a true memory high-water counter, so the table reports observed paired
-samples rather than a claimed kernel peak.
-
-Verified read-only Linux index and canonical-source volumes were used; the
-manifest-matched CPU/fp16 BGE model stayed resident and nonempty requests encoded
-their queries again. Empty scopes and unknown-date restrictions skipped encoding
-when no evidence could be admitted. File hashes, model loading, every shard,
-policy/session freshness and protected text reads remained inside their stated
-boundaries. The final comparison manifest SHA256 is
+Verified read-only Linux volumes held indexes and canonical source files. File
+cache was retained, the model stayed resident and queries were freshly encoded.
+All resource proofs passed without OOM counter increases. These are fresh-process
+measurements with filesystem-cache effects, not cold-disk or true kernel-peak
+measurements. The final comparison manifest digest was
 `0efa0a21215a66cab53e102e48dbbe8ed237c1650c95688f8b5f9ee77865a480`.
 
-This accepts the retrieval component and its measured envelope. Authenticated
-HTTP integration was subsequently accepted at A6 `766e723`; account UI, scoped
-evaluation-runner acceptance, packaged full-application Docker delivery and
-remaining recovery checks have separate gates. The earlier table is not a new
-full-application measurement.
+Earlier failures explain why storage placement is part of the protocol:
+
+| Earlier configuration | Startup | First request | Later requests | Result |
+| --- | ---: | ---: | --- | --- |
+| Read-only Mac bind mounts | 388.334 s | 122.065 s | First repeat 110.580 s | Deliberately stopped; incomplete preflight |
+| Managed indexes, raw Parquet on Mac bind; discard policy | 139.509 s | 15.098 s | Max 24.418 s; 35 above 10 s | Completed profile, failed serving gates |
+| Optimized source `51bd422`, full fixture | 96.652 s | 12.716 s | Max 9.648 s | Full fixture passed timing; fresh empty startup failed at 138.474 s |
+
+No OOM fired in the first two profiles. Their paired sampled app/database maxima
+were 3,172,130,816 and 3,452,321,792 bytes. The managed-index profile read about
+2,683,293,696 bytes per unfiltered warm request with unconditional dense cache
+discard. A separate retained-catalogue component check built 511,958 entries in
+13.227 seconds and avoided new metadata scans for three resolver wrappers. That
+component result alone was not full-runtime acceptance.
+
+The accepted November 3 result establishes retrieval parity within its measured
+envelope. It does not establish current full-application latency, answer accuracy,
+permission-cache cold timing or fair agent-versus-fixed comparisons. Later live
+checks and remaining limitations are summarized in [Status](STATUS.md).
+
+<a id="measure-the-existing-loader"></a>
+
+## Advanced: profile the legacy loader separately
+
+`scripts/profile_retrieval.py` measures legacy retrieval components. Its hybrid
+mode calls the legacy factory; its dense mode uses the older model/FAISS loader.
+It is useful for comparing implementations, but is not the current store-backed
+web-app acceptance harness. Run one supervised attempt with explicit input paths
+and a new output directory:
+
+```sh
+python scripts/profile_retrieval.py --mode hybrid \
+  --corpus /data/documents.parquet \
+  --bm25-index /data/indexes/bm25 \
+  --dense-index /data/indexes/dense-bge-base \
+  --output .cache/resource-profile/hybrid-attempt
+```
+
+Modes `inventory`, `corpus`, `model`, `bm25` and `dense` isolate particular
+components. Inventory hashes and checks declared shards without building a
+resident search index. Hybrid workloads exercise existing question-only
+development queries, broad/narrow/denied fixture access, filters and expansion.
+No login, critic, generator or judge is called.
+
+Prepare the pinned model cache before imports. Record the image, actual source
+hashes, mounts, CPU/memory/no-extra-swap limits and excluded dependencies. Disable
+an inherited HTTP healthcheck for this non-HTTP process. Preserve phase events,
+raw memory samples, logs and failed attempts. Use an independent container ceiling
+as well as the profiler's RSS/cgroup/VM/wall-time watchdog.
+
+Hashing warms file caches. Process RSS, cgroup totals including file cache,
+sampled maxima and any kernel high-water counters describe different things.
+Exit 137 alone does not prove an out-of-memory event. Keep machine-specific raw
+reports private and ignored; publish a dated summary with its real limitations.
+A resource profile is neither an answer-quality score nor a new application
+acceptance result.

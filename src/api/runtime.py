@@ -11,7 +11,7 @@ from typing import Literal
 from uuid import uuid4
 from weakref import WeakKeyDictionary
 
-from pydantic import ConfigDict, Field, field_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from src.agents.search_agent import AgentConfig, SearchAgent
 from src.agents.search_critic import EvidenceCritic, SYSTEM_PROMPT as CRITIC_PROMPT
@@ -27,7 +27,8 @@ from src.contracts import (AggregateEvidence, Answer, Chunk, Evidence, QueryRequ
 from src.storage.contracts import ReadFilters, validate_read_more_bounds
 from src.storage.fingerprints import ValidatedCatalog
 from src.generation.generator import (AnthropicConfig, AnthropicProvider, Completion,
-                                      GenerationConfig, GroundedGenerator, ProviderError)
+                                      GenerationConfig, GroundedGenerator, ProviderError,
+                                      evidence_payload)
 
 
 log = logging.getLogger(__name__)
@@ -40,6 +41,33 @@ def _canonical(value):
 
 def _sha(value):
     return hashlib.sha256(value).hexdigest()
+
+
+def _copy_critic_inputs(values):
+    return tuple({**value, **{name: None if value[name] is None else tuple(
+        type(item).model_validate(item.model_dump(warnings=False)) for item in value[name])
+        for name in ('request_evidence', 'selected_evidence')}} for value in values)
+
+
+def _align_critic_inputs(response, pending):
+    """Associate observed inputs with actual trace indices, including failures.
+
+    A pre-observer failure is a missing observation, never an empty model input.
+    It must not turn an otherwise valid error response into a request failure.
+    """
+    steps = [(index, step) for index, step in enumerate(response.trace.steps)
+             if step.tool.split(':', 1)[0] == 'critic']
+    aligned = []
+    for ordinal, (index, step) in enumerate(steps, 1):
+        observed = pending[ordinal - 1] if len(pending) <= len(steps) and ordinal <= len(pending) else None
+        if (observed is not None and step.tool == 'critic'
+                and tuple(item.citation_id for item in observed['request_evidence']) != step.evidence_ids):
+            observed = None
+        aligned.append({**(observed if observed is not None else {
+            'request_evidence': None, 'selected_evidence': None, 'payload_sha256': None,
+            'provider_call_planned': None}), 'critic_call_ordinal': ordinal,
+            'trace_step_index': index, 'disposition': 'captured' if observed is not None else 'input_unavailable'})
+    return tuple(aligned)
 
 
 class RuntimeCapture:
@@ -81,6 +109,12 @@ class RuntimeCapture:
         return _capture_state(self)['payload_sha256']
 
     @property
+    def critic_inputs(self):
+        # This copied view is not an authorization attestation. Operator exports
+        # must use the issuing runtime's export_critic_inputs current-state check.
+        return _copy_critic_inputs(_capture_state(self)['critic_inputs'])
+
+    @property
     def binding(self):
         value = _capture_state(self)['context'].binding
         return type(value).model_validate(value.model_dump(warnings=False))
@@ -120,15 +154,39 @@ class WebSettings(RetrievalSettings):
     output_price: float = Field(default=0, ge=0)
     question_budget_usd: float = Field(default=.1, gt=0)
     max_seconds: float = Field(default=120, gt=0, le=300)
+    request_timeout_seconds: float | None = Field(default=None, gt=0, le=360)
     max_tokens: int = Field(default=16000, ge=256, le=64000)
     max_context_chars: int = Field(default=24000, ge=128, le=48000)
+    model_max_output_tokens: int = Field(default=1024, strict=True, ge=128, le=8192)
+    critic_max_output_tokens: int = Field(default=2048, strict=True, ge=128, le=8192)
     max_rounds: int = Field(default=2, ge=1, le=5)
     top_k: int = Field(default=5, ge=1, le=20)
+    evidence_doc_limit: Literal[5, 8, 10] = 8
+    observability_admin_user_ids: tuple[str, ...] = ()
 
-    @field_validator('allowed_sources', 'allowed_origins', mode='before')
+    @field_validator('allowed_sources', 'allowed_origins', 'observability_admin_user_ids', mode='before')
     @classmethod
     def csv(cls, value):
         return tuple(s.strip() for s in value.split(',') if s.strip()) if isinstance(value, str) else value
+
+    @field_validator('request_timeout_seconds', mode='before')
+    @classmethod
+    def request_deadline_is_not_boolean(cls, value):
+        if type(value) is bool:
+            raise ValueError('Request timeout must be a number of seconds or None.')
+        return value
+
+    @model_validator(mode='after')
+    def request_deadline_covers_agent_budget(self):
+        if self.request_timeout_seconds is not None and self.request_timeout_seconds < self.max_seconds:
+            raise ValueError('Request timeout must cover the configured agent time allowance.')
+        return self
+
+    @property
+    def effective_request_timeout_seconds(self):
+        # The HTTP envelope also includes authentication, policy and persistence.
+        # An omitted override preserves legacy callers' existing deadline.
+        return self.max_seconds if self.request_timeout_seconds is None else self.request_timeout_seconds
 
     @classmethod
     def from_env(cls):
@@ -136,11 +194,13 @@ class WebSettings(RetrievalSettings):
                   for k in cls.model_fields if os.environ.get('RAG_' + k.upper(), '') != ''}
         # The public Python setting remains a strict integer. Environment values
         # have a single explicit decimal conversion rather than bool/float casts.
-        if 'dense_block_rows' in values:
-            raw = values['dense_block_rows']
+        for field in ('dense_block_rows', 'evidence_doc_limit', 'model_max_output_tokens', 'critic_max_output_tokens'):
+            if field not in values:
+                continue
+            raw = values[field]
             if not raw.isascii() or not raw.isdecimal():
-                raise RuntimeConfigurationError('RAG_DENSE_BLOCK_ROWS must be a positive integer.')
-            values['dense_block_rows'] = int(raw)
+                raise RuntimeConfigurationError('RAG_' + field.upper() + ' must be a positive integer.')
+            values[field] = int(raw)
         return cls.model_validate(values)
 
 
@@ -224,9 +284,15 @@ class Runtime:
             ids = frozenset(restricted)
         self.user = UserContext(user_id='benchmark-demo', allowed_doc_ids=ids)
         generation = GenerationConfig(max_context_chars=settings.max_context_chars, retries=0)
-        self.agent = (SearchAgent(retriever, EvidenceCritic(provider, generation),
+        output_limit = (provider.config.max_output_tokens if provider is not None and isinstance(provider, AnthropicProvider)
+                        else settings.model_max_output_tokens)
+        self.agent = (SearchAgent(retriever, EvidenceCritic(provider, generation,
+                max_output_tokens=settings.critic_max_output_tokens),
             GroundedGenerator(provider, generation), config=AgentConfig(
                 max_rounds=settings.max_rounds, max_context_chars=settings.max_context_chars,
+                evidence_doc_limit=settings.evidence_doc_limit,
+                critic_max_output_tokens=settings.critic_max_output_tokens,
+                generation_max_output_tokens=output_limit,
                 max_tokens=settings.max_tokens, max_seconds=settings.max_seconds,
                 max_cost_usd=settings.question_budget_usd if settings.mode == 'live' else 0))
             if provider else None)
@@ -278,9 +344,10 @@ class Runtime:
 class _ScopedRetriever:
     """Request-local compatibility adapter; its user field grants no authority."""
 
-    def __init__(self, backend, context, guard, request, catalog):
+    def __init__(self, backend, context, guard, request, catalog, *, max_text_k=None):
         self.backend, self.context, self.guard = backend, context, guard
         self.request, self.catalog = request, catalog
+        self.max_text_k = request.top_k if max_text_k is None else max_text_k
         self.filters = ReadFilters(source_types=request.source_types,
                                    after=request.after, before=request.before)
 
@@ -295,7 +362,7 @@ class _ScopedRetriever:
         ScopedUserContext.require_context(request.user, self.context)
         if (not isinstance(request.query, str) or not request.query.strip()
                 or len(request.query) > 8000 or type(request.top_k) is not int
-                or not 1 <= request.top_k <= self.request.top_k):
+                or not 1 <= request.top_k <= self.max_text_k):
             raise AccessDenied('Search exceeds the admitted request bounds')
         try:
             filters = ReadFilters(source_types=request.source_types,
@@ -496,7 +563,7 @@ class AuthenticatedRuntime:
 
     def __init__(self, settings, retriever, resolver, *, database, provider=None,
                  router=None, provider_identity=None, provider_max_output_tokens=1024,
-                 router_attestation=None):
+                 provider_critic_max_output_tokens=None, router_attestation=None):
         self.settings = WebSettings.model_validate(settings.model_dump(warnings=False))
         if database is None or getattr(resolver, 'database', None) is not database:
             raise RuntimeConfigurationError('Authenticated runtime requires the shared authentication database.')
@@ -527,14 +594,20 @@ class AuthenticatedRuntime:
         from src.evaluation.experiment_contracts import ModelProvenance
         if type(provider_max_output_tokens) is not int or provider_max_output_tokens < 1:
             raise RuntimeConfigurationError('Provider output limit must be a positive server integer.')
+        if (provider_critic_max_output_tokens is not None
+                and (type(provider_critic_max_output_tokens) is not int
+                     or provider_critic_max_output_tokens != self.settings.critic_max_output_tokens)):
+            raise RuntimeConfigurationError('Attested critic output limit must equal its configured stage limit.')
         if isinstance(provider, AnthropicProvider):
             actual_identity = ModelProvenance(provider='anthropic', model_id=provider.config.model)
             if provider_identity is not None and provider_identity != actual_identity:
                 raise RuntimeConfigurationError('Provider identity differs from its configured model.')
             provider_identity = actual_identity
             provider_max_output_tokens = provider.config.max_output_tokens
+            provider_critic_max_output_tokens = self.settings.critic_max_output_tokens
         elif provider is None:
             provider_identity = ModelProvenance(provider='disabled', model_id='retrieval-only')
+            provider_critic_max_output_tokens = None
         elif provider_identity is not None:
             try:
                 provider_identity = ModelProvenance.model_validate(provider_identity.model_dump(warnings=False))
@@ -542,6 +615,10 @@ class AuthenticatedRuntime:
                 raise RuntimeConfigurationError('Scripted provider identity must be explicitly typed.') from None
         self.router, self._provider_identity = router, provider_identity
         self._provider_max_output_tokens = provider_max_output_tokens
+        # Generic providers may ignore the stage override. Preserve an explicit
+        # attestation or omit that actual cap; configured agent allowances below
+        # must not manufacture provider capability for an opaque fixture.
+        self._provider_critic_max_output_tokens = provider_critic_max_output_tokens
         self._router_attestation = None
         if router_attestation is not None:
             self._router_attestation = self._fixture_route(router_attestation)
@@ -572,6 +649,19 @@ class AuthenticatedRuntime:
         return validate_grounded_evidence(context, tuple(evidence), self.resolver, registry,
             record_validator=lambda records: self.jira_tool.validate_records(
                 context, records, guard=self.resolver))
+
+    def _critic_input(self, context, bridge, registry, question, request_evidence, selected_evidence, payload):
+        checked = []
+        for values in (request_evidence, selected_evidence):
+            values = tuple(type(item).model_validate(item.model_dump(warnings=False)) for item in values)
+            bridge._passages(tuple(item for item in values if isinstance(item, PassageEvidence)), bridge.filters)
+            self._native(context, values, registry)
+            checked.append(values)
+        expected = {'question': question, 'evidence': [evidence_payload(item) for item in checked[1]]}
+        if not isinstance(payload, dict) or _canonical(payload) != _canonical(expected):
+            raise EvidenceValidationError('Critic input differs from the admitted question or selected evidence')
+        return {'request_evidence': checked[0], 'selected_evidence': checked[1],
+                'payload_sha256': _sha(_canonical(expected)), 'provider_call_planned': bool(checked[1])}
 
     @staticmethod
     def _fixture_route(value):
@@ -678,15 +768,19 @@ class AuthenticatedRuntime:
         user = ScopedUserContext.from_context(context)
         request = SearchRequest(query=body.question.strip(), user=user, top_k=self.settings.top_k,
                                 source_types=sources, after=body.after, before=body.before)
-        bridge = _ScopedRetriever(self.retriever, context, guard, request, self._catalog)
+        bridge = _ScopedRetriever(self.retriever, context, guard, request, self._catalog,
+            max_text_k=max(self.settings.top_k, self.settings.evidence_doc_limit))
         # An explicitly attested route must still describe the behavior admitted
         # now; an entirely unattested injected route remains nonexportable.
         self._router_profile()
         from src.agents.routing import ToolSpec
         from src.storage.runs import RunStepMetadata
         run_id = str(uuid4())
+        from src.observability import bind_run
+        bind_run(run_id)
         registry = _RunBoundRegistry(self, context, run_id)
         selected, payload_hash = (), None
+        critic_pending = []
         def on_input(evidence, payload):
             nonlocal selected, payload_hash
             if not isinstance(payload, dict) or payload.get('question') != request.query:
@@ -695,6 +789,10 @@ class AuthenticatedRuntime:
             bridge._passages(tuple(item for item in checked if isinstance(item, PassageEvidence)), bridge.filters)
             self._native(context, checked, registry)
             selected, payload_hash = checked, _sha(_canonical(payload))
+
+        def on_critic_input(request_evidence, selected_evidence, payload):
+            critic_pending.append(self._critic_input(context, bridge, registry, request.query,
+                request_evidence, selected_evidence, payload))
 
         config_sha = _sha(_canonical({'settings': self.settings.model_dump(mode='json', exclude={
             'frontend_dist', 'allowed_origins'}), 'request': body.model_dump(mode='json', exclude={'question'}),
@@ -708,9 +806,15 @@ class AuthenticatedRuntime:
                 tools = {'jira': ToolSpec(_RunJira(self, context, run_id, request, registry), 'jira',
                     'Verified native Jira records and exact counts of canonical source records; native keys may repeat.',
                     ('lookup', 'filter', 'count'), ('doc_id', 'native_key', 'status', 'priority', 'project_id'))}
-                agent = SearchAgent(bridge, EvidenceCritic(self.provider, generation),
+                agent = SearchAgent(bridge, EvidenceCritic(self.provider, generation, on_input=on_critic_input,
+                        max_output_tokens=self.settings.critic_max_output_tokens),
                     GroundedGenerator(self.provider, generation, on_input=on_input), router=self.router,
                     tools=tools, config=AgentConfig(max_rounds=self.settings.max_rounds,
+                        evidence_doc_limit=self.settings.evidence_doc_limit,
+                        critic_max_output_tokens=self.settings.critic_max_output_tokens,
+                        generation_max_output_tokens=(self.provider.config.max_output_tokens
+                            if isinstance(self.provider, AnthropicProvider) else getattr(self,
+                                '_provider_max_output_tokens', self.settings.model_max_output_tokens)),
                         max_context_chars=self.settings.max_context_chars, max_tokens=self.settings.max_tokens,
                         max_seconds=self.settings.max_seconds,
                         max_cost_usd=self.settings.question_budget_usd if self.settings.mode == 'live' else 0))
@@ -730,6 +834,7 @@ class AuthenticatedRuntime:
                 self._native(context, response.sources, registry)
                 if response.trace.stop_reason == 'clarification':
                     selected, payload_hash = (), None
+                critic_inputs = _align_critic_inputs(response, critic_pending)
                 for ordinal, step in enumerate(response.trace.steps, 1):
                     self.runs.append(context, run_id, ordinal, RunStepMetadata(
                         tool=step.tool, round_number=step.round_number,
@@ -751,6 +856,7 @@ class AuthenticatedRuntime:
         state = {'runtime': self, 'context': context, 'response': response, 'selected': selected,
             'payload_sha256': payload_hash, 'question': request.query, 'body': body,
             'registry': registry, 'source_files': source_files, 'profile': export_profile,
+            'critic_inputs': critic_inputs, 'critic_bridge': bridge,
             'experiment_guard': guard if experiment is not None else None}
         with _CAPTURE_LOCK:
             _CAPTURES[capture] = state
@@ -800,9 +906,11 @@ class AuthenticatedRuntime:
         if router_profile is None:
             raise EvidenceValidationError('Export requires an explicit attestation of custom router behavior')
         model_identity, output_limit = self._provider_identity, self._provider_max_output_tokens
+        critic_output_limit = getattr(self, '_provider_critic_max_output_tokens', None)
         if isinstance(self.provider, AnthropicProvider):
             model_identity = ModelProvenance(provider='anthropic', model_id=self.provider.config.model)
             output_limit = self.provider.config.max_output_tokens
+            critic_output_limit = self.settings.critic_max_output_tokens
         backend = self.retriever
         embedding = None
         if isinstance(backend, StoreHybridRetriever):
@@ -825,13 +933,19 @@ class AuthenticatedRuntime:
             configuration['dense_execution'] = {'block_rows': dense.index.block_rows,
                                                 'file_cache_policy': dense.index.file_cache_policy}
         configuration.update(method=method, top_k=self.settings.top_k,
+            evidence_doc_limit=self.settings.evidence_doc_limit,
+            configured_stage_output_limits={'generation_max_output_tokens': output_limit,
+                **({'critic_max_output_tokens': self.settings.critic_max_output_tokens}
+                   if body.mode != 'baseline' else {})},
             router=router_profile,
             filters={'source_types': list(body.source_types or self.settings.allowed_sources),
                      'after': body.after.isoformat() if body.after else None,
                      'before': body.before.isoformat() if body.before else None})
         index = json.loads(_canonical(index))
         budgets = GenerationBudgets(top_k=self.settings.top_k, max_question_chars=8000,
+            evidence_doc_limit=self.settings.evidence_doc_limit,
             max_context_chars=self.settings.max_context_chars, max_output_tokens=output_limit,
+            critic_max_output_tokens=critic_output_limit if body.mode != 'baseline' else None,
             max_run_tokens=self.settings.max_tokens, max_run_seconds=self.settings.max_seconds,
             max_run_cost_usd=self.settings.question_budget_usd if self.settings.mode == 'live' else 0, retries=0)
         return {'generation_model': model_identity.model_dump(mode='json'),
@@ -859,7 +973,27 @@ class AuthenticatedRuntime:
         self.runs.get_metadata(context, state['response'].trace.run_id)
         self._native(context, state['selected'], state['registry'])
         self._native(context, state['response'].sources, state['registry'])
+        for record in state['critic_inputs']:
+            if record['disposition'] == 'captured':
+                checked = self._critic_input(context, state['critic_bridge'], state['registry'], state['question'],
+                    record['request_evidence'], record['selected_evidence'],
+                    {'question': state['question'],
+                     'evidence': [evidence_payload(item) for item in record['selected_evidence']]})
+                if (checked['payload_sha256'] != record['payload_sha256']
+                        or checked['provider_call_planned'] is not record['provider_call_planned']):
+                    raise EvidenceValidationError('Critic input capture changed after the request')
         return state
+
+    def export_critic_inputs(self, capture):
+        """Return copied private inputs only for this issued, current capture.
+
+        This is the operator boundary for calibration; visible dictionaries by
+        themselves do not establish issuance or current document authority.
+        """
+        state = self._export_state(capture)
+        result = _copy_critic_inputs(state['critic_inputs'])
+        self._export_state(capture)
+        return result
 
     def export_capture(self, capture, *, manifest, verified_inputs, question_id, directory=None):
         from src.evaluation.experiment_contracts import ExperimentManifest, RuntimeCaseExport, RuntimeFailure
@@ -936,7 +1070,7 @@ def _provider(settings, *, allow_fixture):
             raise RuntimeConfigurationError('Live mode requires positive RAG_BUDGET_USD, RAG_INPUT_PRICE and RAG_OUTPUT_PRICE.')
         config = AnthropicConfig(model=settings.model, allow_paid=True, budget_usd=settings.budget_usd,
             input_usd_per_million=settings.input_price, output_usd_per_million=settings.output_price,
-            max_output_tokens=1024, timeout_seconds=min(30, settings.max_seconds))
+            max_output_tokens=settings.model_max_output_tokens, timeout_seconds=min(30, settings.max_seconds))
         provider = AnthropicProvider(config)
     elif settings.mode == 'fixture' and allow_fixture:
         provider = FixtureProvider()

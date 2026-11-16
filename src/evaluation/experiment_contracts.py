@@ -54,9 +54,11 @@ class GenerationBudgets(Contract):
     """Shared evidence/output/run limits; rounds are the declared arm difference."""
 
     top_k: PositiveInt
+    evidence_doc_limit: PositiveInt | None = Field(default=None, exclude_if=lambda value: value is None)
     max_question_chars: PositiveInt
     max_context_chars: PositiveInt
     max_output_tokens: PositiveInt
+    critic_max_output_tokens: PositiveInt | None = Field(default=None, exclude_if=lambda value: value is None)
     max_run_tokens: PositiveInt
     max_run_seconds: Annotated[float, Field(gt=0)]
     max_run_cost_usd: Annotated[float, Field(ge=0)]

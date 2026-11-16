@@ -16,6 +16,7 @@ from src.retrieval.hybrid import HybridRetriever
 from src.retrieval.reranker import CrossEncoderReranker
 from tests.fakes import FakeProvider
 from src.agents.pilot import run_interactive, RecordingProvider
+from tests.test_scoped_agent import scope as routing_scope, passage as scoped_passage
 
 
 # Critic, routing, and search loop
@@ -299,6 +300,93 @@ def test_model_router_sends_capabilities_and_feedback_without_identity():
     assert result == route and payload['feedback']['missing_facts'] == ['Ticket owner']
     assert payload['tools']['tickets']['filter_fields'] == ['id']
     assert 'user' not in payload
+
+
+class CapabilityAwareRoutingProvider:
+    """Script the observed capability confusion, not real-model improvement."""
+
+    def __init__(self, *, requires_complete_count=False):
+        self.requires_complete_count = requires_complete_count
+        self.calls = []
+
+    def complete(self, system, prompt):
+        payload = json.loads(prompt)
+        self.calls.append(payload)
+        if self.requires_complete_count:
+            route = Route(reason="A complete Confluence count requires a matching structured adapter.",
+                          # Even suggested sample searches cannot override a
+                          # genuinely required complete-count limitation.
+                          text_queries=(payload['question'],),
+                          limitation="No registered tool can count the complete authorized Confluence relation.")
+        elif payload.get('text_search', {}).get('available'):
+            route = Route(reason="Use the independent prose passage search.",
+                          text_queries=(payload['question'],),
+                          source_types=tuple(payload['text_search']['source_scope']))
+        else:
+            # This reproduces the router-only failure when Jira looks like
+            # the entire capability inventory. No paid model is invoked.
+            route = Route(reason="Only the registered Jira adapter is visible.",
+                          limitation="Jira cannot retrieve documentation or chat procedures.")
+        return Completion(route.model_dump_json(), ZERO)
+
+
+@pytest.mark.parametrize('single_pass', [True, False], ids=['fixed', 'adaptive'])
+@pytest.mark.parametrize('platform,question,text', [
+    ('github', 'What are the default multipart upload limits?', 'The default upload limit is 10 MB.'),
+    ('slack', 'When does booking open for the new 80GB accelerator?', 'Bookings open on November 20.'),
+    ('confluence', 'What is the emergency rollback procedure?', 'Pin the previous release and restart the serving workers.'),
+])
+def test_model_router_runs_scoped_prose_search_despite_unrelated_jira_adapter(
+        routing_scope, single_pass, platform, question, text):
+    source = scoped_passage(routing_scope, text=text)
+    source = source.model_copy(update={'chunk': source.chunk.model_copy(update={'source_type': platform})})
+    search, critic = Search([(source,)]), Critic([decision(True)])
+    answer_provider = FakeProvider([Completion(Answer(status='answered', text=text,
+        citation_ids=(source.citation_id,)).model_dump_json(), ZERO)])
+    generator = GroundedGenerator(answer_provider)
+    jira = Tool(ToolResult())
+    provider = CapabilityAwareRoutingProvider()
+    result = SearchAgent(search, critic, generator, router=ModelRouter(provider), tools={
+        'jira': ToolSpec(jira, 'jira', 'Verified Jira records', ('lookup', 'count'), ('native_key',)),
+    }).run(SearchRequest(query=question, user=routing_scope.user, source_types=(platform,)),
+           single_pass=single_pass, context=routing_scope.context, guard=routing_scope.guard)
+    assert result.answer.status == 'answered'
+    assert [step.tool for step in result.trace.steps] == (
+        ['route', 'text_search', 'generate'] if single_pass else ['route', 'text_search', 'critic', 'generate'])
+    assert len(search.requests) == 1 and search.requests[0].query == question
+    assert search.requests[0].user is routing_scope.user and search.requests[0].source_types == (platform,)
+    generated_input = json.loads(answer_provider.calls[0][1])
+    assert generated_input['evidence'][0]['text'] == text
+    assert generated_input['evidence'][0]['citation_id'] == source.citation_id
+    assert result.answer.text == text
+    assert result.answer.citation_ids == (source.citation_id,) and result.sources == (source,)
+    assert not jira.requests and len(critic.requests) == (0 if single_pass else 1)
+    payload = provider.calls[0]
+    assert set(payload['tools']) == {'jira'}
+    assert payload['text_search']['complete_record_counts'] is False
+    assert payload['source_scope'] == payload['text_search']['source_scope'] == [platform]
+    serialized = json.dumps(payload)
+    assert routing_scope.context.identity.user_id not in serialized
+    assert routing_scope.context.identity.session_id not in serialized
+    assert source.chunk.doc_id not in serialized
+
+
+@pytest.mark.parametrize('single_pass', [True, False], ids=['fixed', 'adaptive'])
+def test_model_router_complete_count_without_matching_adapter_still_abstains(routing_scope, single_pass):
+    search, critic, generator = Search([]), Critic([]), Generator()
+    jira = Tool(ToolResult())
+    provider = CapabilityAwareRoutingProvider(requires_complete_count=True)
+    result = SearchAgent(search, critic, generator, router=ModelRouter(provider), tools={
+        'jira': ToolSpec(jira, 'jira', 'Verified Jira counts only', ('count',), ()),
+    }).run(SearchRequest(query='How many authorized Confluence pages exist in total?',
+                        user=routing_scope.user, source_types=('confluence',)),
+           single_pass=single_pass, context=routing_scope.context, guard=routing_scope.guard)
+    assert result.answer.status == 'insufficient_evidence' and result.trace.stop_reason == 'no_new_evidence'
+    assert result.sources == () and result.answer.citation_ids == ()
+    assert [step.tool for step in result.trace.steps] == ['route']
+    assert not search.requests and not jira.requests and not critic.requests and not generator.requests
+    assert provider.calls[0]['text_search']['available'] is True
+    assert provider.calls[0]['text_search']['complete_record_counts'] is False
 
 
 @pytest.mark.parametrize("call", [ToolCall(tool="missing", operation="lookup"),
@@ -654,9 +742,11 @@ def test_model_phases_receive_remaining_run_budget_and_scope_is_reset():
 
     result = SearchAgent(Search([(evidence(),)]), BudgetCritic(), BudgetGenerator(),
                          router=BudgetRouter(), clock=lambda: clock[0],
-                         config=AgentConfig(max_tokens=20, max_seconds=10, max_cost_usd=0.1)).run(request())
+                         # Leave room for context/schema reservation; this test
+                         # isolates propagation of each phase's actual usage.
+                         config=AgentConfig(max_tokens=20000, max_seconds=10, max_cost_usd=0.1)).run(request())
     assert result.trace.stop_reason == "sufficient"
-    assert [item[:2] for item in observed] == [(20, 10), (17, 9), (11, 7)]
+    assert [item[:2] for item in observed] == [(20000, 10), (19997, 9), (19991, 7)]
     assert [item[2] for item in observed] == pytest.approx([0.1, 0.09, 0.07])
     assert current_call_budget() is None
 
