@@ -45,9 +45,11 @@ def test_check_shows_effective_config_without_secrets_or_starting(tmp_path, monk
 
 def test_check_reports_the_reranker_the_app_will_load():
     hybrid = {'RAG_RETRIEVAL': 'hybrid'}
-    assert run_web.reranker_summary(hybrid) == (
+    assert run_web.reranker_summary(hybrid) is None  # Off by default.
+    on = {'RAG_RERANKER': 'bge-reranker-base'}
+    assert run_web.reranker_summary(hybrid | on) == (
         'bge-reranker-base (20 candidates, 4 windows, weight 0.7)')
     assert run_web.reranker_summary(hybrid | {'RAG_RERANKER': 'off'}) is None
-    assert run_web.reranker_summary({'RAG_RETRIEVAL': 'bm25'}) is None
+    assert run_web.reranker_summary({'RAG_RETRIEVAL': 'bm25'} | on) is None
     assert run_web.reranker_summary(hybrid | {'RAG_RERANKER': 'bge-reranker-v2-m3', 'RAG_RERANK_K': '50'}) == (
         'bge-reranker-v2-m3 (50 candidates, 4 windows, weight 0.7)')

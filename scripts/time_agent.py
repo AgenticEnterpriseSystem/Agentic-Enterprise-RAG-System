@@ -51,7 +51,57 @@ def question_ids(args, development):
     return chosen + others[: max(0, args.count - len(chosen))]
 
 
-def run_one(runtime, question, mode):
+def doc_id(citation_id):
+    """Citation IDs are `<doc_id>:<start>:<end>`."""
+    return citation_id.rsplit(":", 2)[0]
+
+
+def diagnose(response, expected):
+    """Where the reference documents were lost, from the run's own trace.
+
+    found: in any search's results; shown: in a context the critic or the answer step read;
+    cited: cited by the answer. Unanswered questions are labelled never_found (no reference
+    document was retrieved), not_shown (retrieved but left out of the critic's context) or
+    judged_insufficient (the critic saw at least one and still asked for more).
+    """
+    expected = set(expected)
+    steps = response.trace.steps
+    found = {doc_id(c) for s in steps if s.tool == "text_search" for c in s.evidence_ids} & expected
+    shown = {doc_id(c) for s in steps if s.tool in ("critic", "generate") for c in s.evidence_ids} & expected
+    cited = {doc_id(c) for c in response.answer.citation_ids} & expected
+    first = next((s for s in steps if s.tool == "text_search"), None)
+    critics = [{"round": s.round_number, "sufficient": s.critic.sufficient,
+                "confidence": s.critic.confidence, "reason": s.critic.reason,
+                "missing_facts": list(s.critic.missing_facts),
+                "suggested_queries": list(s.critic.suggested_queries),
+                "references_shown": len({doc_id(c) for c in s.evidence_ids} & expected),
+                "excerpts_shown": len(s.evidence_ids)}
+               for s in steps if s.tool == "critic" and s.critic is not None]
+    generate = [s for s in steps if s.tool == "generate"]
+    if response.answer.status == "answered":
+        label = "answered"
+    elif response.answer.status == "error" or response.trace.stop_reason == "error":
+        label = "error"
+    elif not found:
+        label = "never_found"
+    elif not shown:
+        label = "not_shown"
+    else:
+        label = "judged_insufficient"
+    return {
+        "diagnosis": label, "references": len(expected), "references_found": len(found),
+        "references_found_first_search": len({doc_id(c) for c in first.evidence_ids} & expected) if first else 0,
+        "references_shown": len(shown), "references_cited": len(cited),
+        "queries": [s.query for s in steps if s.tool == "text_search"],
+        "critic": critics,
+        # A generate step that used about 1,024 output tokens was probably cut off.
+        "answer_output_tokens": generate[-1].usage.output_tokens if generate else None,
+        "answer_text": response.answer.text,
+        "error_steps": [s.tool for s in steps if s.tool.endswith(":error") or s.tool.endswith(":budget")],
+    }
+
+
+def run_one(runtime, question, mode, expected=()):
     from src.api.runtime import RuntimeErrorResponse
     from src.contracts import QueryRequest
 
@@ -71,7 +121,7 @@ def run_one(runtime, question, mode):
             "model_seconds": sum(v for k, v in by_tool.items() if k in ("critic", "generate", "route")),
             "stop_reason": response.trace.stop_reason, "status": response.answer.status,
             "citations": len(response.answer.citation_ids),
-            "cost_usd": response.trace.usage.estimated_cost_usd}
+            "cost_usd": response.trace.usage.estimated_cost_usd, **diagnose(response, expected)}
 
 
 def describe(name, runs, limit, agent_limit):
@@ -106,6 +156,35 @@ def describe(name, runs, limit, agent_limit):
                  if stopped else f"a limit of {max(seconds):.0f}s would let all of them finish"))
     else:
         print(f"  -> all {len(done)} finished within {limit:.0f}s (longest {max(seconds):.0f}s)")
+    explain(done)
+
+
+def short(text, width=110):
+    return text if len(text) <= width else text[:width - 1] + "…"
+
+
+def explain(done):
+    """Why questions went unanswered, from where their reference documents were lost."""
+    labels = {}
+    for r in done:
+        labels[r["diagnosis"]] = labels.get(r["diagnosis"], 0) + 1
+    print(f"  Diagnosis: {labels}")
+    print("    never_found = no reference document in any search; not_shown = retrieved but not in "
+          "the critic's context; judged_insufficient = the critic saw one and asked for more")
+    for r in done:
+        if r["diagnosis"] == "answered":
+            continue
+        print(f"    {r['question_id']} [{r['question_type']}] {r['diagnosis']}: references found "
+              f"{r['references_found']}/{r['references']} (first search {r['references_found_first_search']}), "
+              f"shown {r['references_shown']}")
+        if r["critic"]:
+            last = r["critic"][-1]
+            print(f"      critic (round {last['round']}): {short(last['reason'])}")
+            if last["missing_facts"]:
+                print(f"      missing: {short('; '.join(last['missing_facts']))}")
+        if r["diagnosis"] == "error":
+            print(f"      error: {short(r['answer_text'])} | steps {r['error_steps']} | "
+                  f"answer output tokens {r['answer_output_tokens']}")
 
 
 def main():
@@ -170,7 +249,9 @@ def main():
     arms = {name: arms[name] for name in arms if name in wanted_arms}
     print(f"Reranker: {args.reranker}, {args.rerank_k} candidates, up to {args.rerank_max_windows} "
           f"windows each, on {settings.device}; model {settings.model}; cap ${args.budget_usd:g}; "
-          f"{len(wanted)} questions; agent limit {settings.max_seconds:.0f}s, app limit {limit:.0f}s",
+          f"{len(wanted)} questions; agent limit {settings.max_seconds:.0f}s, app limit {limit:.0f}s; "
+          f"top {settings.top_k}, {settings.max_rounds} rounds, {settings.max_context_chars} context "
+          f"characters, {settings.max_tokens} tokens",
           flush=True)
 
     results = {mode: {arm: [] for arm in arms} for mode in modes}
@@ -181,7 +262,9 @@ def main():
             # Alternate which variant runs first, so caching does not favour one of them.
             order = list(arms) if index % 2 else list(reversed(arms))
             for arm in order:
-                result = {"question_id": qid, **run_one(arms[arm], question, mode)}
+                q = questions[qid]
+                result = {"question_id": qid, "question_type": q["question_type"],
+                          **run_one(arms[arm], question, mode, q["expected_doc_ids"])}
                 results[mode][arm].append(result)
                 note = result.get("error") or (f"{result['searches']} searches, {result['stop_reason']}, "
                                                f"{result['status']}")
@@ -198,7 +281,8 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     (output / "results.json").write_text(json.dumps({
         "model": settings.model, "max_seconds": settings.max_seconds, "app_max_seconds": limit,
-        "device": settings.device,
+        "device": settings.device, "top_k": settings.top_k, "max_rounds": settings.max_rounds,
+        "max_context_chars": settings.max_context_chars, "max_tokens": settings.max_tokens,
         "reranker": reranked_retriever.manifest["reranker"],
         "rerank_config": reranked_retriever.manifest["config"], "results": results}, indent=2) + "\n")
     print(f"\nApp time limit per question: {limit:.0f}s (agent ran with {settings.max_seconds:.0f}s). "

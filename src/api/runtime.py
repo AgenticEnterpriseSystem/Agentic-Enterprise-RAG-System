@@ -40,12 +40,14 @@ class WebSettings(RetrievalSettings):
     max_context_chars: int = Field(default=24000, ge=128, le=48000)
     max_rounds: int = Field(default=2, ge=1, le=5)
     top_k: int = Field(default=5, ge=1, le=20)
-    # Cross-encoder reranker, on by default in hybrid mode (RAG_RERANKER=off turns it off).
-    # It scores each of the top RAG_RERANK_K candidates on up to RAG_RERANK_MAX_WINDOWS
+    # Optional cross-encoder reranker, off by default (RAG_RERANKER=bge-reranker-base turns it
+    # on). It scores each of the top RAG_RERANK_K candidates on up to RAG_RERANK_MAX_WINDOWS
     # windows of its whole document and blends its rank with the hybrid rank
-    # (RAG_RERANK_WEIGHT = reranker share). Defaults are the "fast" setting: 20 candidates,
-    # 4 windows, weight 0.7 (development Recall@10 0.744 vs 0.722 for the hybrid alone).
-    reranker: Literal['', 'bge-reranker-base', 'bge-reranker-v2-m3'] = 'bge-reranker-base'
+    # (RAG_RERANK_WEIGHT = reranker share). The other defaults are the tested "fast" setting:
+    # 20 candidates, 4 windows, weight 0.7. It raised development Recall@10 (0.722 to 0.744) but,
+    # in live agent runs on a laptop CPU, doubled the time without answering more questions.
+    reranker: Literal['', 'bge-reranker-base', 'bge-reranker-v2-m3'] = ''
+    # Without a reranker this has no effect: the app returns at most 20 results.
     rerank_k: int = Field(default=20, ge=1, le=200)
     rerank_weight: float = Field(default=0.7, ge=0, le=1)
     rerank_window_chars: int = Field(default=2000, ge=200, le=8000)

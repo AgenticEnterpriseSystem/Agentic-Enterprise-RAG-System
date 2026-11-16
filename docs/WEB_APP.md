@@ -160,28 +160,27 @@ Restart and refresh the browser. Select **Adaptive agent** for follow-up searche
 or **Fixed RAG** for one search. Inspect the answer's citations and source excerpts.
 Restarting resets the app's session cap, not actual provider spending.
 
-## Reranker
+## Optional reranker
 
-On by default in hybrid mode. A cross-encoder (`bge-reranker-base`) re-sorts each search's top
-20 candidates by reading up to four 2,000-character windows of each whole document, and its
-order is blended with the hybrid order (reranker share 0.7). On development questions this
-raised Recall@10 from 0.722 to 0.744, Recall@5 from 0.640 to 0.687 and nDCG@10 from 0.604 to
-0.661 (see [Evaluation](EVALUATION.md)). The defaults are:
+Off by default. A cross-encoder (`bge-reranker-base`) can re-sort each search's top 20
+candidates by reading up to four 2,000-character windows of each whole document, blending its
+order with the hybrid order (reranker share 0.7). On development questions this raised
+Recall@10 from 0.722 to 0.744, Recall@5 from 0.640 to 0.687 and nDCG@10 from 0.604 to 0.661
+(see [Evaluation](EVALUATION.md)). To turn it on:
 
 ```dotenv
 RAG_RERANKER=bge-reranker-base
-RAG_RERANK_K=20
-RAG_RERANK_MAX_WINDOWS=4
-RAG_RERANK_WEIGHT=0.7
 ```
 
-**Speed.** On a 16 GB laptop CPU it adds about 20 seconds **per search**. Fixed RAG searches
-once. The adaptive agent often searches four or five times: in a 10-question live run its
-median time per question was 115 s with the reranker and 44 s without, and 5 of 10 exceeded
-the old 120-second limit. The limit (`RAG_MAX_SECONDS`) is now 200 seconds to leave room;
-`scripts/time_agent.py` measures how long questions take on your computer. For faster agent
-answers on a laptop, use **Fixed RAG** or `RAG_RERANKER=off`. A GPU (`RAG_DEVICE=cuda`) removes
-most of the delay.
+The other settings already default to the tested values (`RAG_RERANK_K=20`,
+`RAG_RERANK_MAX_WINDOWS=4`, `RAG_RERANK_WEIGHT=0.7`).
+
+**Why it is off.** On a 16 GB laptop CPU it adds about 20-30 seconds **per search**, and the
+adaptive agent often searches four or five times. In live runs on 20 development questions the
+agent's median time per question was 126 s with it and 67 s without, and it answered 5 questions
+versus 8 without it (see [live agent runs](EVALUATION.md#live-agent-runs)). On a GPU
+(`RAG_DEVICE=cuda`) most of the delay goes away. The time limit per question
+(`RAG_MAX_SECONDS`) is 200 seconds.
 
 `RAG_RERANK_K` is how many candidates are re-sorted and `RAG_RERANK_MAX_WINDOWS` how many
 windows of each document are read. The first start downloads the model (about 1 GB for

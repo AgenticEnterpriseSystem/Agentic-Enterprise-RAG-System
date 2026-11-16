@@ -30,10 +30,10 @@ The retriever has two parts whose rankings are combined:
 - **Fusion.** Each part returns its top 50 documents. They are merged with weighted RRF
   (k=60, BM25+ weight 0.7, BGE weight 0.3), duplicate documents are removed, and the
   top results are passed on.
-- **Reranker (web app default).** `BAAI/bge-reranker-base` re-scores the fused top 20 on up
-  to four 2,000-character windows of each whole document (title on every window, best
-  window counts) and its rank is blended with the fused rank by weighted RRF (reranker share
-  0.7). Evaluation scripts run without it unless asked; `RAG_RERANKER=off` turns it off.
+- **Optional reranker (off by default).** `BAAI/bge-reranker-base` can re-score the fused top
+  20 on up to four 2,000-character windows of each whole document (title on every window, best
+  window counts), blending its rank with the fused rank by weighted RRF (reranker share 0.7).
+  `RAG_RERANKER=bge-reranker-base` turns it on.
 
 We did not train or fine-tune any model. BGE-base is used as published; BM25+ is a
 classic statistical method with no learned weights. The team's work is the index
@@ -103,7 +103,7 @@ Questions are in English. Results are search candidates to be read, not answers.
 | **Hybrid, BM25+ weight 0.7 (this model)** | **0.641** | **0.722** | **0.760** | **0.604** |
 | Hybrid 0.7 + `bge-reranker-base`, one short section, reranker order only (rejected) | 0.551 | 0.637 | 0.716 | 0.520 |
 | Hybrid 0.7 + `bge-reranker-v2-m3`, one short section, reranker order only (rejected) | 0.602 | 0.669 | 0.715 | 0.560 |
-| **Hybrid 0.7 + `bge-reranker-base`, whole-document windows, 20 candidates, blend 0.7 (web app)** | **0.687** | **0.744** | 0.760 | **0.661** |
+| **Hybrid 0.7 + `bge-reranker-base`, whole-document windows, 20 candidates, blend 0.7 (optional)** | **0.687** | **0.744** | 0.760 | **0.661** |
 
 - Versus BM25+ alone: Recall@10 **+0.029** (95% CI +0.005 to +0.055; 19 questions better,
   7 worse). Ranking quality near the top (nDCG@10) is unchanged.
@@ -163,7 +163,7 @@ measured**; see the [system card](system_card.md) and [evaluation](EVALUATION.md
 | On average 28% of a question's reference documents are missed at top 10, 24% at top 20 | Show every source excerpt so users can check; answers report "insufficient evidence" when the critic finds gaps |
 | No reliable dates; can't pick the latest version | Date filters exclude undated documents instead of guessing; don't rely on it for "latest" questions |
 | BGE reads at most 512 tokens per passage; long documents are split | Titles added to every passage; BM25+ scores the whole document; a document's best passage is used |
-| The reranker adds about 20 s per search on a laptop CPU; agent questions took a median 115 s in a 10-question live run | Time limit raised from 120 s to 200 s; Fixed RAG, a GPU, or `RAG_RERANKER=off` are faster |
+| The reranker's retrieval gain did not show in live agent runs: on a laptop CPU it doubled agent time (median 126 s vs 67 s) and answered 5 of 20 questions vs 8 | Off by default; available for GPU use. Time limit raised from 120 s to 200 s |
 | Reranker settings (20 candidates, 4 windows, weight 0.7) were chosen on development only | Not yet checked on calibration; final split kept untouched |
 | Weight 0.7 was tuned on development questions | Confirmed once on calibration; final split kept untouched for the end-of-project check |
 | Measured on a synthetic company only | Not for real data without re-evaluation; documented as out of scope above |
@@ -180,7 +180,7 @@ measured**; see the [system card](system_card.md) and [evaluation](EVALUATION.md
 | 2026-10 | Live hybrid measured; BM25 weight 0.7 chosen and confirmed on calibration; rerankers rejected |
 | 2026-10 | Arctic-embed-l-v2.0 tested; BGE-base kept |
 | 2026-10-24 | First model card draft |
-| 2026-11 | Whole-document reranker with blending tested; `bge-reranker-base` (fast setting) made the web app default; path headers tested and not adopted |
+| 2026-11 | Whole-document reranker with blending tested; kept optional after live agent runs; path headers tested and not adopted |
 
 **Known issues:** weaker results on reworded questions; no reliable dates; full-corpus
 Docker operation not verified; CPU latency not measured; the Colab and local corpus file

@@ -298,6 +298,34 @@ cause. Distinguish retrieval misses, passage omission, generation errors and bad
 abstention. Selected failures do not estimate an overall failure rate. Test fixes
 on the same development set and retain real-conflict/unanswerable counterexamples.
 
+## Live agent runs
+
+`scripts/time_agent.py` runs the web app's adaptive agent (live mode, `claude-haiku-4-5`) on
+development questions and records each question's time, searches, how it stopped and its cost.
+Four runs on the same 20 questions (the 10 of the 2026-10-21 agent record plus 10 sampled with
+seed 5980), on a 16 GB laptop CPU, with the agent allowed 300 s so every question ran to its
+natural end (2026-11-16):
+
+| Setup | Answered | Errors | Median time | Slowest | Over 200 s | Cost |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| **No reranker, top 5 (app default)** | **8** | 1 | **67 s** | 93 s | 0 | **$0.33** |
+| No reranker, top 10 (36,000 context characters, 32,000 tokens) | 6 | 2 | 73 s | 147 s | 0 | $0.59 |
+| `bge-reranker-base` (20 candidates, 4 windows, weight 0.7), top 5 | 5 | 0 | 126 s | 206 s | 1 | $0.36 |
+| `bge-reranker-base`, top 10 | 6 | 0 | 138 s | 243 s | 4 | $0.61 |
+
+- Searching took 85-90% of the time: about 12-16 s per search without the reranker and 30-48 s
+  with it. Model calls took 6-27 s per question.
+- 11 questions were answered by no setup and 4 by every setup (one error aside). The other 5
+  changed between runs without a consistent pattern, so the answered counts (5-8 of 20) are
+  within the critic's run-to-run variation. Time and cost differences are not.
+- The reranker's retrieval gain (Recall@5 0.640 to 0.687 on 300 questions) is too small to
+  show on 20 questions, and "answered" means the critic accepted the evidence, not that the
+  answer is correct. Neither the reranker nor 10 results showed a benefit here, so the app
+  keeps no reranker and 5 results, with a 200 s limit per question.
+- `time_agent.py` now also records, per question, whether reference documents were retrieved,
+  shown to the critic and cited, the critic's reasons and missing facts, and error details.
+  Unanswered questions are labelled `never_found`, `not_shown` or `judged_insufficient`.
+
 ## Answer evaluation: first baseline
 
 [Answer evaluation](ANSWER_EVALUATION.md) runs the rubric above with an LLM judge.

@@ -42,10 +42,10 @@ def test_optional_reranker_settings_and_attachment(monkeypatch):
     for key in WebSettings.model_fields:
         monkeypatch.delenv('RAG_' + key.upper(), raising=False)
     monkeypatch.setenv('RAG_MODE', 'retrieval')
-    config = WebSettings.from_env()  # On by default, at the fast setting.
-    assert config.max_seconds == 200  # Room for the reranker on a laptop CPU.
+    config = WebSettings.from_env()  # Off by default; turning it on uses the fast setting.
+    assert config.max_seconds == 200
     assert (config.reranker, config.rerank_k, config.rerank_max_windows, config.rerank_weight,
-            config.rerank_window_chars) == ('bge-reranker-base', 20, 4, 0.7, 2000)
+            config.rerank_window_chars) == ('', 20, 4, 0.7, 2000)
     assert RetrievalSettings().rerank_k == 50  # Evaluation defaults are unchanged.
     for off in ('off', 'OFF', 'none'):
         monkeypatch.setenv('RAG_RERANKER', off)
@@ -344,12 +344,14 @@ def test_hybrid_manifest_failures_and_shared_corpus(tmp_path, monkeypatch):
     assert hybrid.bm25.corpus is corpus
 
 
-def test_reranker_default_applies_only_to_hybrid(monkeypatch):
+def test_reranker_is_off_by_default_and_hybrid_only(monkeypatch):
     import src.api.runtime as runtime_module
     attached = []
     monkeypatch.setattr(runtime_module, 'load_configured_retriever', lambda s: 'retriever')
     monkeypatch.setattr(runtime_module, 'attach_reranker', lambda r, s: attached.append(s.reranker) or 'reranked')
-    assert load_retriever(WebSettings(mode='retrieval', retrieval='bm25')) == 'retriever'
+    assert load_retriever(WebSettings(mode='retrieval')) == 'retriever'  # Off by default.
     assert load_retriever(WebSettings(mode='retrieval', reranker='off')) == 'retriever'
-    assert load_retriever(WebSettings(mode='retrieval')) == 'reranked'
-    assert attached == ['bge-reranker-base']
+    on = 'bge-reranker-base'
+    assert load_retriever(WebSettings(mode='retrieval', retrieval='bm25', reranker=on)) == 'retriever'
+    assert load_retriever(WebSettings(mode='retrieval', reranker=on)) == 'reranked'
+    assert attached == [on]

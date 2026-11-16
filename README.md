@@ -122,9 +122,9 @@ What this means:
   weight on keyword search is the best setting so far. Cross-encoder rerankers first made
   results worse because they saw only one short section of long documents (see
   [retrieval results](docs/FULL_CORPUS.md#hybrid-search-and-reranking)). Reading windows
-  across the whole document and blending with the hybrid order fixed this: the web app now
-  uses `bge-reranker-base` by default (development Recall@10 0.744 vs 0.722; see
-  [web app](docs/WEB_APP.md#reranker)).
+  across the whole document and blending with the hybrid order fixed this (development
+  Recall@10 0.744 vs 0.722), but in live agent runs on a laptop CPU it doubled the time without
+  answering more questions, so it stays optional (see [web app](docs/WEB_APP.md#optional-reranker)).
 
 Full results by question type: [docs/FULL_CORPUS.md](docs/FULL_CORPUS.md).
 
