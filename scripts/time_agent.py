@@ -48,7 +48,7 @@ def question_ids(args, development):
     chosen = [case["question_id"] for case in record["experiments"][0]["cases"]][: args.count]
     others = sorted(set(development) - set(chosen))
     random.Random(5980).shuffle(others)
-    return chosen + others[: max(0, args.count - len(chosen))]
+    return (chosen + others[: max(0, args.count - len(chosen))])[args.start:]
 
 
 def doc_id(citation_id):
@@ -239,6 +239,9 @@ def main():
     parser.add_argument("--question-ids", nargs="+", help="Development question IDs (default: the 2026-10-21 record)")
     parser.add_argument("--count", type=int, default=10,
                         help="How many questions (the record's 10, then sampled development questions)")
+    parser.add_argument("--start", type=int, default=0,
+                        help="Skip this many of the selected questions (e.g. --count 120 --start 70 "
+                             "runs only the 50 after the first 70)")
     parser.add_argument("--arms", default="no reranker,reranker",
                         help='Comma-separated variants: "no reranker", "reranker"')
     parser.add_argument("--max-seconds", type=float,
