@@ -26,6 +26,7 @@ import json
 import os
 import random
 import statistics
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -83,6 +84,8 @@ def diagnose(response, expected):
         label = "answered"
     elif response.answer.status == "error" or response.trace.stop_reason == "error":
         label = "error"
+    elif response.trace.stop_reason == "clarification":
+        label = "clarification"  # The agent asked the user to clarify (jane/dev's agent).
     elif not expected:
         label = "no_answer_expected"
     elif not found:
@@ -145,6 +148,7 @@ def run_one(runtime, question, mode, expected=()):
         tool = step.tool.split(":")[0]
         by_tool[tool] = by_tool.get(tool, 0) + step.elapsed_ms / 1000
     result = {"seconds": seconds, "searches": sum(s.tool == "text_search" for s in steps),
+              "read_more": sum(s.tool == "read_more" for s in steps),
             "search_seconds": by_tool.get("text_search", 0.0),
             "model_seconds": sum(v for k, v in by_tool.items() if k in ("critic", "generate", "route")),
             "stop_reason": response.trace.stop_reason, "status": response.answer.status,
@@ -199,10 +203,13 @@ def explain(done):
     for r in done:
         labels[r["diagnosis"]] = labels.get(r["diagnosis"], 0) + 1
     print(f"  Diagnosis: {labels}")
-    print("    no_answer_expected = the question has no reference documents (insufficient is right); "
+    print("    clarification = the agent asked the user to clarify (jane/dev); "
+          "no_answer_expected = the question has no reference documents (insufficient is right); "
           "never_found = no reference document in any search; not_shown = retrieved but not in "
           "the critic's context; judged_insufficient = the critic saw one and asked for more")
     names = ["answered", "no_answer_expected", "never_found", "not_shown", "judged_insufficient", "error"]
+    if any(r["diagnosis"] == "clarification" for r in done):
+        names.insert(1, "clarification")
     print(f"\n    {'question type':26} {'n':>3} " + " ".join(f"{n[:12]:>12}" for n in names))
     for qtype in sorted({r["question_type"] for r in done}):
         group = [r for r in done if r["question_type"] == qtype]
@@ -264,22 +271,29 @@ def main():
     os.environ.update(build_environment(ROOT, os.environ, "hybrid"))
     os.environ["RAG_MODE"] = "live"
     os.environ.pop("RAG_RERANKER", None)  # The run itself turns the reranker on and off.
-    from src.api.runtime import (MAX_OUTPUT_TOKENS, AnthropicConfig, AnthropicProvider, Runtime,
-                                 WebSettings, attach_reranker, load_retriever)
+    import src.api.runtime as runtime_module
+    from src.api.runtime import AnthropicConfig, AnthropicProvider, Runtime, WebSettings, load_retriever
     from src.evaluation.run_retrieval import load_questions
 
+    # The same script runs on other branches' runtimes (e.g. jane/dev, which has no reranker
+    # option, its own output limits and a "clarification" ending); features are detected.
+    attach_reranker = getattr(runtime_module, "attach_reranker", None)
+    fields = WebSettings.model_fields
+    if "reranker" in wanted_arms and attach_reranker is None:
+        parser.error('This branch\'s runtime has no reranker option; use --arms "no reranker"')
     app_settings = WebSettings.from_env()
     limit = app_settings.max_seconds  # The web app's limit, which results are judged against.
     settings = WebSettings(**{**app_settings.model_dump(), "budget_usd": args.budget_usd,
                               "max_seconds": args.max_seconds or limit,
-                              "reranker": ""})  # The "no reranker" arm.
+                              **({"reranker": ""} if "reranker" in fields else {})})  # No reranker.
     if not (settings.allow_paid and settings.model and os.environ.get("ANTHROPIC_API_KEY")
             and settings.input_price > 0 and settings.output_price > 0 and settings.demo_access):
         parser.error("Needs live-mode settings in .env: RAG_ALLOW_PAID=true, RAG_MODEL, "
                      "ANTHROPIC_API_KEY, RAG_INPUT_PRICE, RAG_OUTPUT_PRICE, RAG_DEMO_ACCESS=true")
-    reranked_settings = WebSettings(**{**settings.model_dump(), "reranker": args.reranker,
-                                       "rerank_k": args.rerank_k,
-                                       "rerank_max_windows": args.rerank_max_windows})
+    reranked_settings = (WebSettings(**{**settings.model_dump(), "reranker": args.reranker,
+                                        "rerank_k": args.rerank_k,
+                                        "rerank_max_windows": args.rerank_max_windows})
+                         if "reranker" in wanted_arms else None)
     questions = {q["question_id"]: q for q in load_questions(
         ROOT / ".cache/corpus/questions.jsonl", ROOT / "evaluation/splits.json", "development")}
     wanted = question_ids(args, questions)
@@ -287,23 +301,32 @@ def main():
     if missing:
         parser.error(f"Not development questions: {missing}")
 
-    print("Loading the indexes and the reranker (a few minutes)...", flush=True)
+    print("Loading the indexes" + (" and the reranker" if reranked_settings else "")
+          + " (a few minutes)...", flush=True)
     plain_retriever = load_retriever(settings)
-    reranked_retriever = attach_reranker(plain_retriever, reranked_settings)
+    reranked_retriever = attach_reranker(plain_retriever, reranked_settings) if reranked_settings else None
+    # Output tokens per model call: this branch's constant, or the setting other branches use.
+    max_output = getattr(runtime_module, "MAX_OUTPUT_TOKENS", None) or getattr(
+        settings, "model_max_output_tokens", 1024)
     provider = AnthropicProvider(AnthropicConfig(
         model=settings.model, allow_paid=True, budget_usd=args.budget_usd,
         input_usd_per_million=settings.input_price, output_usd_per_million=settings.output_price,
-        max_output_tokens=MAX_OUTPUT_TOKENS, timeout_seconds=min(30, settings.max_seconds)))
-    arms = {"no reranker": Runtime(settings, plain_retriever, provider),
-            "reranker": Runtime(reranked_settings, reranked_retriever, provider)}
+        max_output_tokens=max_output, timeout_seconds=min(30, settings.max_seconds)))
+    arms = {"no reranker": Runtime(settings, plain_retriever, provider)}
+    if reranked_settings:
+        arms["reranker"] = Runtime(reranked_settings, reranked_retriever, provider)
     arms = {name: arms[name] for name in arms if name in wanted_arms}
-    print(f"Reranker: {args.reranker}, {args.rerank_k} candidates, up to {args.rerank_max_windows} "
-          f"windows each, on {settings.device}; model {settings.model}; cap ${args.budget_usd:g}; "
+    passage_chars = getattr(settings, "passage_chars", None)
+    extras = {name: getattr(settings, name) for name in (
+        "evidence_doc_limit", "critic_max_output_tokens") if name in fields}
+    print((f"Reranker: {args.reranker}, {args.rerank_k} candidates, up to {args.rerank_max_windows} "
+           "windows each" if reranked_settings else "No reranker")
+          + f", on {settings.device}; model {settings.model}; cap ${args.budget_usd:g}; "
           f"{len(wanted)} questions; agent limit {settings.max_seconds:.0f}s, app limit {limit:.0f}s; "
           f"top {settings.top_k}, {settings.max_rounds} rounds, {settings.max_context_chars} context "
-          f"characters, {settings.max_tokens} tokens, excerpts "
-          f"{settings.passage_chars or 'default (3,000 BM25+ / BGE passage)'}",
-          flush=True)
+          f"characters, {settings.max_tokens} tokens, {max_output} output tokens per call, excerpts "
+          f"{passage_chars or 'default (3,000 BM25+ / BGE passage)'}"
+          + "".join(f", {k} {v}" for k, v in extras.items()), flush=True)
 
     results = {mode: {arm: [] for arm in arms} for mode in modes}
     stopped = False
@@ -334,9 +357,12 @@ def main():
         "model": settings.model, "max_seconds": settings.max_seconds, "app_max_seconds": limit,
         "device": settings.device, "top_k": settings.top_k, "max_rounds": settings.max_rounds,
         "max_context_chars": settings.max_context_chars, "max_tokens": settings.max_tokens,
-        "passage_chars": settings.passage_chars,
-        "reranker": reranked_retriever.manifest["reranker"],
-        "rerank_config": reranked_retriever.manifest["config"], "results": results}, indent=2) + "\n")
+        "passage_chars": passage_chars, "max_output_tokens": max_output, **extras,
+        "code_commit": subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT,
+                                      capture_output=True, text=True).stdout.strip() or None,
+        "reranker": reranked_retriever.manifest["reranker"] if reranked_retriever else None,
+        "rerank_config": (reranked_retriever or plain_retriever).manifest.get("config"),
+        "results": results}, indent=2) + "\n")
     print(f"\nApp time limit per question: {limit:.0f}s (agent ran with {settings.max_seconds:.0f}s). "
           f"Results: {output / 'results.json'}")
     for mode in modes:
