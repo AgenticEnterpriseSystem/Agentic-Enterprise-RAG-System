@@ -4,6 +4,10 @@ This app helps users find answers in a fictional company's documents. You sign
 in, ask a question, and see an answer with links to the documents used. The app
 only searches documents your account is allowed to read.
 
+## Demo
+
+[Watch the demo video](https://youtu.be/5jo-Nh9HjOg)
+
 **RAG** means *retrieval-augmented generation*: find relevant information first,
 then give it to a language model to help answer the question.
 
