@@ -56,6 +56,19 @@ checks and seven browser checks**. These sets overlap, so do not add them
 together. Three separate permission checks, with the local embedding model and
 full indexes loaded, each produced the same allowed set of **511,958 documents**.
 
+The November 16 demo recording found another permission-query problem after a
+second full-access account was added. PostgreSQL scanned and sorted the large
+grant table before returning its first page, then hit the five-second statement
+limit. That attempt stopped **before the agent or model started**.
+
+The query now limits each ordered grant branch before combining the results.
+Authorization rules and fresh permission checks are unchanged. **124 policy and
+PostgreSQL tests passed**, including duplicate grants, group requirements and
+revocation between pages. On the local database, the patched first page took
+about 0.10 seconds. Full permission resolution then passed for both Jane and
+Hira, with the same 511,958-document allowed set. This repair is in `jane/dev`;
+a successful recording of the updated app is still pending.
+
 ## What still needs work?
 
 - **Choosing the right source:** a tested answer gave **April 7, 2026 at
@@ -72,8 +85,13 @@ full indexes loaded, each produced the same allowed set of **511,958 documents**
   contains nine outcomes and four decisions, with no completed human labels.
 - **Fair comparisons:** no controlled result establishes that the current
   adaptive agent beats fixed RAG, or that an eight-document limit beats five.
-- **Independent setup and delivery:** a fresh teammate installation, reviewed
-  GitHub delivery and the final demo/research deliverables remain open. A check
+- **Dense-search latency:** the next demo attempt passed permissions, but two
+  dense searches took about 95 and 79 seconds. HTTP timed out at 180 seconds;
+  the worker later stopped on its time budget. It did not reach the critic or
+  final answer generator. The cause still needs diagnosis, and this attempt is
+  not a successful end-to-end demo.
+- **Independent setup and delivery:** a fresh teammate installation, merge
+  review and the final demo/research deliverables remain open. A check
   on the original developer's machine does not verify a teammate's installation.
 
 The implementation plan has **19 of 23 tickets accepted**. The remaining
