@@ -90,6 +90,11 @@ a successful recording of the updated app is still pending.
   the worker later stopped on its time budget. It did not reach the critic or
   final answer generator. The cause still needs diagnosis, and this attempt is
   not a successful end-to-end demo.
+  The Compose app now uses one thread per native math-library pool to reduce
+  contention. A separate unpaid all-platform hybrid check took 59 seconds;
+  a GitHub-filtered check took 6.5 seconds and returned the expected upload-limit
+  passage. Those checks included permissions and real retrieval, with external
+  generation disabled. They do not replace a successful live agent recording.
 - **Independent setup and delivery:** a fresh teammate installation, merge
   review and the final demo/research deliverables remain open. A check
   on the original developer's machine does not verify a teammate's installation.
@@ -112,6 +117,7 @@ review and release work. A local runtime repair does not complete those gates.
 | Agent time / query HTTP wait | 120 / 180 seconds |
 | Question / process cost cap | USD 0.10 / USD 0.50 |
 | Database idle transaction / statement / lock limit | 15 / 5 / 2 seconds |
+| Compose app native math-library threads | 1 per pool; separate operator experiments keep their own settings |
 
 The token and cost limits can prevent a stage from using its full output limit.
 The process spending counter resets when the server restarts. It is not an

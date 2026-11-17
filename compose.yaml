@@ -121,6 +121,11 @@ services:
         condition: service_completed_successfully
     environment:
       <<: *runtime-db
+      # Keep independent Torch, FAISS and BLAS pools from competing for the
+      # app's two-CPU quota during embedding and exact dense scanning.
+      OMP_NUM_THREADS: 1
+      OPENBLAS_NUM_THREADS: 1
+      MKL_NUM_THREADS: 1
       RAG_MODE: ${RAG_MODE:-retrieval}
       RAG_DEMO_ACCESS: "false"
       RAG_AUTH_MODE: local

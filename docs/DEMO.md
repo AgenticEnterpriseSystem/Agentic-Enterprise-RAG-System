@@ -27,7 +27,12 @@ example URL or call a prepared script a completed demo.
    it **“Waiting shortened — actual request: [measured duration]”**. Do not replace
    the result, join different requests into one, or present a replay as a new run.
 
-The demo should use the actual **Adaptive agent** interface. Do not promise two
+Select **GitHub** in **Source platform** and use **Adaptive agent**. The supporting
+upload-limit document is a GitHub record. The filter narrows search within the
+account's permitted documents; it does not grant access. This focused demo does
+not establish performance across every platform.
+
+Do not promise two
 critic rounds, a reformulation or `read_more` before seeing the trace: those are
 possible steps, not steps every request must take.
 
@@ -44,13 +49,15 @@ The times below are positions in the edited video, not a latency claim.
 
 | Time | Show | Action / point |
 | --- | --- | --- |
-| 0–12 s | Sign-in screen, then signed-in Search | Password entry stays off camera. Explain explicit account/document permissions. |
-| 12–25 s | **Adaptive agent**, exact question, **Ask question** | Submit once. Explain keyword plus semantic search. |
-| 25–38 s | Real loading state, with a labeled wait cut if needed | Explain the critic and its possible follow-up actions. |
-| 38–55 s | Actual answer, citation and matching source card | Read the central result; open a real citation and show the supporting passage. |
-| 55–65 s | Recorded search steps and **Evidence context** | Show what actually ran, the selected evidence and any exclusions. |
-| 65–81 s | **Observability**, same request | Match its Request ID to Search; show stage timings and reported usage. |
-| 81–90 s | Sign out; final title card | Clarify that evaluation is separate and answer accuracy is not guaranteed. |
+| 0–8 s | Sign-in screen, then signed-in Search | Password entry stays off camera. Explain explicit document grants. |
+| 8–18 s | **GitHub**, **Adaptive agent**, exact question | Submit once. Explain keyword plus semantic search. |
+| 18–26 s | Real loading state, with a labeled wait cut if needed | Explain the critic and its possible follow-up actions. |
+| 26–42 s | Actual answer | Read the central result and its supporting citations. |
+| 42–55 s | Matching source card | Open a real citation and inspect its passage. |
+| 55–65 s | Recorded search steps | Show what actually ran. |
+| 65–73 s | **Evidence context** | Show selected evidence and exclusions. |
+| 73–85 s | **Observability**, same request | Match its Request ID to Search; show timings and reported usage. |
+| 85–90 s | Sign out | End the real session. |
 
 If the real outcome is a clarification, error or missing citation, show it
 honestly and adjust the narration. Do not label a clarification as a generated
@@ -58,7 +65,7 @@ final answer. A failed take is evidence to diagnose; it does not authorize anoth
 paid attempt. A successful end-to-end answer clip requires an actual generated
 answer and working citation/source display.
 
-### Narration: 170 words
+### Suggested narration
 
 Read naturally and pause while pointing at the screen. The wait-shortening
 sentence applies only when the wait really was edited. If another question is
@@ -66,7 +73,7 @@ approved, replace “upload limits” with its actual topic.
 
 > This is our search app for a fictional company’s documents. I sign in with a real account. An operator grants documents explicitly; a role name does not grant access.
 >
-> I choose Adaptive agent and ask about upload limits. Hybrid search combines keyword and semantic matches within my permitted documents.
+> I select GitHub and Adaptive agent, then ask about upload limits. Hybrid search combines keyword and semantic matches within my permitted GitHub documents.
 >
 > The critic checks for missing facts. It can read more or reformulate the search, for up to two rounds. The waiting time here is shortened.
 >
