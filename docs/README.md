@@ -16,7 +16,6 @@ New to the project? Read [Setup](WEB_APP.md) to run the app, or
 | [Full-corpus guide](FULL_CORPUS.md) | Prepare the complete dataset and understand earlier retrieval experiments |
 | [Evaluation](EVALUATION.md) | Test search, the agent and answers without mixing their results |
 | [Human-versus-LLM answer review](ANSWER_REVIEW.md) | Score saved answers yourself, then compare with the machine grades |
-| [Demo script](DEMO.md) | Show the end-to-end flow in 90 seconds or a longer final presentation |
 | [Historical answer baseline](ANSWER_EVALUATION.md) | Understand the older BM25/GPT-OSS answers and same-model judge |
 | [System card](system_card.md) | Intended use, important limits, data flows and safety checks |
 | [Milestone review](MILESTONE2.md) | Review milestone evidence and distinguish old results from the current app |

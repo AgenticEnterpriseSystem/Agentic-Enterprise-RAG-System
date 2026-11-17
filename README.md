@@ -84,8 +84,6 @@ Earlier retrieval scores are explained in
 
 ## Where to read next
 
-For the final presentation, use the [demo script and recording outline](docs/DEMO.md).
-
 | I want to… | Read this |
 | --- | --- |
 | Install and use the app | [Setup](docs/WEB_APP.md) |
