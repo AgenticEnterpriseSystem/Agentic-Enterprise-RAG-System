@@ -84,6 +84,37 @@ quality result.
 Earlier retrieval scores are explained in
 [retrieval results](docs/FULL_CORPUS.md).
 
+## Milestone 4 Updates:
+
+- **Release candidate:** the web interface, FastAPI backend, PostgreSQL storage, login,
+  per-document permissions, hybrid search, Jira tools, and Fixed and adaptive RAG, packaged
+  with Docker Compose (`scripts/local_stack.py`). Setup: [docs/WEB_APP.md](docs/WEB_APP.md);
+  a demo video is linked [above](#demo).
+- **Adaptive agent:** the critic checks each fact the question asks for (supported, missing,
+  conflicting or ambiguous). The agent can read more of a found document, search again, or
+  ask the user to clarify, using up to eight documents of evidence.
+- **Retrieval results** (300 development questions, 282 scored; calibration checked once on 94):
+
+  | Method | Recall@10 | nDCG@10 | Calibration Recall@10 |
+  | --- | ---: | ---: | ---: |
+  | BM25+ | 0.692 | 0.604 | 0.712 |
+  | Dense (BGE-base, title on every passage) | 0.487 | 0.416 | 0.487 |
+  | **Hybrid (BM25+ 0.7, BGE-base 0.3, RRF)** | **0.722** | **0.604** | **0.767** |
+
+- **Latency and cost** (adaptive mode, 25 development questions, 16 GB laptop CPU): median
+  28.6 s per question (mean 30.0 s), about $0.013 per question.
+- **Live answer check** (same 25 questions, informal comparison with the reference answers):
+  17 answered: 7 correct, 2 partly correct, 8 wrong; 7 asked the user to clarify. Every
+  answer that cited a reference document was correct or partly correct; the wrong answers
+  came from similar documents when search missed the right one.
+- **Further experiments on `hira/dev`** (not in this release): longer evidence excerpts
+  (6,000 characters) and two agent fixes raised answered questions from 25 to 34 of 70, and
+  gave 7 correct and only 2 wrong answers on the 25 questions. Whole-document rerankers and
+  path headers were tested and not adopted. Details:
+  [docs/HIRA_DEV_EXPERIMENTS.md](docs/HIRA_DEV_EXPERIMENTS.md).
+- **Next:** combine the checklist critic with longer excerpts and a rule that answers must
+  cite a matching source; validate critic decisions and answer grades with human review.
+
 <a id="documentation"></a>
 
 ## Where to read next
