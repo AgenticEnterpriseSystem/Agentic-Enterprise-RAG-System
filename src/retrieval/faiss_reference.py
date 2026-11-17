@@ -2,20 +2,25 @@
 
 The global IndexFlatIP dispatch depends on the *whole* database size. Searching
 arbitrary small indexes therefore changes its numerical kernel. Reproduce the
-global database-parallel partitions and SGEMM tile shapes, then recover every
-physical row's native score; never truncate passages or reuse candidate ranking.
+global database-parallel partitions, OpenMP context and SGEMM tile shapes, then
+recover every physical row's native score; never truncate passages or reuse
+candidate ranking.
 
 Pinned algorithm: https://github.com/facebookresearch/faiss/blob/v1.15.1/faiss/utils/distances.cpp
 (`should_use_db_parallel`, `knn_db_parallel_impl`, `Run_search_inner_product`).
 Each input query represents a separate legacy nq=1 search, never a batched nq>1
 baseline. Run in the isolated reference process: FAISS dispatch cvars are global.
 BLAS threading is left exactly as configured by that process, never overridden.
+The Linux wheel's GNU OpenMP runtime keeps database-parallel tile searches in
+an active team, matching the native caller's suppression of nested BLAS teams.
 """
 
 from contextlib import contextmanager
 from dataclasses import dataclass
 import os
+import sys
 import threading
+from functools import lru_cache
 
 
 class UnsupportedReferenceConfiguration(ValueError):
@@ -103,6 +108,57 @@ def _ranges(total_vectors, configuration):
             yield start, min(start + configuration.database_bs, end)
 
 
+@lru_cache(maxsize=1)
+def _linux_openmp():
+    """Use the pinned wheel's own GNU OpenMP runtime, not a second runtime."""
+    import ctypes
+    import importlib
+    import faiss
+
+    module = importlib.import_module(faiss.IndexFlatIP.__module__)
+    native = getattr(module, "_" + module.__name__.rsplit(".", 1)[-1])
+    library = ctypes.CDLL(native.__file__)
+    callback_type = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
+    try:
+        parallel = library.GOMP_parallel
+        thread_number = library.omp_get_thread_num
+    except AttributeError as error:
+        raise UnsupportedReferenceConfiguration(
+            "Pinned Linux reference requires the FAISS wheel's GNU OpenMP runtime"
+        ) from error
+    parallel.argtypes = [callback_type, ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint]
+    parallel.restype = None
+    thread_number.argtypes = []
+    thread_number.restype = ctypes.c_int
+    return library, callback_type, parallel, thread_number
+
+
+def _run_in_native_context(operation, configuration):
+    # Linux FAISS wheels link OpenMP OpenBLAS. A global database-parallel
+    # search calls SGEMM *inside* an active OpenMP team, which suppresses nested
+    # BLAS parallelism. Calling the same tile outside that team can use a
+    # different reduction, especially on remainder tiles. Preserve that context
+    # without changing BLAS thread counts or the legacy baseline's settings.
+    if not configuration.database_parallel or sys.platform != "linux":
+        return operation()
+    library, callback_type, parallel, thread_number = _linux_openmp()
+    result, errors = [], []
+
+    def worker(_):
+        if thread_number() == 0:
+            try:
+                result.append(operation())
+            except BaseException as error:
+                # Exceptions cannot cross a ctypes callback boundary.
+                errors.append(error)
+
+    callback = callback_type(worker)
+    parallel(callback, None, configuration.threads, 0)
+    if errors:
+        raise errors[0]
+    return result[0]
+
+
 @contextmanager
 def _native_dispatch(faiss, configuration):
     """Restore before yielding a tile, including on an injected native failure."""
@@ -161,7 +217,8 @@ def iter_scores(query_vectors, *, total_vectors: int, dimension: int, read_rows,
             index = faiss.IndexFlatIP(dimension)
             index.add(rows)
             for query_index, query in enumerate(queries):
-                scores, positions = index.search(query.reshape(1, -1), len(rows))
+                scores, positions = _run_in_native_context(
+                    lambda: index.search(query.reshape(1, -1), len(rows)), configuration)
                 ids = positions[0]
                 if (ids.shape != (len(rows),) or np.any(ids < 0) or np.any(ids >= len(rows))
                         or len(np.unique(ids)) != len(rows) or not np.isfinite(scores).all()):

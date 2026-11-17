@@ -530,6 +530,36 @@ def test_dispatch_restores_every_touched_native_setting_on_search_exception(monk
     assert faiss.omp_get_max_threads() == threads
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux FAISS wheel uses OpenMP OpenBLAS")
+@pytest.mark.parametrize("threads", [2, 4])
+def test_database_parallel_tiles_preserve_active_native_team(monkeypatch, threads):
+    import ctypes
+    from threadpoolctl import threadpool_info
+
+    runtime = next(item for item in threadpool_info()
+                   if item["internal_api"] == "openmp" and item["prefix"] == "libgomp")
+    library = ctypes.CDLL(runtime["filepath"])
+    library.omp_in_parallel.restype = ctypes.c_int
+    library.omp_get_num_threads.restype = ctypes.c_int
+    search = faiss.IndexFlatIP.search
+    calls = []
+
+    def check_context(index, *args, **kwargs):
+        assert library.omp_in_parallel() == 1
+        assert library.omp_get_num_threads() == threads
+        calls.append(True)
+        return search(index, *args, **kwargs)
+
+    monkeypatch.setattr(faiss.IndexFlatIP, "search", check_context)
+    with native_threads(threads):
+        for _ in iter_scores(np.ones((1, 768), np.float32), total_vectors=10017,
+                             dimension=768, threads=threads,
+                             read_rows=lambda start, stop: np.zeros((stop - start, 768), np.float32)):
+            assert library.omp_in_parallel() == 0
+            assert faiss.omp_get_max_threads() == threads
+    assert calls
+
+
 def test_reference_provenance_does_not_override_baseline_blas_or_openmp_settings():
     threads = faiss.omp_get_max_threads()
     description = reference_configuration(total_vectors=10016, dimension=768)
