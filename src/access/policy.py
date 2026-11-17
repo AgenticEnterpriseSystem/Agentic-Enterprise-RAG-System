@@ -39,6 +39,9 @@ _CATALOG_FIELDS = tuple(CatalogEntry.model_fields)
 _BYTE_BOOLEAN_BITS = tuple(tuple(bool(value & (1 << bit)) for bit in range(8)) for value in range(256))
 _GRANT_PAGE_SIZE = 8192
 _SAFE_DATABASE_SQLSTATES = frozenset({"25P03", "57014", "57P01", "08003", "08006", "53300", "55P03", "40001", "40P01"})
+# Each branch's first N rows contain every row it can contribute to the
+# combined first N. Keep duplicates and keyset predicates unchanged while
+# allowing the direct-grant index to stop before scanning the full grant set.
 _GRANT_DOCUMENTS_SQL = """
 WITH effective_groups AS MATERIALIZED (
  SELECT membership.group_id
@@ -53,13 +56,23 @@ WITH effective_groups AS MATERIALIZED (
    AND required_membership.group_id=requirement.required_group_id
   )
  )
-), authorized_documents AS (
+), direct_documents AS (
  SELECT grant_row.doc_id FROM rag.document_grants grant_row
  WHERE grant_row.user_id=:user_id AND grant_row.snapshot_id=:snapshot
- UNION ALL
+ AND (CAST(:after AS text) IS NULL OR grant_row.doc_id > CAST(:after AS text))
+ ORDER BY grant_row.doc_id
+ LIMIT :page_size
+), group_documents AS (
  SELECT grant_row.doc_id FROM effective_groups effective
  JOIN rag.document_grants grant_row ON grant_row.group_id=effective.group_id
  WHERE grant_row.group_id IS NOT NULL AND grant_row.snapshot_id=:snapshot
+ AND (CAST(:after AS text) IS NULL OR grant_row.doc_id > CAST(:after AS text))
+ ORDER BY grant_row.doc_id
+ LIMIT :page_size
+), authorized_documents AS (
+ SELECT doc_id FROM direct_documents
+ UNION ALL
+ SELECT doc_id FROM group_documents
 )
 SELECT authorized.doc_id FROM authorized_documents authorized
 WHERE (CAST(:after AS text) IS NULL OR authorized.doc_id > CAST(:after AS text))
