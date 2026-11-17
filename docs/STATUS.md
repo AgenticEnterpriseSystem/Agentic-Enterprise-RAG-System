@@ -24,7 +24,7 @@ Live answers require explicit API configuration and a spending budget.
 
 ## What passed the latest checks?
 
-The latest repair addressed three runtime problems:
+The earlier runtime repairs addressed three problems:
 
 1. The critic could run out of room to return its checklist. It now has a
    separate output limit of 2,048 tokens.
@@ -41,7 +41,7 @@ Real Chrome checks showed two distinct successful paths. The labels **r2** and
 - **Generated answer:** revision r2 completed two critic checks, document
   expansion, answer generation, source/citation display, diagnostics and logout.
   Its answer still had the date mismatch described below.
-- **Missing-evidence clarification:** final revision r3 completed two critic
+- **Missing-evidence clarification:** revision r3 completed two critic
   checks and document expansion, then asked for missing information. It returned
   a successful HTTP response (`200`) and passed the interface, diagnostics and
   logout checks. This normal
@@ -55,6 +55,29 @@ Automated checks passed: **138 final regression checks, 102 real PostgreSQL
 checks and seven browser checks**. These sets overlap, so do not add them
 together. Three separate permission checks, with the local embedding model and
 full indexes loaded, each produced the same allowed set of **511,958 documents**.
+
+The November 16 demo recording found another permission-query problem after a
+second full-access account was added. PostgreSQL scanned and sorted the large
+grant table before returning its first page, then hit the five-second statement
+limit. That attempt stopped **before the agent or model started**.
+
+The query now limits each ordered grant branch before combining the results.
+Authorization rules and fresh permission checks are unchanged. **124 policy and
+PostgreSQL tests passed**, including duplicate grants, group requirements and
+revocation between pages. On the local database, the patched first page took
+about 0.10 seconds. Full permission resolution then passed for both Jane and
+Hira, with the same 511,958-document allowed set.
+
+A later recorded Chrome run completed the **GitHub-filtered Adaptive agent**
+flow: four hybrid searches, one critic check, answer generation, citation/source
+display, evidence context, matching Observability details and verified logout.
+It returned HTTP `200` in about **61.2 seconds**. Its answer gave **10 MiB per
+file and 50 MiB per request**, matching the cited upload-limit document. This
+request finished in one round; it did not need a critic-guided second search
+round. The configured document maximum was eight; this run selected four.
+
+A demo video is linked from the [project README](../README.md#demo). This
+successful focused check does not establish accuracy or latency for every query.
 
 ## What still needs work?
 
@@ -72,8 +95,19 @@ full indexes loaded, each produced the same allowed set of **511,958 documents**
   contains nine outcomes and four decisions, with no completed human labels.
 - **Fair comparisons:** no controlled result establishes that the current
   adaptive agent beats fixed RAG, or that an eight-document limit beats five.
-- **Independent setup and delivery:** a fresh teammate installation, reviewed
-  GitHub delivery and the final demo/research deliverables remain open. A check
+- **Dense-search latency:** the next demo attempt passed permissions, but two
+  dense searches took about 95 and 79 seconds. HTTP timed out at 180 seconds;
+  the worker later stopped on its time budget. It did not reach the critic or
+  final answer generator. The cause still needs diagnosis, and this attempt is
+  not a successful end-to-end demo.
+  The Compose app now uses one thread per native math-library pool to reduce
+  contention. A separate unpaid all-platform hybrid check took 59 seconds;
+  a GitHub-filtered check took 6.5 seconds and returned the expected upload-limit
+  passage. Those checks included permissions and real retrieval, with external
+  generation disabled. These are component timings, separate from the successful
+  live agent check above.
+- **Independent setup and research:** a fresh teammate installation and the
+  remaining research deliverables are still open. A check
   on the original developer's machine does not verify a teammate's installation.
 
 The implementation plan has **19 of 23 tickets accepted**. The remaining
@@ -94,6 +128,7 @@ review and release work. A local runtime repair does not complete those gates.
 | Agent time / query HTTP wait | 120 / 180 seconds |
 | Question / process cost cap | USD 0.10 / USD 0.50 |
 | Database idle transaction / statement / lock limit | 15 / 5 / 2 seconds |
+| Compose app native math-library threads | 1 per pool; separate operator experiments keep their own settings |
 
 The token and cost limits can prevent a stage from using its full output limit.
 The process spending counter resets when the server restarts. It is not an
