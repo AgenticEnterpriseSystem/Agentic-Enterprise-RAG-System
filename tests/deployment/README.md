@@ -3,12 +3,12 @@
 # Database and Docker tests
 
 These checks use a tiny dataset to test installation and account behavior. They
-are for contributors; you do not need to run them before following the ordinary
-[app setup guide](../../docs/WEB_APP.md).
+are for contributors. You don't need them to follow the
+[quick start](../../docs/QUICKSTART.md).
 
-A **fixture** is prepared test data. This fixture has five fake documents, real
-PostgreSQL storage, real password-based logins and the same permission checks as
-the app. Model responses are scripted locally. There are no paid model calls.
+A **fixture** is prepared test data. This one has five fake documents, real
+PostgreSQL, real password logins and the app's permission checks. Model
+responses are scripted, so there are no paid calls.
 
 ## What CI checks automatically
 
@@ -24,15 +24,14 @@ the app. Model responses are scripted locally. There are no paid model calls.
    sessions still behave correctly.
 7. Remove only the generated disposable test installation.
 
-The test project has a generated `rag-ci-fixture-*` name. It is separate from a
-normal working installation. Its cleanup removes disposable data, so never copy
-that cleanup command into a working app's shutdown routine.
+The test project has a generated `rag-ci-fixture-*` name, separate from a
+working installation. Its cleanup deletes data, so never use that command to
+shut down a working app.
 
 ## Check the fixture configuration locally
 
-Use Git, the Python environment in [Contributing](../../CONTRIBUTING.md), Docker
-and Compose v2.10 or later. Git is needed because the fixture creates a small
-test repository. Run from the repository root:
+You need Git, the Python environment from [Contributing](../../CONTRIBUTING.md),
+and Docker with Compose v2.10 or later. Run from the repository root:
 
 ```sh
 python tests/deployment/fixture.py prepare --directory .cache/deployment-smoke
@@ -41,24 +40,22 @@ docker compose --env-file .cache/deployment-smoke/compose.env \
   --profile ci-fixture --profile operator config --quiet
 ```
 
-The first command creates a new directory; it does not overwrite an existing
-fixture. The second checks configuration. **These commands alone do not run the
-full deployment test.** Use the CI workflow for the complete build/import/start/
-restart sequence. Keep the root Compose file first because the override uses it
-as its base.
+The first command makes a new directory and never overwrites one. The second
+checks the configuration. **They don't run the full deployment test**; the CI
+workflow does. Keep the root Compose file first, because the override builds on it.
 
-The generated environment and operator files contain private test credentials
-and cookies. Do not commit or share that directory.
+The generated files contain test credentials and cookies. Don't commit or share
+that directory.
 
 ## Real-account security acceptance
 
-`test_access_end_to_end.py` checks two real local accounts against a disposable
-PostgreSQL database, with scripted model responses. It covers permitted and
+`test_access_end_to_end.py` checks two real accounts against a disposable
+PostgreSQL database with scripted model responses. It covers permitted and
 forbidden evidence, counts, document expansion, permission changes during a
-request, and database failure/recovery.
+request, and database failure and recovery.
 
-Set the three disposable-database URLs used by CI. They must all point to the
-**same database**, and its name must start with **`rag_test_`**:
+Set the three URLs CI uses. All must point to the **same database**, whose name
+starts with **`rag_test_`**:
 
 | Setting | Role |
 | --- | --- |
@@ -72,15 +69,14 @@ Then run, from the repository root:
 python -m pytest tests/test_access_end_to_end.py tests/test_security_operator.py
 ```
 
-Without the required settings, database-dependent tests are skipped. Use the CI
-workflow as the exact connection/role example; never point these tests at the
-working application's database.
+Without these settings the database tests are skipped. The CI workflow shows
+the exact roles. Never point these tests at a working app's database.
 
 ## Optional checks on the full dataset
 
-The helpers below are advanced operator tools for the already-prepared
-`rag-ops01-full-20261104` installation. They are not a generic teammate setup
-shortcut. Do not change their project guards to make them run elsewhere.
+These advanced operator tools work only on the prepared
+`rag-ops01-full-20261104` installation. They are not a teammate setup shortcut.
+Don't change their project guards to run them elsewhere.
 
 | Helper | Purpose |
 | --- | --- |
@@ -88,19 +84,17 @@ shortcut. Do not change their project guards to make them run elsewhere.
 | `security_http.py` | Check HTTP permissions before/after revocation, run ownership and logout |
 | `frontend/tests/live-security.mjs` | Check the real browser using the same private test-account record |
 
-The private record is the helper's **ledger**: it records the accounts, grants
-and sessions the helper owns. Cleanup acts on those recorded items, not unrelated
-users or corpus data. The browser helper can coordinate an operator-controlled
-database interruption; it does not write to the database itself. CLI options and
-that advanced sequence are documented in the helper source files.
+The helper's private **ledger** records the accounts, grants and sessions it
+owns. Cleanup touches only those. The browser helper can coordinate an
+operator-controlled database interruption but doesn't write to the database. For
+options, read the helper source files.
 
 ## Limits of these results
 
-The five-document deployment uses BM25 keyword search. Its small dummy embedding
-arrays exist only to test the import format; they are not a real searchable
-embedding model. No full model is downloaded for this fixture.
+The fixture uses BM25 keyword search. Its small dummy embedding arrays only test
+the import format; no embedding model is downloaded.
 
-Passing these checks does not establish performance on all 511,958 documents,
-backup/restore success, answer accuracy or production security. Use
-[Current status](../../docs/STATUS.md) for the separately recorded full-corpus
-checks and remaining work.
+Passing does not show performance on all 511,958 documents, backup and restore
+success, answer accuracy or production security. See
+[Current status](../../docs/STATUS.md) for the full-corpus checks and remaining
+work.

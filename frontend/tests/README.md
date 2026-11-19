@@ -3,11 +3,11 @@
 # Browser tests
 
 These tests check the React interface in a real browser using **fake API
-responses**. They do not connect to the working app, PostgreSQL or a language
-model. You do not need a paid API key or the full dataset.
+responses**. They don't touch the working app, PostgreSQL or a language model,
+and need no API key or dataset.
 
-For an actual app test, follow [Setup](../../docs/WEB_APP.md). Read
-[Current status](../../docs/STATUS.md) for the latest real-browser results.
+To run the real app, follow the [quick start](../../docs/QUICKSTART.md). For the
+latest real-browser results, see [Current status](../../docs/STATUS.md).
 
 ## Run the main browser tests
 
@@ -19,30 +19,29 @@ npm ci
 npm run test:browser
 ```
 
-On macOS, the runner uses installed Google Chrome when available. Otherwise it
-uses Playwright's Chromium browser. If no browser is installed, run:
+The runner uses Google Chrome on macOS if installed, otherwise Playwright's
+Chromium. If neither is installed, run:
 
 ```sh
 npm run test:browser:install
 npm run test:browser
 ```
 
-`PLAYWRIGHT_CHANNEL` can override the browser choice. The runner starts its own
-local fake server; leave the working Docker app separate. Results, temporary
-profiles and failure screenshots go in `.cache/ui-01/` at the repository root.
+`PLAYWRIGHT_CHANNEL` overrides the browser choice. The runner starts its own fake
+server, separate from your Docker app. Results and failure screenshots go in
+`.cache/ui-01/` at the repository root.
 
 ## Run the Observability tests
 
-This is a separate test file. It currently requires installed **Google Chrome**,
-including on systems where the main suite uses Chromium. From `frontend/`:
+This separate test file needs **Google Chrome** installed. From `frontend/`:
 
 ```sh
 node --test tests/observability.browser.mjs
 ```
 
-It starts its own fake server on port 4387. It checks admin access, safe error
-information, request details, logout and account changes. It does not read real
-request history or submit a model question.
+It starts its own fake server on port 4387 and checks admin access, safe error
+information, request details, logout and account changes. It reads no real
+history and asks no model question.
 
 ## What the tests check
 
@@ -54,16 +53,13 @@ request history or submit a model question.
 - Citation clicks focus the correct source card.
 - Sensitive evidence is not saved in browser storage.
 
-The fake server uses real browser cookies and lets tests delay responses. These
-controls exist only in test code, not the production interface. Fake users and
-passwords here are not logins for the working app.
+The fake server uses real browser cookies and can delay responses. These
+controls exist only in tests. Its fake users are not logins for the working app.
 
 ## What passing does not prove
 
-A passing result shows that the tested interface behavior works with those fake
-responses. It does not verify real database permissions, full-corpus performance,
-model access or answer accuracy.
-
-For database and Docker checks, see
-[Deployment tests](../../tests/deployment/README.md). For a full live check, use
-real permitted accounts and a separately agreed model budget.
+Passing shows the interface works with those fake responses. It does not verify
+real database permissions, full-corpus performance, model access or answer
+accuracy. For database and Docker checks, see
+[Deployment tests](../../tests/deployment/README.md). For a live check, use real
+permitted accounts and an agreed model budget.
