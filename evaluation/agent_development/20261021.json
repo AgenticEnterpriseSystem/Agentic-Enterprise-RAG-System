@@ -1,0 +1,589 @@
+{
+  "date": "2026-10-21",
+  "provenance": "Live development runs made in an isolated integration checkout before porting agent changes to jane/dev. Retrieval was BM25; GPT-OSS evaluator and BGE-base indexes were not used. Full case traces remain local. Source hashes identify the measured snapshots.",
+  "limitations": [
+    "No overall agent-quality improvement established.",
+    "AI qualitative inspection; no independent human ratings.",
+    "Development tuning, not held-out final evaluation or formal critic calibration.",
+    "Baseline ran first; observed latency is not a controlled performance benchmark.",
+    "Recorded pairs include errors; an error is not a valid quality comparison."
+  ],
+  "experiments": [
+    {
+      "experiment": "expanded_bm25",
+      "run_id": "20261021T212334653130Z",
+      "retrieval": "bm25",
+      "selection": "deterministic category round-robin development sample",
+      "model": "claude-haiku-4-5-20251001",
+      "agent_limits": {
+        "max_rounds": 2,
+        "max_context_chars": 24000,
+        "max_question_chars": 8000,
+        "max_tokens": 16000,
+        "max_seconds": 120.0,
+        "max_cost_usd": 4.345848,
+        "confidence_threshold": 0.8
+      },
+      "top_k": 5,
+      "temperature": 0,
+      "runtime": {
+        "python": "3.11.5",
+        "platform": "macOS-26.5.2-arm64-arm-64bit",
+        "packages": {
+          "numpy": "2.4.6",
+          "bm25s": "0.3.11",
+          "pyarrow": "25.0.1",
+          "sentence-transformers": "6.0.1",
+          "faiss-cpu": "1.15.1",
+          "pydantic": "2.13.5",
+          "anthropic": "0.125.0",
+          "torch": "2.14.0",
+          "transformers": "5.17.0"
+        }
+      },
+      "dataset_revision": "d36685e273713975ee20299bbf1ab64165575b3c",
+      "source_hashes": {
+        "src/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "src/agents/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "src/agents/budget.py": "b93c12e5963aeb7800b6dad36154cb4946a4e641e3a927f9b2d7acd8e1485cf0",
+        "src/agents/pilot.py": "2e25602d613c2c6056f4a79404433cc20b2b7a80b8e0f7d26baa380e116df9e9",
+        "src/agents/routing.py": "c48f4b59b3d13572086dfe5f684e2dc41ddd86924d625657bc43c0680409c1ae",
+        "src/agents/search_agent.py": "c656bf6560adcc1aad0783d2652f590431ea4dc4d58581a488e9eb5892ccd94e",
+        "src/agents/search_critic.py": "ec283ce9d2a6a85fc2bee293fac8d4dbfa284f4d89a6f5135f2ed7803455738c",
+        "src/api/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "src/api/main.py": "fd844505fb3ff74aae4acc1ddc2b808fe02b848c15707d9c4f77e72a45361ac8",
+        "src/config.py": "2a0f1676d03df75b34061f0ee316b9eb29e2bbe197c867eea1c77c7b181d8844",
+        "src/contracts.py": "258e113ffa74863b0b7cecf0df7d8e77129d37cba2bd999b0d591aea0ad590df",
+        "src/data/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "src/data/corpus.py": "7c84a9d5ecdedaecb63b9c673f4fe8f53df3fd9625c2076f27c125042974acec",
+        "src/evaluation/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "src/evaluation/answer_metrics.py": "4252dfb21499f960b1e06c9df9e9a65ea704207c7023c0a3a895d8642ad8789f",
+        "src/evaluation/compare_fixes.py": "71388895de7f721305115f54045da3adabc46e81e8084d870fe399694cf18f8a",
+        "src/evaluation/prepare_answer_batch.py": "5f05e0dd7f31777a40414a70df29ce3d049f1e2c1582e8e9c3fe6ed2b8a3dbb7",
+        "src/evaluation/retrieval_metrics.py": "28b1d8cb316eb94e5f541c40e77e8a65e5a1685316e538660e4d29e0fbf4837d",
+        "src/evaluation/run_hybrid.py": "87337b90a649fd2c2e67da321e9fb3c6e1c3918e2859333ff85901877c9182d5",
+        "src/evaluation/run_retrieval.py": "93e0567e28fe15d924468390d5786a4c63d7b316e8e752ac5047d38285623d49",
+        "src/evaluation/splits.py": "26e1d392df8588e315235c98028ae08ed6703a88a2b9c81932f89656eaa291b0",
+        "src/generation/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "src/generation/generator.py": "0ceacb3424b38e04abf344e5e2d5bbd0c369dc5ab6af4e79b536d5c7ea36e57e",
+        "src/generation/ollama_provider.py": "f53ce9ab3dab7b86adbc6801f48444ff27a3204caccf1d57b99ec6bdb357d727",
+        "src/retrieval/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "src/retrieval/corpus_bm25.py": "07feb696e3e26552c42c68f659dec5dc1544ec9eb9fc449dc167f383aa3a96d7",
+        "src/retrieval/corpus_dense.py": "a7fd7994041691bcb25bad6f9a5d76a325917107621a2d600ea8c8a9999ad23d",
+        "src/retrieval/fusion.py": "68db67b8eefd3c310ecb1a96afd5dc2232c19e46ceb1f4db5c626521e1078bd7",
+        "src/retrieval/hybrid.py": "53ff1821b5aa94a84eb25d768e6419fd44020c9bd2c5538d0286099672236ff6",
+        "src/retrieval/passages.py": "cb570b94c44c37e0ec692cb2ef34c13c8b7b0ec0fd23da40f84cd9c69940a164",
+        "src/retrieval/reranker.py": "d4a2e3899b022894c7e475ddb06071fbad03fc5df03a3ec6d718b0745b801cb4"
+      },
+      "prompt_sha256": {
+        "critic": "07a3bb9061fb02992b8b69f9c2b8a5810a21dd53f16274de9b5fcd50d431e7eb",
+        "generator": "e00f240b4aec7e4a4e4632ace3fc3799a05e039186e316e947fcd9a8775ad735"
+      },
+      "questions_sha256": "709bc3445a1fe6f3f2be6818d657732fc1cc388e38bbfef219de665fd91b37c3",
+      "splits_sha256": "d67b59ac23fbe9829573e84cf2451bd8ee588c15ae150f08ae246c9c8ac14a02",
+      "summaries": {
+        "baseline": {
+          "completed": 10,
+          "requested": 10,
+          "stops": {
+            "single_pass": 6,
+            "no_new_evidence": 4
+          },
+          "usage": {
+            "input_tokens": 44240,
+            "output_tokens": 3542,
+            "api_calls": 20,
+            "estimated_cost_usd": 0.061950000000000005
+          },
+          "total_latency_ms": 51320.91920822859
+        },
+        "agent": {
+          "completed": 10,
+          "requested": 10,
+          "stops": {
+            "sufficient": 3,
+            "round_limit": 7
+          },
+          "usage": {
+            "input_tokens": 108918,
+            "output_tokens": 10185,
+            "api_calls": 54,
+            "estimated_cost_usd": 0.159843
+          },
+          "total_latency_ms": 145354.13966840133
+        }
+      },
+      "cases": [
+        {
+          "question_id": "qst_0001",
+          "baseline": {
+            "stop_reason": "single_pass",
+            "searches": 1,
+            "latency_ms": 4521.054707933217,
+            "usage": {
+              "input_tokens": 3993,
+              "output_tokens": 212,
+              "api_calls": 2,
+              "estimated_cost_usd": 0.005053
+            },
+            "answer_status": "answered"
+          },
+          "agent": {
+            "stop_reason": "sufficient",
+            "searches": 1,
+            "latency_ms": 6576.615042053163,
+            "usage": {
+              "input_tokens": 8233,
+              "output_tokens": 393,
+              "api_calls": 4,
+              "estimated_cost_usd": 0.010198
+            },
+            "answer_status": "answered"
+          }
+        },
+        {
+          "question_id": "qst_0431",
+          "baseline": {
+            "stop_reason": "single_pass",
+            "searches": 1,
+            "latency_ms": 8671.689209062606,
+            "usage": {
+              "input_tokens": 4110,
+              "output_tokens": 677,
+              "api_calls": 2,
+              "estimated_cost_usd": 0.007495
+            },
+            "answer_status": "answered"
+          },
+          "agent": {
+            "stop_reason": "sufficient",
+            "searches": 1,
+            "latency_ms": 11378.984666895121,
+            "usage": {
+              "input_tokens": 8467,
+              "output_tokens": 864,
+              "api_calls": 4,
+              "estimated_cost_usd": 0.012787
+            },
+            "answer_status": "answered"
+          }
+        },
+        {
+          "question_id": "qst_0412",
+          "baseline": {
+            "stop_reason": "single_pass",
+            "searches": 1,
+            "latency_ms": 3012.6700829714537,
+            "usage": {
+              "input_tokens": 4939,
+              "output_tokens": 187,
+              "api_calls": 2,
+              "estimated_cost_usd": 0.005874
+            },
+            "answer_status": "answered"
+          },
+          "agent": {
+            "stop_reason": "sufficient",
+            "searches": 1,
+            "latency_ms": 5955.692084040493,
+            "usage": {
+              "input_tokens": 10125,
+              "output_tokens": 368,
+              "api_calls": 4,
+              "estimated_cost_usd": 0.011965
+            },
+            "answer_status": "answered"
+          }
+        },
+        {
+          "question_id": "qst_0384",
+          "baseline": {
+            "stop_reason": "single_pass",
+            "searches": 1,
+            "latency_ms": 6429.765291977674,
+            "usage": {
+              "input_tokens": 5055,
+              "output_tokens": 490,
+              "api_calls": 2,
+              "estimated_cost_usd": 0.007505
+            },
+            "answer_status": "answered"
+          },
+          "agent": {
+            "stop_reason": "round_limit",
+            "searches": 4,
+            "latency_ms": 17159.914665855467,
+            "usage": {
+              "input_tokens": 11984,
+              "output_tokens": 1254,
+              "api_calls": 6,
+              "estimated_cost_usd": 0.018254
+            },
+            "answer_status": "insufficient_evidence"
+          }
+        },
+        {
+          "question_id": "qst_0471",
+          "baseline": {
+            "stop_reason": "single_pass",
+            "searches": 1,
+            "latency_ms": 3124.7375840321183,
+            "usage": {
+              "input_tokens": 4336,
+              "output_tokens": 223,
+              "api_calls": 2,
+              "estimated_cost_usd": 0.005451
+            },
+            "answer_status": "answered"
+          },
+          "agent": {
+            "stop_reason": "round_limit",
+            "searches": 4,
+            "latency_ms": 16965.51691694185,
+            "usage": {
+              "input_tokens": 11514,
+              "output_tokens": 1130,
+              "api_calls": 6,
+              "estimated_cost_usd": 0.017164000000000002
+            },
+            "answer_status": "insufficient_evidence"
+          }
+        },
+        {
+          "question_id": "qst_0482",
+          "baseline": {
+            "stop_reason": "no_new_evidence",
+            "searches": 1,
+            "latency_ms": 4535.160749685019,
+            "usage": {
+              "input_tokens": 4926,
+              "output_tokens": 256,
+              "api_calls": 2,
+              "estimated_cost_usd": 0.006206
+            },
+            "answer_status": "insufficient_evidence"
+          },
+          "agent": {
+            "stop_reason": "round_limit",
+            "searches": 5,
+            "latency_ms": 18957.319375127554,
+            "usage": {
+              "input_tokens": 11933,
+              "output_tokens": 1292,
+              "api_calls": 6,
+              "estimated_cost_usd": 0.018393
+            },
+            "answer_status": "insufficient_evidence"
+          }
+        },
+        {
+          "question_id": "qst_0301",
+          "baseline": {
+            "stop_reason": "no_new_evidence",
+            "searches": 1,
+            "latency_ms": 4125.214041676372,
+            "usage": {
+              "input_tokens": 4571,
+              "output_tokens": 288,
+              "api_calls": 2,
+              "estimated_cost_usd": 0.006011
+            },
+            "answer_status": "insufficient_evidence"
+          },
+          "agent": {
+            "stop_reason": "round_limit",
+            "searches": 4,
+            "latency_ms": 13710.42075008154,
+            "usage": {
+              "input_tokens": 11469,
+              "output_tokens": 1006,
+              "api_calls": 6,
+              "estimated_cost_usd": 0.016499
+            },
+            "answer_status": "insufficient_evidence"
+          }
+        },
+        {
+          "question_id": "qst_0451",
+          "baseline": {
+            "stop_reason": "no_new_evidence",
+            "searches": 1,
+            "latency_ms": 3045.531874988228,
+            "usage": {
+              "input_tokens": 3689,
+              "output_tokens": 169,
+              "api_calls": 2,
+              "estimated_cost_usd": 0.004534
+            },
+            "answer_status": "insufficient_evidence"
+          },
+          "agent": {
+            "stop_reason": "round_limit",
+            "searches": 4,
+            "latency_ms": 14290.838167071342,
+            "usage": {
+              "input_tokens": 12084,
+              "output_tokens": 931,
+              "api_calls": 6,
+              "estimated_cost_usd": 0.016739
+            },
+            "answer_status": "insufficient_evidence"
+          }
+        },
+        {
+          "question_id": "qst_0342",
+          "baseline": {
+            "stop_reason": "single_pass",
+            "searches": 1,
+            "latency_ms": 9459.1367081739,
+            "usage": {
+              "input_tokens": 4723,
+              "output_tokens": 710,
+              "api_calls": 2,
+              "estimated_cost_usd": 0.008273
+            },
+            "answer_status": "answered"
+          },
+          "agent": {
+            "stop_reason": "round_limit",
+            "searches": 5,
+            "latency_ms": 22557.82545916736,
+            "usage": {
+              "input_tokens": 11410,
+              "output_tokens": 1639,
+              "api_calls": 6,
+              "estimated_cost_usd": 0.019605
+            },
+            "answer_status": "insufficient_evidence"
+          }
+        },
+        {
+          "question_id": "qst_0176",
+          "baseline": {
+            "stop_reason": "no_new_evidence",
+            "searches": 1,
+            "latency_ms": 4395.9589577279985,
+            "usage": {
+              "input_tokens": 3898,
+              "output_tokens": 330,
+              "api_calls": 2,
+              "estimated_cost_usd": 0.005548
+            },
+            "answer_status": "insufficient_evidence"
+          },
+          "agent": {
+            "stop_reason": "round_limit",
+            "searches": 4,
+            "latency_ms": 17801.012541167438,
+            "usage": {
+              "input_tokens": 11699,
+              "output_tokens": 1308,
+              "api_calls": 6,
+              "estimated_cost_usd": 0.018239
+            },
+            "answer_status": "insufficient_evidence"
+          }
+        }
+      ]
+    },
+    {
+      "experiment": "passage_selection_regression",
+      "run_id": "20261021T220943962016Z",
+      "retrieval": "bm25",
+      "selection": "two development failure cases selected after inspecting expanded run",
+      "model": "claude-haiku-4-5-20251001",
+      "agent_limits": {
+        "max_rounds": 2,
+        "max_context_chars": 24000,
+        "max_question_chars": 8000,
+        "max_tokens": 16000,
+        "max_seconds": 120.0,
+        "max_cost_usd": 3.928728,
+        "confidence_threshold": 0.8
+      },
+      "top_k": 5,
+      "temperature": 0,
+      "runtime": {
+        "python": "3.11.5",
+        "platform": "macOS-26.5.2-arm64-arm-64bit",
+        "packages": {
+          "numpy": "2.4.6",
+          "bm25s": "0.3.11",
+          "pyarrow": "25.0.1",
+          "sentence-transformers": "6.0.1",
+          "faiss-cpu": "1.15.1",
+          "pydantic": "2.13.5",
+          "anthropic": "0.125.0",
+          "torch": "2.14.0",
+          "transformers": "5.17.0"
+        }
+      },
+      "dataset_revision": "d36685e273713975ee20299bbf1ab64165575b3c",
+      "source_hashes": {
+        "src/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "src/agents/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "src/agents/budget.py": "b93c12e5963aeb7800b6dad36154cb4946a4e641e3a927f9b2d7acd8e1485cf0",
+        "src/agents/context.py": "8e4b5a548da30185528a4da3270d1ddf8ea5e42b1dea1696d78287e76d34c2a1",
+        "src/agents/pilot.py": "2e25602d613c2c6056f4a79404433cc20b2b7a80b8e0f7d26baa380e116df9e9",
+        "src/agents/routing.py": "c48f4b59b3d13572086dfe5f684e2dc41ddd86924d625657bc43c0680409c1ae",
+        "src/agents/search_agent.py": "189541b0d3314220c075789ed387b8c5dad4af2fab2ee21729d755b0d5072c1c",
+        "src/agents/search_critic.py": "ec283ce9d2a6a85fc2bee293fac8d4dbfa284f4d89a6f5135f2ed7803455738c",
+        "src/api/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "src/api/main.py": "fd844505fb3ff74aae4acc1ddc2b808fe02b848c15707d9c4f77e72a45361ac8",
+        "src/config.py": "2a0f1676d03df75b34061f0ee316b9eb29e2bbe197c867eea1c77c7b181d8844",
+        "src/contracts.py": "258e113ffa74863b0b7cecf0df7d8e77129d37cba2bd999b0d591aea0ad590df",
+        "src/data/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "src/data/corpus.py": "7c84a9d5ecdedaecb63b9c673f4fe8f53df3fd9625c2076f27c125042974acec",
+        "src/evaluation/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "src/evaluation/answer_metrics.py": "4252dfb21499f960b1e06c9df9e9a65ea704207c7023c0a3a895d8642ad8789f",
+        "src/evaluation/compare_fixes.py": "71388895de7f721305115f54045da3adabc46e81e8084d870fe399694cf18f8a",
+        "src/evaluation/prepare_answer_batch.py": "5f05e0dd7f31777a40414a70df29ce3d049f1e2c1582e8e9c3fe6ed2b8a3dbb7",
+        "src/evaluation/retrieval_metrics.py": "28b1d8cb316eb94e5f541c40e77e8a65e5a1685316e538660e4d29e0fbf4837d",
+        "src/evaluation/run_hybrid.py": "87337b90a649fd2c2e67da321e9fb3c6e1c3918e2859333ff85901877c9182d5",
+        "src/evaluation/run_retrieval.py": "93e0567e28fe15d924468390d5786a4c63d7b316e8e752ac5047d38285623d49",
+        "src/evaluation/splits.py": "26e1d392df8588e315235c98028ae08ed6703a88a2b9c81932f89656eaa291b0",
+        "src/generation/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "src/generation/generator.py": "0ceacb3424b38e04abf344e5e2d5bbd0c369dc5ab6af4e79b536d5c7ea36e57e",
+        "src/generation/ollama_provider.py": "f53ce9ab3dab7b86adbc6801f48444ff27a3204caccf1d57b99ec6bdb357d727",
+        "src/retrieval/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "src/retrieval/corpus_bm25.py": "07feb696e3e26552c42c68f659dec5dc1544ec9eb9fc449dc167f383aa3a96d7",
+        "src/retrieval/corpus_dense.py": "a7fd7994041691bcb25bad6f9a5d76a325917107621a2d600ea8c8a9999ad23d",
+        "src/retrieval/fusion.py": "68db67b8eefd3c310ecb1a96afd5dc2232c19e46ceb1f4db5c626521e1078bd7",
+        "src/retrieval/hybrid.py": "53ff1821b5aa94a84eb25d768e6419fd44020c9bd2c5538d0286099672236ff6",
+        "src/retrieval/passages.py": "cb570b94c44c37e0ec692cb2ef34c13c8b7b0ec0fd23da40f84cd9c69940a164",
+        "src/retrieval/reranker.py": "d4a2e3899b022894c7e475ddb06071fbad03fc5df03a3ec6d718b0745b801cb4"
+      },
+      "prompt_sha256": {
+        "critic": "07a3bb9061fb02992b8b69f9c2b8a5810a21dd53f16274de9b5fcd50d431e7eb",
+        "generator": "e00f240b4aec7e4a4e4632ace3fc3799a05e039186e316e947fcd9a8775ad735"
+      },
+      "questions_sha256": "46c68777c7943257d49f2a2ad92d5d5f1c324aacbbeab8284e0d69b8b3fcbc3a",
+      "splits_sha256": "4421afb457e60c422a3e2157b454879ba9abafccfefc29b6b77291411f46a430",
+      "summaries": {
+        "baseline": {
+          "completed": 2,
+          "requested": 2,
+          "stops": {
+            "single_pass": 2
+          },
+          "usage": {
+            "input_tokens": 9778,
+            "output_tokens": 1200,
+            "api_calls": 4,
+            "estimated_cost_usd": 0.015778
+          },
+          "total_latency_ms": 16709.47129186243
+        },
+        "agent": {
+          "completed": 2,
+          "requested": 2,
+          "stops": {
+            "round_limit": 1,
+            "error": 1
+          },
+          "usage": {
+            "input_tokens": 24728,
+            "output_tokens": 3294,
+            "api_calls": 12,
+            "estimated_cost_usd": 0.041198
+          },
+          "total_latency_ms": 44668.82395884022
+        }
+      },
+      "cases": [
+        {
+          "question_id": "qst_0384",
+          "baseline": {
+            "stop_reason": "single_pass",
+            "searches": 1,
+            "latency_ms": 7407.204124610871,
+            "usage": {
+              "input_tokens": 5055,
+              "output_tokens": 490,
+              "api_calls": 2,
+              "estimated_cost_usd": 0.007505
+            },
+            "answer_status": "answered"
+          },
+          "agent": {
+            "stop_reason": "round_limit",
+            "searches": 4,
+            "latency_ms": 19038.17924996838,
+            "usage": {
+              "input_tokens": 12568,
+              "output_tokens": 1458,
+              "api_calls": 6,
+              "estimated_cost_usd": 0.019858
+            },
+            "answer_status": "insufficient_evidence"
+          }
+        },
+        {
+          "question_id": "qst_0342",
+          "baseline": {
+            "stop_reason": "single_pass",
+            "searches": 1,
+            "latency_ms": 9302.267167251557,
+            "usage": {
+              "input_tokens": 4723,
+              "output_tokens": 710,
+              "api_calls": 2,
+              "estimated_cost_usd": 0.008273
+            },
+            "answer_status": "answered"
+          },
+          "agent": {
+            "stop_reason": "error",
+            "searches": 5,
+            "latency_ms": 25630.64470887184,
+            "usage": {
+              "input_tokens": 12160,
+              "output_tokens": 1836,
+              "api_calls": 6,
+              "estimated_cost_usd": 0.02134
+            },
+            "answer_status": "error"
+          }
+        }
+      ]
+    }
+  ],
+  "critic_fixtures": {
+    "provenance": "Eight synthetic development examples with AI-proposed labels; used to develop the prompt, not an independent evaluation set.",
+    "result": {
+      "before": {
+        "matched": 5,
+        "count": 8
+      },
+      "after": {
+        "matched": 8,
+        "count": 8
+      }
+    },
+    "fixtures_sha256": "b28dbc198b585ec2faf4350331ee7cdc2f2e7bb5e727535b357019eda21d234b",
+    "prompt_sha256": {
+      "before": "5a7884bcbb7f5d731659368caaaac30b819275ffaf56fcc3b2fbd0e68b11c7b6",
+      "after": "07a3bb9061fb02992b8b69f9c2b8a5810a21dd53f16274de9b5fcd50d431e7eb"
+    }
+  },
+  "passage_findings": [
+    {
+      "question_id": "qst_0342",
+      "retained_before": false,
+      "retained_after": true,
+      "generator_received_target": true,
+      "selected_characters": 10578,
+      "stop_reason": "error",
+      "assessment": "Reference document retained, but model emitted an unsupplied citation ID and validation rejected the answer. This is an error, not a valid quality pair."
+    },
+    {
+      "question_id": "qst_0384",
+      "retained_before": false,
+      "retained_after": true,
+      "generator_received_target": true,
+      "selected_characters": 10502,
+      "stop_reason": "round_limit",
+      "assessment": "Correctly recovers budget_ms_per_step and budget_bytes_per_step priority from the follow-up runbook. Amounts remain missing; still a partial answer."
+    }
+  ]
+}

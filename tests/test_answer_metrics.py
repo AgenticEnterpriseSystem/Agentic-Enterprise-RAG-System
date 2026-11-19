@@ -723,3 +723,75 @@ def test_real_benchmark_generation_integration():
     assert "10 MiB" in answer.text
     assert "50 MiB" in answer.text
     assert usage.estimated_cost_usd == 0
+
+
+def _legacy_preparation_fixture(tmp_path):
+    import json
+    benchmark = tmp_path / 'benchmark'
+    source = benchmark / 'generated_data/sources/jira'
+    source.mkdir(parents=True)
+    document = {'dataset_doc_uuid': 'doc-1', 'title_field_name': 'title',
+        'content_field_names': ['content'], 'title': 'Runbook', 'content': 'Café policy 🧭.'}
+    (source / 'doc.json').write_text(json.dumps(document), encoding='utf-8')
+    index = benchmark / 'generated_data/uuid_index.json'
+    index.write_text(json.dumps({'doc-1': 'jira/doc.json'}))
+    selected = tmp_path / 'selected.json'
+    selected.write_text(json.dumps([{'question_id': 'q1', 'question_type': 'lookup',
+        'question': 'What is the policy?', 'gold_answer': 'GOLD-MARKER',
+        'expected_doc_ids': ['GOLD-DOC-MARKER'], 'source_types': ['GOLD-SOURCE-MARKER']}]))
+    predictions = tmp_path / 'predictions.jsonl'
+    predictions.write_text(json.dumps({'question_id': 'q1', 'error': None,
+                                      'retrieved_doc_ids': ['doc-1']}) + '\n')
+    return benchmark, selected, predictions, index
+
+
+def test_legacy_preparation_reads_native_paths_and_excludes_reference_fields(tmp_path):
+    import json
+    from src.evaluation.prepare_answer_batch import prepare_cases
+    benchmark, selected, predictions, _ = _legacy_preparation_fixture(tmp_path)
+    cases = prepare_cases(selected, predictions, benchmark, expected_count=1)
+    assert cases[0]['evidence'][0]['text'] == 'Café policy 🧭.'
+    assert cases[0]['evidence'][0]['citation_id'] == 'source-1'
+    assert cases[0]['evidence'][0]['source_type'] == 'jira'
+    assert 'GOLD-' not in json.dumps(cases)
+    assert 'snapshot' not in cases[0]  # Legacy data is never given invented provenance.
+
+
+def test_legacy_preparation_refuses_to_replace_existing_results(tmp_path):
+    from src.evaluation.prepare_answer_batch import write_cases
+    output = tmp_path / 'saved.json'
+    output.write_text('preserved-results')
+    with pytest.raises(FileExistsError):
+        write_cases(output, [{'question_id': 'q1'}])
+    assert output.read_text() == 'preserved-results'
+
+
+@pytest.mark.parametrize('change', ['duplicate_question', 'duplicate_prediction', 'error', 'wrong_document', 'escape'])
+def test_legacy_preparation_rejects_ambiguous_or_unsafe_inputs(tmp_path, change):
+    import json
+    from src.evaluation.prepare_answer_batch import prepare_cases
+    benchmark, selected, predictions, index = _legacy_preparation_fixture(tmp_path)
+    if change == 'duplicate_question':
+        rows = json.loads(selected.read_text()); selected.write_text(json.dumps(rows * 2))
+    elif change == 'duplicate_prediction':
+        predictions.write_text(predictions.read_text() * 2)
+    elif change == 'error':
+        row = json.loads(predictions.read_text()); row['error'] = 'retrieval failed'
+        predictions.write_text(json.dumps(row) + '\n')
+    elif change == 'wrong_document':
+        path = benchmark / 'generated_data/sources/jira/doc.json'
+        row = json.loads(path.read_text()); row['dataset_doc_uuid'] = 'another-document'
+        path.write_text(json.dumps(row))
+    else:
+        index.write_text(json.dumps({'doc-1': '../../outside.json'}))
+    with pytest.raises(ValueError):
+        prepare_cases(selected, predictions, benchmark, expected_count=None)
+
+
+def test_legacy_preparation_help_does_not_import_retrieval_or_call_a_provider():
+    import subprocess
+    import sys
+    command = "import sys; from src.evaluation.prepare_answer_batch import main; " \
+        "assert 'src.data.corpus' not in sys.modules; main(['--help'])"
+    result = subprocess.run([sys.executable, '-c', command], capture_output=True, text=True)
+    assert result.returncode == 0 and '--output' in result.stdout

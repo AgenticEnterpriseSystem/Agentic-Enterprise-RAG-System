@@ -8,6 +8,19 @@ __pycache__/
 .DS_Store
 
 .cache/
+/local-v2/
+private_docs/
+docs/local/
 rag-dense/
 rag-dense 2/
 .ipynb_checkpoints/
+
+# Web application build and dependencies
+frontend/node_modules/
+frontend/dist/
+
+# Split artifact downloads
+rag-dense [0-9]*/
+
+# Raw judge output written by answer-metrics tests and failed judge calls
+outputs/alex_evaluation/judge_debug/

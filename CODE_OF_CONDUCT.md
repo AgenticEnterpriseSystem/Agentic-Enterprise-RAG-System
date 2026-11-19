@@ -1,16 +1,20 @@
 # Code of Conduct
 
-Be respectful, welcoming, and constructive in all project interactions.
-Respect privacy and give others credit.
+Treat people respectfully. Welcome questions, give useful feedback, respect
+privacy, and give others credit for their work.
 
 Harassment, discrimination, threats, personal attacks, sharing private
-information without consent, and retaliation are not acceptable.
+information without permission, and retaliation are not acceptable.
 
-Report concerns privately to a maintainer through the team's course channel,
-or to teaching staff if a maintainer is involved or you prefer an independent contact.
-Do not post sensitive reports in public issues.
+## Report a concern
 
-Maintainers will review reports fairly and discreetly. Responses may include
-warnings, content removal, participation restrictions, or referral to teaching
-staff. Anyone involved in a report must step aside from its review. Appeals can
-be raised with teaching staff.
+Contact a maintainer privately through the team's course channel. You can also
+contact teaching staff, especially if a maintainer is involved or you prefer an
+independent contact. Keep sensitive reports out of public issues.
+
+## How reports are handled
+
+Maintainers review reports fairly and discreetly. Anyone involved in a report
+must step aside from its review. Responses may include a warning, removing
+content, limiting participation, or referring the matter to teaching staff.
+You can raise an appeal with teaching staff.

@@ -43,6 +43,23 @@ class RunBudgetExceeded(Exception):
 
 
 _active_budget = ContextVar("agent_call_budget", default=None)
+_output_limit = ContextVar("agent_output_token_limit", default=None)
+
+
+def current_output_token_limit():
+    """An explicit stage ceiling; the run allowance still bounds actual calls."""
+    return _output_limit.get()
+
+
+@contextmanager
+def output_token_limit(limit):
+    if type(limit) is not int or not 1 <= limit <= 8192:
+        raise ValueError("Output token limit must be an integer from 1 through 8192")
+    token = _output_limit.set(limit)
+    try:
+        yield limit
+    finally:
+        _output_limit.reset(token)
 
 
 def current_call_budget():

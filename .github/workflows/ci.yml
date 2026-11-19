@@ -8,6 +8,13 @@ permissions:
 jobs:
   smoke-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Synthetic credentials for a disposable loopback-only CI database.
+    env:
+      RAG_TEST_PG_CONTAINER: rag-ci-postgres
+      RAG_TEST_ADMIN_URL: postgresql+psycopg://postgres:ci-admin-only@127.0.0.1:15432/rag_test_ci
+      RAG_TEST_MIGRATION_URL: postgresql+psycopg://rag_migrator:ci-migrator-only@127.0.0.1:15432/rag_test_ci
+      RAG_TEST_RUNTIME_URL: postgresql+psycopg://rag_runtime:ci-runtime-only@127.0.0.1:15432/rag_test_ci
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -17,5 +24,99 @@ jobs:
           python-version: '3.11'
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
+      - name: Start isolated PostgreSQL
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: rag_test_ci
+          POSTGRES_PASSWORD: ci-admin-only
+          RAG_DB_MIGRATOR_PASSWORD: ci-migrator-only
+          RAG_DB_RUNTIME_PASSWORD: ci-runtime-only
+        run: |
+          docker run -d --name rag-ci-postgres --label rag.task=DB-01 --memory 512m --memory-swap 512m --cpus 1 \
+            -p 127.0.0.1:15432:5432 \
+            --env POSTGRES_USER --env POSTGRES_DB --env POSTGRES_PASSWORD \
+            --env RAG_DB_MIGRATOR_PASSWORD --env RAG_DB_RUNTIME_PASSWORD \
+            --mount "type=bind,source=$PWD/docker/postgres/init.sh,target=/docker-entrypoint-initdb.d/10-roles.sh,readonly" \
+            postgres:17.11-bookworm@sha256:839fbb5a4942a7758dd93e18b42ea5649807491a0545b5eeeb8f0b8bb11857a5 \
+            postgres -c shared_buffers=32MB -c work_mem=4MB -c maintenance_work_mem=32MB -c max_connections=20
+          python - <<'PYTHON'
+          import subprocess, time
+          for attempt in range(40):
+              result = subprocess.run(['docker', 'exec', 'rag-ci-postgres', 'pg_isready',
+                  '-h', '127.0.0.1', '-U', 'postgres', '-d', 'rag_test_ci'], capture_output=True)
+              if result.returncode == 0:
+                  break
+              time.sleep(.5)
+          else:
+              raise RuntimeError('Isolated test database did not become ready')
+          PYTHON
       - name: Run smoke test
         run: python -m pytest
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build web application
+        working-directory: frontend
+        run: npm ci && npm run build
+      - name: Exercise tiny real-auth persistent Docker deployment
+        run: |
+          set -euo pipefail
+          umask 077
+          fixture_root="$PWD/.cache/deployment-smoke"
+          python tests/deployment/fixture.py prepare --directory "$fixture_root"
+          compose() {
+            docker compose --env-file "$fixture_root/compose.env" -f compose.yaml -f tests/deployment/compose.yaml "$@"
+          }
+          compose --profile ci-fixture --profile operator config --quiet
+          compose --profile ci-fixture --profile operator build app operator fixture-load
+          compose --profile ci-fixture run --rm fixture-load
+          compose up -d --wait db
+          # No bootstrap identity or fake readiness marker may serve requests.
+          if compose run --rm verify >"$fixture_root/preparation-incomplete.log" 2>&1; then
+            echo 'Unexpected readiness before migration/import'; exit 1
+          fi
+          compose --profile operator run --rm migrate
+          compose --profile operator run --rm import-corpus
+          if compose --profile operator run --rm prepare-state >"$fixture_root/native-incomplete.log" 2>&1; then
+            echo 'Unexpected deployment publication before actual native import'; exit 1
+          fi
+          compose --profile operator run --rm -T operator python /operator/fixture.py native
+          compose --profile operator run --rm prepare-state
+          compose run --rm verify
+          compose --profile operator run --rm -T operator python /operator/fixture.py seed
+          compose up -d --wait app
+          python tests/deployment/fixture.py before --directory "$fixture_root/operator"
+          # A live dependency loss must close readiness/query while health lives.
+          compose stop db
+          python tests/deployment/fixture.py unavailable --directory "$fixture_root/operator"
+          compose up -d --wait db
+          python tests/deployment/fixture.py resume --directory "$fixture_root/operator"
+          # Keep all named volumes and reuse the SAME cookies and human grants.
+          compose stop app
+          compose restart db
+          compose up -d --wait db
+          compose up -d --force-recreate --wait verify app
+          python tests/deployment/fixture.py resume --directory "$fixture_root/operator"
+      - name: Show Docker logs on failure
+        if: failure()
+        run: |
+          fixture_root="$PWD/.cache/deployment-smoke"
+          if [ -f "$fixture_root/compose.env" ]; then
+            docker compose --env-file "$fixture_root/compose.env" -f compose.yaml -f tests/deployment/compose.yaml ps -a
+            docker compose --env-file "$fixture_root/compose.env" -f compose.yaml -f tests/deployment/compose.yaml logs --no-color --tail=100 app verify db
+          fi
+      - name: Stop Docker application
+        if: always()
+        run: |
+          fixture_root="$PWD/.cache/deployment-smoke"
+          if [ -f "$fixture_root/compose.env" ]; then
+            # Only this generated disposable rag-ci-fixture-* project. Never use
+            # volume removal as the ordinary local-stack stop/recovery command.
+            docker compose --env-file "$fixture_root/compose.env" -f compose.yaml -f tests/deployment/compose.yaml down --volumes --remove-orphans
+          fi
+      - name: Stop isolated PostgreSQL
+        if: always()
+        run: docker rm -f rag-ci-postgres

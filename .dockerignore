@@ -1,0 +1,24 @@
+# Only application build inputs enter the Docker build context.
+# In particular, exclude credentials, indexes, results, .git, and user files.
+**
+!Dockerfile
+!requirements.txt
+!requirements.lock.txt
+!alembic.ini
+!migrations/
+!migrations/**
+!src/
+!src/**
+!scripts/
+!scripts/docker_dependencies.py
+!scripts/local_data.py
+!scripts/local_stack.py
+!frontend/
+!frontend/package.json
+!frontend/package-lock.json
+!frontend/index.html
+!frontend/vite.config.js
+!frontend/src/
+!frontend/src/**
+**/__pycache__/
+**/*.pyc

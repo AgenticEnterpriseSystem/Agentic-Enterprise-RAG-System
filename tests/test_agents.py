@@ -3,7 +3,8 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from src.agents.pilot import main, run_pilot, select_questions
+from src.agents.pilot import (main, run_pilot, run_comparison, select_questions,
+                              development_sample, prepare_review, timing_breakdown)
 from src.agents.routing import ModelRouter, Route, ToolCall, ToolSpec
 from src.agents.search_agent import AgentConfig, SearchAgent
 from src.agents.search_critic import AgentError, EvidenceCritic, SYSTEM_PROMPT
@@ -14,12 +15,97 @@ from src.retrieval.corpus_dense import CorpusDense
 from src.retrieval.hybrid import HybridRetriever
 from src.retrieval.reranker import CrossEncoderReranker
 from tests.fakes import FakeProvider
+from src.agents.pilot import run_interactive, RecordingProvider
+from tests.test_scoped_agent import scope as routing_scope, passage as scoped_passage
 
 
 # Critic, routing, and search loop
 
 ZERO = Usage(estimated_cost_usd=0)
 USER = UserContext(user_id="jane", allowed_doc_ids=frozenset({"a", "b"}))
+
+
+def test_interactive_retrieval_only_records_real_evidence_without_model(tmp_path):
+    search = Search([(evidence(),)])
+    search.doc_ids = ['a']
+    entries = iter(['', 'Upload limit?', '/quit'])
+    lines = []
+    summary = run_interactive(search, None, AgentConfig(), tmp_path/'session',
+                              read=lambda _: next(entries), emit=lines.append)
+    case = json.loads((tmp_path/'session/case_01.json').read_text())
+    assert summary['completed'] == 1 and summary['usage']['api_calls'] == 0
+    assert case['model_calls'] == [] and case['mode'] == 'retrieval-only'
+    assert case['debug_steps'][0]['new_evidence_ids'] == ['a']
+    assert case['response']['answer']['status'] == 'insufficient_evidence'
+    assert any('no critic' in line for line in lines)
+    assert any('Upload limit is 10 MB.' in line for line in lines)
+
+
+def test_interactive_live_scripted_adaptation_records_why_and_citations(tmp_path):
+    search = Search([(evidence('a'),), (evidence('b'),)])
+    search.doc_ids = ['a', 'b']
+    provider = FakeProvider([
+        Completion(decision(False, missing_facts=('Current limit',),
+                            suggested_queries=('current upload policy',)).model_dump_json(), ZERO),
+        Completion(decision(True).model_dump_json(), ZERO),
+        Completion(Answer(status='answered', text='10 MB', citation_ids=('b',)).model_dump_json(), ZERO),
+    ])
+    entries = iter(['Upload limit?', '/quit'])
+    lines = []
+    summary = run_interactive(search, provider, AgentConfig(max_rounds=2), tmp_path/'session',
+                              live=True, read=lambda _: next(entries), emit=lines.append)
+    case = json.loads((tmp_path/'session/case_01.json').read_text())
+    assert summary['stops'] == {'sufficient': 1}
+    assert [r.query for r in search.requests] == ['Upload limit?', 'current upload policy']
+    assert len(case['model_calls']) == 3
+    assert case['response']['answer']['citation_ids'] == ['b']
+    assert any('Missing: Current limit' in line for line in lines)
+    assert any('Round 2' in line for line in lines)
+    assert 'reference' not in case
+
+
+def test_interactive_repeated_results_and_eof(tmp_path):
+    search = Search([(evidence(),), (evidence(),)])
+    search.doc_ids = ['a']
+    provider = FakeProvider([Completion(decision(False,
+        suggested_queries=('another search',)).model_dump_json(), ZERO),
+        Completion(Answer(status='insufficient_evidence', text='Evidence remains incomplete.',
+                          citation_ids=('a',)).model_dump_json(), ZERO)])
+    def read(_):
+        if search.requests:
+            raise EOFError
+        return 'Upload limit?'
+    summary = run_interactive(search, provider, AgentConfig(max_rounds=2), tmp_path/'session',
+                              live=True, read=read, emit=lambda _: None)
+    case = json.loads((tmp_path/'session/case_01.json').read_text())
+    searches = [s for s in case['debug_steps'] if 'new_evidence_ids' in s]
+    assert [s['new_evidence_ids'] for s in searches] == [['a'], []]
+    assert summary['stops'] == {'no_new_evidence': 1}
+    assert len(provider.calls) == 2
+
+
+def test_interactive_denied_evidence_not_saved_or_printed(tmp_path):
+    search = Search([(evidence('secret', text='secret content'),)])
+    search.doc_ids = ['a']
+    lines = []
+    summary = run_interactive(search, None, AgentConfig(), tmp_path/'session',
+                              read=lambda _: 'q', emit=lines.append)
+    # Backend validation failures must not retain denied text in recording logs.
+    assert summary['stops'] == {'error': 1}
+    assert not any('secret content' in line for line in lines)
+    assert 'secret content' not in (tmp_path/'session/case_01.json').read_text()
+
+
+def test_recording_provider_preserves_budget_denial():
+    from src.agents.budget import RunBudgetExceeded
+    class Denied:
+        def complete(self, system, prompt):
+            raise RunBudgetExceeded(usage=Usage(api_calls=1, estimated_cost_usd=0))
+    provider = RecordingProvider(Denied())
+    with pytest.raises(RunBudgetExceeded):
+        provider.complete('system', '{}')
+    assert provider.calls[0]['error'] == 'RunBudgetExceeded'
+    assert provider.calls[0]['usage']['api_calls'] == 1
 
 
 def evidence(doc="a", text="Upload limit is 10 MB.", source="docs"):
@@ -149,7 +235,8 @@ def test_stop_conditions_never_generate_guessed_answer(hits, rounds, stop):
     result = SearchAgent(Search(hits), Critic([decision()] * 3), generator,
                          config=AgentConfig(max_rounds=rounds)).run(request())
     assert result.trace.stop_reason == stop
-    assert result.answer.status == "insufficient_evidence" and not generator.requests
+    assert result.answer.status == "insufficient_evidence"
+    assert bool(generator.requests) == any(hits)
 
 
 @pytest.mark.parametrize("usage,config", [
@@ -179,11 +266,13 @@ def test_unauthorized_evidence_never_reaches_critic(hit, scope):
     assert result.trace.stop_reason == "error" and not critic.requests and not result.sources
 
 
-def test_low_confidence_does_not_generate():
+def test_low_confidence_only_generates_limited_answer():
     generator = Generator()
     result = SearchAgent(Search([(evidence(),)]), Critic([decision(True).model_copy(update={"confidence": 0.2})]),
                          generator, config=AgentConfig(max_rounds=1)).run(request())
-    assert result.trace.stop_reason == "round_limit" and not generator.requests
+    assert result.trace.stop_reason == "round_limit"
+    assert result.answer.status == "insufficient_evidence"
+    assert generator.requests[0].search_limitation
 
 
 @pytest.mark.parametrize("mixed,operation", [(False, "lookup"), (False, "count"), (True, "lookup")])
@@ -211,6 +300,93 @@ def test_model_router_sends_capabilities_and_feedback_without_identity():
     assert result == route and payload['feedback']['missing_facts'] == ['Ticket owner']
     assert payload['tools']['tickets']['filter_fields'] == ['id']
     assert 'user' not in payload
+
+
+class CapabilityAwareRoutingProvider:
+    """Script the observed capability confusion, not real-model improvement."""
+
+    def __init__(self, *, requires_complete_count=False):
+        self.requires_complete_count = requires_complete_count
+        self.calls = []
+
+    def complete(self, system, prompt):
+        payload = json.loads(prompt)
+        self.calls.append(payload)
+        if self.requires_complete_count:
+            route = Route(reason="A complete Confluence count requires a matching structured adapter.",
+                          # Even suggested sample searches cannot override a
+                          # genuinely required complete-count limitation.
+                          text_queries=(payload['question'],),
+                          limitation="No registered tool can count the complete authorized Confluence relation.")
+        elif payload.get('text_search', {}).get('available'):
+            route = Route(reason="Use the independent prose passage search.",
+                          text_queries=(payload['question'],),
+                          source_types=tuple(payload['text_search']['source_scope']))
+        else:
+            # This reproduces the router-only failure when Jira looks like
+            # the entire capability inventory. No paid model is invoked.
+            route = Route(reason="Only the registered Jira adapter is visible.",
+                          limitation="Jira cannot retrieve documentation or chat procedures.")
+        return Completion(route.model_dump_json(), ZERO)
+
+
+@pytest.mark.parametrize('single_pass', [True, False], ids=['fixed', 'adaptive'])
+@pytest.mark.parametrize('platform,question,text', [
+    ('github', 'What are the default multipart upload limits?', 'The default upload limit is 10 MB.'),
+    ('slack', 'When does booking open for the new 80GB accelerator?', 'Bookings open on November 20.'),
+    ('confluence', 'What is the emergency rollback procedure?', 'Pin the previous release and restart the serving workers.'),
+])
+def test_model_router_runs_scoped_prose_search_despite_unrelated_jira_adapter(
+        routing_scope, single_pass, platform, question, text):
+    source = scoped_passage(routing_scope, text=text)
+    source = source.model_copy(update={'chunk': source.chunk.model_copy(update={'source_type': platform})})
+    search, critic = Search([(source,)]), Critic([decision(True)])
+    answer_provider = FakeProvider([Completion(Answer(status='answered', text=text,
+        citation_ids=(source.citation_id,)).model_dump_json(), ZERO)])
+    generator = GroundedGenerator(answer_provider)
+    jira = Tool(ToolResult())
+    provider = CapabilityAwareRoutingProvider()
+    result = SearchAgent(search, critic, generator, router=ModelRouter(provider), tools={
+        'jira': ToolSpec(jira, 'jira', 'Verified Jira records', ('lookup', 'count'), ('native_key',)),
+    }).run(SearchRequest(query=question, user=routing_scope.user, source_types=(platform,)),
+           single_pass=single_pass, context=routing_scope.context, guard=routing_scope.guard)
+    assert result.answer.status == 'answered'
+    assert [step.tool for step in result.trace.steps] == (
+        ['route', 'text_search', 'generate'] if single_pass else ['route', 'text_search', 'critic', 'generate'])
+    assert len(search.requests) == 1 and search.requests[0].query == question
+    assert search.requests[0].user is routing_scope.user and search.requests[0].source_types == (platform,)
+    generated_input = json.loads(answer_provider.calls[0][1])
+    assert generated_input['evidence'][0]['text'] == text
+    assert generated_input['evidence'][0]['citation_id'] == source.citation_id
+    assert result.answer.text == text
+    assert result.answer.citation_ids == (source.citation_id,) and result.sources == (source,)
+    assert not jira.requests and len(critic.requests) == (0 if single_pass else 1)
+    payload = provider.calls[0]
+    assert set(payload['tools']) == {'jira'}
+    assert payload['text_search']['complete_record_counts'] is False
+    assert payload['source_scope'] == payload['text_search']['source_scope'] == [platform]
+    serialized = json.dumps(payload)
+    assert routing_scope.context.identity.user_id not in serialized
+    assert routing_scope.context.identity.session_id not in serialized
+    assert source.chunk.doc_id not in serialized
+
+
+@pytest.mark.parametrize('single_pass', [True, False], ids=['fixed', 'adaptive'])
+def test_model_router_complete_count_without_matching_adapter_still_abstains(routing_scope, single_pass):
+    search, critic, generator = Search([]), Critic([]), Generator()
+    jira = Tool(ToolResult())
+    provider = CapabilityAwareRoutingProvider(requires_complete_count=True)
+    result = SearchAgent(search, critic, generator, router=ModelRouter(provider), tools={
+        'jira': ToolSpec(jira, 'jira', 'Verified Jira counts only', ('count',), ()),
+    }).run(SearchRequest(query='How many authorized Confluence pages exist in total?',
+                        user=routing_scope.user, source_types=('confluence',)),
+           single_pass=single_pass, context=routing_scope.context, guard=routing_scope.guard)
+    assert result.answer.status == 'insufficient_evidence' and result.trace.stop_reason == 'no_new_evidence'
+    assert result.sources == () and result.answer.citation_ids == ()
+    assert [step.tool for step in result.trace.steps] == ['route']
+    assert not search.requests and not jira.requests and not critic.requests and not generator.requests
+    assert provider.calls[0]['text_search']['available'] is True
+    assert provider.calls[0]['text_search']['complete_record_counts'] is False
 
 
 @pytest.mark.parametrize("call", [ToolCall(tool="missing", operation="lookup"),
@@ -306,6 +482,92 @@ def test_selection_is_stable_and_covers_categories():
         select_questions(questions(), 9)
 
 
+def test_explicit_development_sample_rejects_unknown_and_duplicate_ids():
+    assert [q['question_id'] for q in development_sample(questions(), 1, ['q2', 'q0'])] == ['q2', 'q0']
+    for ids in (['final-only-id'], ['q0', 'q0'], []):
+        with pytest.raises(ValueError):
+            development_sample(questions(), 1, ids)
+
+
+def test_prepared_packet_keeps_references_out_of_retrieval_and_preserves_outputs(tmp_path):
+    search = Search([(evidence(),)])
+    search.doc_ids = ['a']
+    output = tmp_path / 'packet'
+    report = prepare_review(questions()[:1], search, output)
+    case = json.loads((output/'case_01.json').read_text())
+    assert report['answers_generated'] == 0 and not report['paid_calls']
+    assert case['response'] is None and case['model_calls'] == []
+    assert case['search']['evidence'][0]['chunk']['text'] == 'Upload limit is 10 MB.'
+    assert 'GOLD MUST NOT' not in json.dumps(case)
+    assert json.loads((output/'review.json').read_text())[0]['reference']['answer'] == 'GOLD MUST NOT REACH MODEL'
+    with pytest.raises(FileExistsError):
+        prepare_review(questions()[:1], search, output)
+
+
+def test_saved_prompt_is_used_and_timing_breakdown_keeps_failures(tmp_path):
+    from src.contracts import Trace, TraceStep
+    provider = FakeProvider([
+        Completion(decision(True).model_dump_json(), ZERO),
+        Completion(Answer(status='answered', text='10 MB', citation_ids=('a',)).model_dump_json(), ZERO),
+    ])
+    search = Search([(evidence(),)])
+    search.doc_ids = ['a']
+    run_pilot(questions()[:1], search, provider, AgentConfig(), tmp_path/'run',
+              critic_prompt='Saved pre-change critic instructions')
+    assert provider.calls[0][0] == 'Saved pre-change critic instructions'
+    assert provider.calls[1][0] != provider.calls[0][0]
+    assert all('GOLD MUST NOT' not in prompt for _, prompt in provider.calls)
+    trace = Trace(run_id='timing', stop_reason='error', steps=(
+        TraceStep(round_number=1, query='limit?', tool='text_search', elapsed_ms=4),
+        TraceStep(round_number=1, query='limit?', tool='critic:error', elapsed_ms=12),
+        TraceStep(round_number=1, query='limit?', tool='generate', elapsed_ms=7)))
+    assert timing_breakdown(trace) == dict(search=4, critic=12, generate=7, other=0)
+
+
+def test_single_pass_skips_critic_and_preserves_permission_checks():
+    search, critic, generator = Search([(evidence(),)]), Critic([]), Generator()
+    response = SearchAgent(search, critic, generator).run(
+        SearchRequest(query='limit?', user=USER), single_pass=True)
+    assert response.trace.stop_reason == 'single_pass'
+    assert len(search.requests) == 1 and critic.requests == []
+    assert len(generator.requests) == 1
+    denied = SearchAgent(Search([(evidence('secret'),)]), Critic([]), Generator()).run(
+        SearchRequest(query='limit?', user=USER), single_pass=True)
+    assert denied.answer.status == 'error'
+
+
+def test_comparison_records_followup_and_identical_questions_without_gold_leak(tmp_path):
+    provider = FakeProvider([
+        Completion(Answer(status='answered', text='first', citation_ids=('a',)).model_dump_json(), ZERO),
+        Completion(decision(False, missing_facts=('current limit',),
+                            suggested_queries=('current limit',)).model_dump_json(), ZERO),
+        Completion(decision(True).model_dump_json(), ZERO),
+        Completion(Answer(status='answered', text='updated', citation_ids=('b',)).model_dump_json(), ZERO),
+    ])
+    search = Search([(evidence('a'),), (evidence('a'),), (evidence('b'),)])
+    search.doc_ids = ['a', 'b']
+    output = tmp_path / 'comparison'
+    report = run_comparison(questions()[:1], search, provider, AgentConfig(max_rounds=2), output)
+    assert report['paired_cases'] == 1
+    pair = report['pairs'][0]
+    assert pair['baseline']['searches'] == 1
+    assert pair['agent']['searches'] == 2
+    assert pair['agent']['new_followup_evidence_ids'] == ['b']
+    assert [r.query for r in search.requests] == ['What is the limit?', 'What is the limit?', 'current limit']
+    assert all('GOLD MUST NOT' not in prompt for _, prompt in provider.calls)
+    assert (output/'baseline/review.json').exists() and (output/'agent/review.json').exists()
+    with pytest.raises(FileExistsError):
+        run_comparison(questions()[:1], search, provider, AgentConfig(), output)
+
+
+def test_comparison_stops_before_second_arm_on_error(tmp_path):
+    provider = FakeProvider([ProviderError(usage=Usage(api_calls=1))])
+    search = Search([(evidence(),)])
+    search.doc_ids = ['a']
+    report = run_comparison(questions()[:1], search, provider, AgentConfig(), tmp_path/'run')
+    assert report['paired_cases'] == 0 and 'agent' not in report['summaries']
+
+
 def test_pilot_records_calls_evidence_reviews_and_no_gold_leak(tmp_path):
     usage = Usage(api_calls=1, input_tokens=50, output_tokens=20, estimated_cost_usd=0.001)
     provider = FakeProvider([
@@ -350,11 +612,20 @@ def test_preflight_uses_real_small_index_without_model_calls(tmp_path, monkeypat
     qpath, splits = tmp_path/'questions.jsonl', tmp_path/'splits.json'
     qpath.write_text(json.dumps(questions()[0]) + '\n')
     splits.write_text(json.dumps({'splits': {'development': ['q0'], 'final': ['q3']}}))
-    monkeypatch.setattr('sys.argv', ['pilot', '--count', '1', '--corpus', str(corpus),
+    monkeypatch.setattr('sys.argv', ['pilot', '--retrieval', 'bm25', '--count', '1', '--corpus', str(corpus),
                                    '--index', str(index), '--questions', str(qpath), '--splits', str(splits)])
     monkeypatch.delenv('ANTHROPIC_API_KEY', raising=False)
     main()
     assert '"paid_calls": false' in capsys.readouterr().out
+    output = tmp_path/'prepared'
+    monkeypatch.setattr('sys.argv', ['pilot', '--retrieval', 'bm25', '--prepare', '--question-ids', 'q0',
+        '--corpus', str(corpus), '--index', str(index), '--questions', str(qpath),
+        '--splits', str(splits), '--output', str(output)])
+    main()
+    manifest = json.loads((output/'manifest.json').read_text())
+    assert manifest['question_ids'] == ['q0'] and not manifest['paid_calls']
+    assert manifest['critic_prompt_sha256']
+    assert (output/'review.json').exists()
 
 
 def test_pilot_rejects_empty_sample_before_creating_outputs(tmp_path):
@@ -471,9 +742,11 @@ def test_model_phases_receive_remaining_run_budget_and_scope_is_reset():
 
     result = SearchAgent(Search([(evidence(),)]), BudgetCritic(), BudgetGenerator(),
                          router=BudgetRouter(), clock=lambda: clock[0],
-                         config=AgentConfig(max_tokens=20, max_seconds=10, max_cost_usd=0.1)).run(request())
+                         # Leave room for context/schema reservation; this test
+                         # isolates propagation of each phase's actual usage.
+                         config=AgentConfig(max_tokens=20000, max_seconds=10, max_cost_usd=0.1)).run(request())
     assert result.trace.stop_reason == "sufficient"
-    assert [item[:2] for item in observed] == [(20, 10), (17, 9), (11, 7)]
+    assert [item[:2] for item in observed] == [(20000, 10), (19997, 9), (19991, 7)]
     assert [item[2] for item in observed] == pytest.approx([0.1, 0.09, 0.07])
     assert current_call_budget() is None
 
@@ -574,3 +847,152 @@ def test_hybrid_agent_scopes_reranker_critic_and_answer(tmp_path):
     assert all("Secret upload" not in prompt and "Email upload" not in prompt
                for _, prompt in provider.calls)
     assert response.trace.stop_reason == "sufficient"
+
+
+@pytest.mark.parametrize("scope", [(), ("docs",)])
+def test_descriptive_critic_sources_do_not_filter_out_followup_evidence(scope):
+    search = Search([(evidence(),), (evidence("b"),), (evidence("b"),)])
+    critic = Critic([decision(suggested_queries=("current upload policy",),
+                              suggested_sources=("signed agreement",)), decision(True)])
+    result = SearchAgent(search, critic, Generator()).run(request(source_types=scope))
+    assert result.answer.status == "answered"
+    assert all(r.user == USER and r.source_types == scope for r in search.requests)
+    assert search.requests[1].query == "current upload policy"
+    assert "b" in {e.citation_id for e in result.sources}
+
+
+def test_router_preserves_valid_platform_and_uses_description_as_query():
+    from src.agents.routing import TextRouter
+    route, _ = TextRouter().route(request(), decision(
+        suggested_sources=("gmail", "signed agreement")), {})
+    assert route.source_types == ("gmail",)
+    assert "signed agreement" in route.text_queries[0]
+
+
+def test_router_out_of_scope_platform_cannot_replace_restricted_scope():
+    from src.agents.routing import TextRouter
+    route, _ = TextRouter().route(request(source_types=("docs",)), decision(
+        suggested_queries=("specific policy",), suggested_sources=("gmail",)), {})
+    assert route.source_types == ("docs",)
+    assert route.text_queries == ("specific policy",)
+
+@pytest.mark.parametrize('text', ['Retention is 90 days; billing party unknown.',
+                                  'Policy A says 10 MB; policy B says 20 MB.'])
+def test_partial_generation_gets_evidence_and_search_limitation(text):
+    provider = FakeProvider([Completion(Answer(status='insufficient_evidence',
+        text='Only the supplied facts are known; the remaining fact is unresolved.',
+        citation_ids=('a',)).model_dump_json(), ZERO)])
+    result = SearchAgent(Search([(evidence(text=text),)]), Critic([decision()]),
+        GroundedGenerator(provider), config=AgentConfig(max_rounds=1)).run(request())
+    payload = json.loads(provider.calls[0][1])
+    assert payload['question'] == request().query
+    assert payload['search_limitation'] and 'Do not resolve contradictions' in payload['response_requirement']
+    assert payload['evidence'][0]['text'] == text
+    assert result.answer.status == 'insufficient_evidence'
+    assert result.trace.stop_reason == 'round_limit'
+    assert result.answer.citation_ids == ('a',)
+    assert result.trace.steps[-1].tool == 'generate'
+
+
+def test_partial_generation_rejects_unknown_citation():
+    class InvalidGenerator:
+        def generate(self, context):
+            return Answer(status='answered', text='Unsupported', citation_ids=('unknown',)), ZERO
+    result = SearchAgent(Search([(evidence(),)]), Critic([decision()]),
+        InvalidGenerator(), config=AgentConfig(max_rounds=1)).run(request())
+    assert result.trace.stop_reason == 'error'
+
+
+def test_partial_generation_cannot_bypass_token_budget():
+    generator = Generator()
+    critic = Critic([decision()], Usage(input_tokens=10, estimated_cost_usd=0))
+    result = SearchAgent(Search([(evidence(),)]), critic, generator,
+        config=AgentConfig(max_rounds=1, max_tokens=10)).run(request())
+    assert result.trace.stop_reason == 'budget' and not generator.requests
+
+
+def test_partial_context_keeps_the_exact_evidence_seen_by_the_final_critic():
+    first = evidence(text='A' * 3000)
+    second = evidence('b', text='B' * 3000)
+    generator = Generator()
+    critic = Critic([decision(suggested_queries=('followup',)), decision()],
+                    Usage(input_tokens=6000, estimated_cost_usd=0))
+    result = SearchAgent(Search([(first,), (second,)]), critic, generator,
+        config=AgentConfig(max_rounds=2, max_tokens=16000)).run(request())
+    assert result.answer.status == 'insufficient_evidence'
+    assert generator.requests[0].evidence[0] == first
+    assert generator.requests[0].evidence == critic.requests[-1].evidence
+    assert result.trace.steps[-1].evidence_ids == result.trace.steps[-2].evidence_ids
+    assert generator.requests[0].question == request().query
+
+
+def test_last_critic_leaves_context_room_for_answer():
+    first = evidence(text='A' * 6000)
+    second = evidence('b', text='B' * 6000)
+    critic = Critic([decision(suggested_queries=('followup',)), decision()],
+                    Usage(input_tokens=3000, estimated_cost_usd=0))
+    generator = Generator()
+    result = SearchAgent(Search([(first,), (second,)]), critic, generator,
+        config=AgentConfig(max_rounds=2, max_tokens=10000)).run(request())
+    assert 0 < sum(len(e.chunk.text) for e in critic.requests[-1].evidence) <= 4000
+    assert result.answer.status == 'insufficient_evidence'
+    assert generator.requests
+
+
+def test_final_round_approval_and_generation_use_identical_evidence():
+    first = evidence(text='A' * 6000)
+    second = evidence('b', text='B' * 6000)
+    critic = Critic([decision(suggested_queries=('followup',)), decision(True)],
+                    Usage(input_tokens=3000, estimated_cost_usd=0))
+    generator = Generator()
+    result = SearchAgent(Search([(first,), (second,)]), critic, generator,
+        config=AgentConfig(max_rounds=2, max_tokens=10000)).run(request())
+    approved = critic.requests[-1].evidence
+    assert 0 < sum(len(e.chunk.text) for e in approved) <= 4000
+    assert result.trace.stop_reason == 'sufficient'
+    assert generator.requests[0].evidence == approved == result.sources
+    assessment, generation = result.trace.steps[-2:]
+    assert assessment.tool == 'critic' and generation.tool == 'generate'
+    assert assessment.evidence_ids == generation.evidence_ids
+
+
+def test_critic_and_generator_receive_thread_context_and_exact_citations():
+    # Scripted responses verify evidence delivery, not model judgment accuracy.
+    parts = ('Acme requests an artifact audit proxy.',
+             'Proposed default retention: 60 days.')
+    hits = []
+    offset = 0
+    for text in parts:
+        chunk = Chunk(chunk_id=f'a:{offset}:{offset + len(text)}', doc_id='a',
+                      source_type='gmail', title='Artifact escrow proposal', text=text,
+                      start_char=offset, end_char=offset + len(text))
+        hits.append(Evidence(citation_id=chunk.chunk_id, chunk=chunk,
+                             score=1, retrieval_method='hybrid'))
+        offset += len(text)
+    provider = FakeProvider([
+        Completion(decision(True).model_dump_json(), ZERO),
+        Completion(Answer(status='answered', text='The proposal specifies 60 days.',
+                          citation_ids=(hits[1].citation_id,)).model_dump_json(), ZERO),
+    ])
+    result = SearchAgent(Search([tuple(hits)]), EvidenceCritic(provider),
+        GroundedGenerator(provider), config=AgentConfig(max_rounds=1)).run(request())
+    assessed = json.loads(provider.calls[0][1])['evidence']
+    generated = json.loads(provider.calls[1][1])['evidence']
+    assert assessed == generated
+    assert [item['doc_id'] for item in assessed] == ['a', 'a']
+    assert [item['title'] for item in assessed] == [hit.chunk.title for hit in hits]
+    assert [item['text'] for item in assessed] == list(parts)
+    assert result.answer.citation_ids == (hits[1].citation_id,)
+    assert result.sources == tuple(hits)
+
+
+def test_sufficient_followup_generation_preserves_initial_and_followup_passages():
+    first = evidence(text='Upload limits and policy. ' * 150)
+    followup = evidence('b', text='Upload limit exception and policy details. ' * 120)
+    generator = Generator()
+    result = SearchAgent(Search([(first,), (followup,)]),
+        Critic([decision(suggested_queries=('upload exception',)), decision(True)]), generator,
+        config=AgentConfig(max_rounds=2, max_context_chars=3000)).run(request())
+    assert result.trace.stop_reason == 'sufficient'
+    assert {e.chunk.doc_id for e in generator.requests[0].evidence} == {'a','b'}
+    assert sum(len(e.chunk.text) for e in generator.requests[0].evidence) <= 3000

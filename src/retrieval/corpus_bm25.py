@@ -6,18 +6,23 @@ The index is built with vectorized NumPy instead of bm25s' per-token Python loop
 
 import argparse
 import json
+import os
 import re
 import time
 from collections import Counter
 from hashlib import sha256
 from pathlib import Path
 
-import bm25s
+# bm25s runs a JAX operation on import when JAX is installed (as on Colab). On a GPU, JAX
+# then reserves about 75% of its memory, leaving too little for embedding models and
+# rerankers. BM25 needs no GPU, so keep JAX on the CPU unless the caller chose otherwise.
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
+import bm25s  # noqa: E402
 import numpy as np
 import pyarrow.parquet as pq
 from pydantic import Field
 
-from src.retrieval.passages import bounded_passage
+from src.retrieval.passages import bounded_passage, slice_passage
 from src.config import CORPUS_DIR
 from src.contracts import Chunk, Contract, Evidence, SearchRequest, validate_evidence
 
@@ -153,6 +158,37 @@ class CorpusBM25:
         ranked = sorted(candidates, key=lambda i: (-matched[i], self.doc_ids[i]))
         return [(self.doc_ids[i], float(matched[i]) + offset) for i in ranked]
 
+    def rank_candidates(self, query, top_k, *, snapshot, catalog, mask):
+        """Trusted metadata-only scoring over an already validated catalogue.
+
+        The store adapter supplies a snapshot-bound, scope/source/date mask and
+        checks freshness. This primitive grants no authority and reads no text.
+        Empty canonical documents cannot produce a nonempty passage candidate.
+        """
+        from src.storage.contracts import RankedCandidate
+
+        if len(catalog) != len(self.doc_ids):
+            raise ValueError("BM25 catalogue differs from its document index")
+        provenance = "corpus-bm25-v1:" + sha256(json.dumps(
+            self.manifest, sort_keys=True, separators=(",", ":"),
+            allow_nan=False,
+        ).encode()).hexdigest()
+        result = []
+        for doc_id, score in self.rank(query, top_k, mask):
+            position = self.position[doc_id]
+            entry = catalog[position]
+            if entry.position != position or entry.doc_id != doc_id:
+                raise ValueError("BM25 catalogue order differs from its document index")
+            if not entry.text_length:
+                continue
+            candidate = RankedCandidate(snapshot=snapshot, doc_id=doc_id,
+                revision_id=entry.revision_id, source_type=entry.source_type,
+                start_char=0, end_char=entry.text_length, score=float(score),
+                retrieval_method="bm25", scoring_provenance=provenance)
+            candidate.validate_catalog(snapshot, entry)
+            result.append(candidate)
+        return tuple(result)
+
     def search(self, request: SearchRequest):
         """Contract-compatible search returning bounded query-relevant evidence."""
         if self.corpus is None:
@@ -184,8 +220,49 @@ class CorpusBM25:
         validate_evidence(request.user, results)
         return results
 
+    def read_more(self, request: SearchRequest, anchors: tuple[Evidence, ...], *, max_chars=3000):
+        """Read one adjacent exact window per matched document; never search new IDs.
+
+        This uses the existing corpus table, not a new index or a model call.
+        The parent hit's score/method are provenance, not a new relevance score.
+        """
+        validate_evidence(request.user, anchors)
+        if not 1 <= max_chars <= 6000 or len(anchors) > 2:
+            raise ValueError("Document expansion exceeds its configured bounds")
+        if self.corpus is None:
+            raise ValueError("Document expansion requires the corpus")
+        if request.after or request.before:
+            return ()  # Unknown timestamps must not pass date filters.
+        results, seen = [], set()
+        for anchor in anchors:
+            chunk = anchor.chunk
+            if chunk.doc_id in seen or chunk.doc_id not in self.position:
+                continue
+            seen.add(chunk.doc_id)
+            full = self._chunk(chunk.doc_id)
+            if full is None or (request.source_types and full.source_type not in request.source_types):
+                continue
+            if (full.source_type != chunk.source_type or chunk.end_char > full.end_char
+                    or full.text[chunk.start_char:chunk.end_char] != chunk.text):
+                raise ValueError("Expansion anchor differs from the canonical document")
+            if chunk.end_char < full.end_char:
+                start = max(0, chunk.end_char - min(256, max_chars // 4))
+                end = min(full.end_char, start + max_chars)
+            else:
+                end = min(full.end_char, chunk.start_char + min(256, max_chars // 4))
+                start = max(0, end - max_chars)
+            if start >= end or (start >= chunk.start_char and end <= chunk.end_char):
+                continue
+            full_hit = anchor.model_copy(update={"chunk": full, "citation_id": full.chunk_id})
+            results.append(slice_passage(full_hit, start, end))
+        result = tuple(results)
+        validate_evidence(request.user, result)
+        return result
+
     def _chunk(self, doc_id):
         # Slice one row without concatenating the full chunked string columns.
+        if self.corpus is None:
+            raise ValueError('Document text requires a loaded corpus')
         row = self.corpus.slice(self.position[doc_id], 1).to_pylist()[0]
         text = document_text(row["title"], row["content"])
         if not text.strip():

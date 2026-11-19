@@ -1,0 +1,300 @@
+x-operator-build: &operator-build
+  context: .
+  target: operator
+  args:
+    INSTALL_HYBRID: "false"
+x-app-build: &app-build
+  context: .
+  target: app
+  args:
+    INSTALL_HYBRID: ${INSTALL_HYBRID:-true}
+x-runtime-db: &runtime-db
+  RAG_DB_HOST: db
+  RAG_DB_NAME: ${RAG_DB_NAME:-rag}
+  RAG_DB_USER: rag_runtime
+  RAG_DB_PASSWORD: ${RAG_DB_RUNTIME_PASSWORD:?Set a private runtime password before startup}
+  RAG_DB_IDLE_TRANSACTION_TIMEOUT_MS: ${RAG_DB_IDLE_TRANSACTION_TIMEOUT_MS:-15000}
+x-migrator-db: &migrator-db
+  RAG_DB_HOST: db
+  RAG_DB_NAME: ${RAG_DB_NAME:-rag}
+  RAG_DB_USER: rag_migrator
+  RAG_DB_PASSWORD: ${RAG_DB_MIGRATOR_PASSWORD:?Set a separate private migration password}
+x-operator: &operator
+  image: ${RAG_OPERATOR_IMAGE:-redwood-rag-operator:local}
+  pull_policy: never
+  build: *operator-build
+  profiles: [operator]
+  init: true
+  restart: "no"
+  healthcheck:
+    disable: true
+  mem_limit: 768m
+  memswap_limit: 768m
+  cpu_period: 100000
+  cpu_quota: 200000
+  pids_limit: 128
+  depends_on:
+    db:
+      condition: service_healthy
+  environment:
+    <<: *migrator-db
+    OPENBLAS_NUM_THREADS: 2
+    OMP_NUM_THREADS: 2
+  volumes:
+    - corpus-data:/data/corpus:ro
+    - index-data:/data/indexes:ro
+    - stack-state:/state
+
+services:
+  db:
+    image: postgres:17.11-bookworm@sha256:839fbb5a4942a7758dd93e18b42ea5649807491a0545b5eeeb8f0b8bb11857a5
+    # No published database port. This project owns one persistent database.
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: ${RAG_DB_NAME:-rag}
+      POSTGRES_PASSWORD: ${RAG_DB_BOOTSTRAP_PASSWORD:?Set a separate private bootstrap password}
+      RAG_DB_MIGRATOR_PASSWORD: ${RAG_DB_MIGRATOR_PASSWORD:?Set a separate private migration password}
+      RAG_DB_RUNTIME_PASSWORD: ${RAG_DB_RUNTIME_PASSWORD:?Set a private runtime password}
+    command: [postgres, -c, shared_buffers=32MB, -c, work_mem=4MB,
+              -c, maintenance_work_mem=32MB, -c, max_connections=20,
+              -c, max_wal_size=128MB, -c, min_wal_size=32MB]
+    mem_limit: 384m
+    memswap_limit: 384m
+    cpu_period: 100000
+    cpu_quota: 100000
+    pids_limit: 128
+    restart: "no"
+    stop_grace_period: 60s
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -h 127.0.0.1 -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sh:/docker-entrypoint-initdb.d/10-roles.sh:ro
+
+  verify:
+    image: ${RAG_APP_IMAGE:-redwood-rag:local}
+    pull_policy: never
+    build: *app-build
+    command: [python, -m, src.api.deployment_check, --snapshot, /state/snapshot.json, --receipt, /state/deployment.json]
+    healthcheck:
+      disable: true
+    restart: "no"
+    mem_limit: 192m
+    memswap_limit: 192m
+    cpu_period: 100000
+    cpu_quota: 100000
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      <<: *runtime-db
+    volumes:
+      - stack-state:/state:ro
+
+  app:
+    image: ${RAG_APP_IMAGE:-redwood-rag:local}
+    pull_policy: never
+    build: *app-build
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8000}:8000"
+    init: true
+    stop_grace_period: 60s
+    restart: "no"
+    mem_limit: 6g
+    memswap_limit: 6g
+    cpu_period: 100000
+    cpu_quota: 200000
+    pids_limit: 256
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    depends_on:
+      db:
+        condition: service_healthy
+      verify:
+        condition: service_completed_successfully
+    environment:
+      <<: *runtime-db
+      # Keep independent Torch, FAISS and BLAS pools from competing for the
+      # app's two-CPU quota during embedding and exact dense scanning.
+      OMP_NUM_THREADS: 1
+      OPENBLAS_NUM_THREADS: 1
+      MKL_NUM_THREADS: 1
+      RAG_MODE: ${RAG_MODE:-retrieval}
+      RAG_DEMO_ACCESS: "false"
+      RAG_AUTH_MODE: local
+      RAG_AUTH_ENABLED: "true"
+      RAG_AUTH_ALLOWED_ORIGINS: ${RAG_AUTH_ALLOWED_ORIGINS:-}
+      RAG_ALLOWED_ORIGINS: "http://127.0.0.1:${WEB_PORT:-8000},http://localhost:${WEB_PORT:-8000}"
+      RAG_AUTH_SECURE_COOKIES: ${RAG_AUTH_SECURE_COOKIES:-false}
+      RAG_AUTH_ALLOW_INSECURE_LOOPBACK: ${RAG_AUTH_ALLOW_INSECURE_LOOPBACK:-true}
+      RAG_AUTH_IDLE_SECONDS: ${RAG_AUTH_IDLE_SECONDS:-1800}
+      RAG_AUTH_ABSOLUTE_SECONDS: ${RAG_AUTH_ABSOLUTE_SECONDS:-28800}
+      RAG_RETRIEVAL: ${RAG_RETRIEVAL:-hybrid}
+      RAG_CORPUS: /data/corpus/documents.parquet
+      RAG_BM25_INDEX: /data/indexes/bm25
+      RAG_DENSE_INDEX: /data/indexes/dense-bge-base
+      RAG_SNAPSHOT_FILE: /state/snapshot.json
+      RAG_DEPLOYMENT_RECEIPT: /state/deployment.json
+      RAG_DENSE_BLOCK_ROWS: ${RAG_DENSE_BLOCK_ROWS:-8192}
+      RAG_DENSE_FILE_CACHE_POLICY: ${RAG_DENSE_FILE_CACHE_POLICY:-retain}
+      RAG_DEVICE: cpu
+      RAG_FP16: ${RAG_FP16:-}
+      RAG_BM25_WEIGHT: ${RAG_BM25_WEIGHT:-0.7}
+      RAG_CANDIDATE_K: ${RAG_CANDIDATE_K:-50}
+      RAG_RERANK_K: ${RAG_RERANK_K:-50}
+      RAG_RRF_K: ${RAG_RRF_K:-60}
+      RAG_ALLOWED_DOC_IDS_FILE: ${RAG_ALLOWED_DOC_IDS_FILE:-}
+      RAG_ALLOWED_SOURCES: ${RAG_ALLOWED_SOURCES:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      RAG_ALLOW_PAID: ${RAG_ALLOW_PAID:-false}
+      RAG_MODEL: ${RAG_MODEL:-}
+      RAG_BUDGET_USD: ${RAG_BUDGET_USD:-0}
+      RAG_INPUT_PRICE: ${RAG_INPUT_PRICE:-0}
+      RAG_OUTPUT_PRICE: ${RAG_OUTPUT_PRICE:-0}
+      RAG_QUESTION_BUDGET_USD: ${RAG_QUESTION_BUDGET_USD:-0.1}
+      RAG_MAX_SECONDS: ${RAG_MAX_SECONDS:-120}
+      RAG_REQUEST_TIMEOUT_SECONDS: ${RAG_REQUEST_TIMEOUT_SECONDS:-180}
+      RAG_MAX_TOKENS: ${RAG_MAX_TOKENS:-16000}
+      RAG_MAX_CONTEXT_CHARS: ${RAG_MAX_CONTEXT_CHARS:-24000}
+      RAG_MODEL_MAX_OUTPUT_TOKENS: ${RAG_MODEL_MAX_OUTPUT_TOKENS:-1024}
+      RAG_CRITIC_MAX_OUTPUT_TOKENS: ${RAG_CRITIC_MAX_OUTPUT_TOKENS:-2048}
+      RAG_MAX_ROUNDS: ${RAG_MAX_ROUNDS:-2}
+      RAG_TOP_K: ${RAG_TOP_K:-5}
+      RAG_EVIDENCE_DOC_LIMIT: ${RAG_EVIDENCE_DOC_LIMIT:-8}
+      RAG_OBSERVABILITY_ADMIN_USER_IDS: ${RAG_OBSERVABILITY_ADMIN_USER_IDS:-}
+    volumes:
+      - corpus-data:/data/corpus:ro
+      - index-data:/data/indexes:ro
+      - model-cache:/app/.cache/models:ro
+      - stack-state:/state:ro
+
+  stage-artifacts:
+    <<: *operator
+    profiles: [setup]
+    user: "0:0"
+    depends_on: {}
+    environment:
+      OMP_NUM_THREADS: 2
+      OPENBLAS_NUM_THREADS: 2
+    command: [python, scripts/local_data.py, stage-artifacts, --source, /source,
+              --corpus-output, /data/corpus, --indexes-output, /data/indexes, --state, /state]
+    volumes:
+      - type: bind
+        source: ${ARTIFACTS_DIR:-./.cache/hybrid-artifacts}
+        target: /source
+        read_only: true
+        bind:
+          create_host_path: false
+      - corpus-data:/data/corpus
+      - index-data:/data/indexes
+      - stack-state:/state
+
+  stage-models:
+    <<: *operator
+    profiles: [setup]
+    user: "0:0"
+    depends_on: {}
+    environment:
+      OMP_NUM_THREADS: 2
+      OPENBLAS_NUM_THREADS: 2
+    command: [python, scripts/local_data.py, stage-models, --source, /model-source,
+              --dense-directory, /data/indexes/dense-bge-base, --output, /app/.cache/models, --state, /state]
+    volumes:
+      - type: bind
+        source: ${MODELS_DIR:-./.cache/models}
+        target: /model-source
+        read_only: true
+        bind:
+          create_host_path: false
+      - index-data:/data/indexes:ro
+      - model-cache:/app/.cache/models
+      - stack-state:/state
+
+  migrate:
+    <<: *operator
+    command: [python, -m, src.db.migrate]
+    mem_limit: 192m
+    memswap_limit: 192m
+    cpu_period: 100000
+    cpu_quota: 100000
+    volumes: []
+
+  import-corpus:
+    <<: *operator
+    command: [python, scripts/local_data.py, import-corpus, --corpus, /data/corpus/documents.parquet,
+              --dense-directory, /data/indexes/dense-bge-base, --state, /state,
+              --snapshot-id, "${RAG_SNAPSHOT_ID:-enterprise-bge-base-canonical}"]
+
+  import-jira:
+    <<: *operator
+    user: "0:0"
+    command: [python, -m, src.data.structured, --source-repo, /source-repo,
+              --corpus, /data/corpus/documents.parquet, --snapshot, /state/snapshot.json]
+    environment:
+      <<: *migrator-db
+      GIT_CONFIG_COUNT: 1
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: /source-repo
+      OMP_NUM_THREADS: 2
+      OPENBLAS_NUM_THREADS: 2
+    volumes:
+      - corpus-data:/data/corpus:ro
+      - stack-state:/state:ro
+      - type: bind
+        source: ${SOURCE_REPO_DIR:-./.cache/local-source}
+        target: /source-repo
+        read_only: true
+        bind:
+          create_host_path: false
+
+  prepare-state:
+    image: ${RAG_APP_IMAGE:-redwood-rag:local}
+    pull_policy: never
+    build: *app-build
+    profiles: [operator]
+    command: [python, -m, src.api.deployment_check, --snapshot, /state/snapshot.json,
+              --publish-receipt, /state/deployment.json]
+    healthcheck:
+      disable: true
+    restart: "no"
+    mem_limit: 192m
+    memswap_limit: 192m
+    cpu_period: 100000
+    cpu_quota: 100000
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      <<: *runtime-db
+    volumes:
+      - stack-state:/state
+
+  operator:
+    <<: *operator
+    user: "${LOCAL_UID:-10001}:${LOCAL_GID:-10001}"
+    stdin_open: true
+    tty: true
+    command: [python, -m, src.auth.accounts, --help]
+    volumes:
+      - corpus-data:/data/corpus:ro
+      - index-data:/data/indexes:ro
+      - stack-state:/state:ro
+      - type: bind
+        source: ${OPERATOR_DIR:-./.cache/local-operator}
+        target: /operator
+        bind:
+          create_host_path: false
+
+volumes:
+  postgres-data:
+  corpus-data:
+  index-data:
+  model-cache:
+  stack-state:

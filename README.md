@@ -1,181 +1,133 @@
 # Agentic RAG for Enterprise Knowledge Search
 
-A course project that answers questions about a company's internal documents
-(Slack, email, tickets, wikis, and more) and cites the documents it used.
+This app helps users find answers in a fictional company's documents. You sign
+in, ask a question, and see an answer with links to the documents used. The app
+only searches documents your account is allowed to read.
 
-**Status:** the two retrieval baselines are evaluated on the full dataset.
-Hybrid retrieval, reranking, and the search agent have offline implementations;
-live quality and performance validation remain pending. C3 answer evaluation is
-currently on hold.
+## Demo
 
-## How it will work
+[Watch the demo video](https://youtu.be/5jo-Nh9HjOg)
 
-```text
-Question → Search Agent → Retrieve documents → Search Critic ("is this enough?")
-         → search again if needed → Generate answer with sources
-```
+**RAG** means *retrieval-augmented generation*: find relevant information first,
+then give it to a language model to help answer the question.
 
-## Dataset
+<a id="application-behavior"></a>
 
-[EnterpriseRAG-Bench](https://github.com/onyx-dot-app/EnterpriseRAG-Bench) is a
-synthetic company, "Redwood Inference", with:
+## What the app does
 
-- **511,958 documents** from 9 sources (Slack, Gmail, Linear, Google Drive,
-  HubSpot, Fireflies, GitHub, Jira, Confluence)
-- **500 questions**, each labeled with the documents that answer it
+- **Search:** combines keyword search with search by meaning. This is called
+  **hybrid retrieval**.
+- **Fixed RAG:** searches once, then asks the language model to answer. That
+  search round can include several queries.
+- **Adaptive agent:** checks whether the search found the facts needed. It can
+  read more of a document or search again before answering.
+- **Document permissions:** each account has an explicit list of documents it
+  can access. A role name such as `employee` does not grant access by itself.
+- **Jira questions:** can look up imported Jira records and count them when the
+  required data is available. It does not connect to a live Jira account.
+- **Observability:** a separate admin page shows request timings, usage and
+  errors. Access to this page does not grant access to documents.
 
-We split the questions into **development** (300, for building and comparing),
-**calibration** (100, for tuning later), and **final** (100, untouched until the
-end). The split is in `evaluation/splits.json`.
+The default setup returns search results **without paid model calls**. Generated
+answers and the model-driven agent need the separate live-mode setup.
 
-## Results so far
+<a id="run-locally"></a>
 
-Two baselines, scored on the 300 development questions (282 have labeled answer
-documents):
+## Run it on your computer
 
-| Baseline | What it does | Recall@10 | nDCG@10 |
-| --- | --- | ---: | ---: |
-| **BM25+** | Keyword search: matches the question's words | **0.692** | **0.604** |
-| **BGE-small + FAISS** | Meaning search: matches similar meaning | 0.468 | 0.367 |
+Start with the [step-by-step setup guide](docs/WEB_APP.md). You will need:
 
-- **Recall@10**: share of the correct documents found in the top 10 results.
-- **nDCG@10**: also rewards ranking the correct documents near the top (1.0 is perfect).
+1. Git, Python 3.11 and Docker with Compose.
+2. A computer with 16 GiB of RAM and about 8 GiB available to Docker.
+3. The prepared document and search-index bundle, a matching embedding-model
+   cache, and the dataset source checkout described in the guide.
 
-What this means:
+The large data files are **not included in Git**. The team's prepared bundle is
+in `files_web_app` in the [team Drive folder](https://drive.google.com/drive/folders/1ltfTpNLGdl_S9dBnozACJj3Eo1_Cc8i7?usp=sharing).
+Team-folder access may be needed. The setup guide explains the additional model
+and source files and how to check them.
 
-- Keyword search wins in every question type, likely because this dataset is
-  full of project codenames and IDs, which exact word matching handles well.
-- BGE finds some documents that keyword search misses. Merging the two with more
-  weight on keyword search raises Recall@10 slightly (0.692 → 0.705); bigger gains
-  likely need re-ranking or a stronger model.
+Setup creates the database and starts the app, but it does not create a login.
+You must [create an account and grant document access](docs/WEB_APP.md#local-account-api).
+Then open **http://127.0.0.1:8000** on the computer running Docker.
 
-Full results by question type: [docs/FULL_CORPUS.md](docs/FULL_CORPUS.md).
+To enable generated answers, follow
+[live-mode setup](docs/WEB_APP.md#enable-live-generation). It explains the API
+key, document excerpts sent to Anthropic, and spending limits.
 
-## Quick start
+## Testing a teammate's version
 
-Set up Python 3.11:
+Use the exact testing branch or commit shared by your teammate. Follow the same
+setup guide on your own computer; pulling code does not copy someone else's
+database, login, permissions or private settings.
 
-```sh
-python3.11 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-python -m pytest
-```
+Create your own login, such as `hira`, and grant the documents you need to test.
+If you also need the diagnostics page, follow
+[Observability access](docs/WEB_APP.md#observability). A normal login is enough
+to use Search; Observability requires an extra permission.
 
-Direct dependencies are pinned to the tested environment. For the complete
-Python 3.11 macOS environment snapshot, use `requirements.lock.txt`; package
-availability may differ on other platforms. Fresh installation from the snapshot
-has not been verified. New pilot/retrieval manifests record runtime versions.
+<a id="validation-status"></a>
 
-**1. Build the dataset** (downloads about 5 GB, then takes about a minute):
+## What is working, and what still needs work?
 
-```sh
-python -m src.data.corpus --clone
-```
+The integrated app has passed specific real-browser and database checks.
+**Answer accuracy still needs evaluation.** One tested answer used a cited
+document with a date that disagreed with the reference answer. Working citations
+alone do not guarantee a correct answer.
 
-**2. Run the BM25+ baseline** (about 5 minutes; needs about 8 GB of memory):
+Read [current status and known limitations](docs/STATUS.md) for the verified
+features, remaining work and the difference between a functional check and a
+quality result.
 
-```sh
-python -m src.retrieval.corpus_bm25
-python -m src.evaluation.run_retrieval --method bm25 --split development \
-  --output .cache/retrieval-runs/bm25-development-new
-```
+<a id="dataset-and-earlier-retrieval-results"></a>
 
-**3. Run the BGE baseline** (needs a GPU; about 2 hours on a free Colab T4):
-open [`notebooks/dense_baseline_colab.ipynb`](notebooks/dense_baseline_colab.ipynb)
-in Colab and run all cells.
+Earlier retrieval scores are explained in
+[retrieval results](docs/FULL_CORPUS.md).
 
-Historical results are in `evaluation/results/`. The command above writes to
-`.cache/retrieval-runs/` to preserve them; choose a fresh output directory per run.
+## Milestone 4 Updates:
 
-## Everyday commands
+- **Release candidate:** the web interface, FastAPI backend, PostgreSQL storage, login,
+  per-document permissions, hybrid search, Jira tools, and Fixed and adaptive RAG, packaged
+  with Docker Compose (`scripts/local_stack.py`). Setup: [docs/WEB_APP.md](docs/WEB_APP.md);
+  a demo video is linked [above](#demo).
+- **Adaptive agent:** the critic checks each fact the question asks for (supported, missing,
+  conflicting or ambiguous). The agent can read more of a found document, search again, or
+  ask the user to clarify, using up to eight documents of evidence.
+- **Retrieval results** (300 development questions, 282 scored; calibration checked once on 94):
 
-With the existing corpus and indexes in `.cache/corpus/`, these are the main
-commands. None makes paid calls or downloads models:
+  | Method | Recall@10 | nDCG@10 | Calibration Recall@10 |
+  | --- | ---: | ---: | ---: |
+  | BM25+ | 0.692 | 0.604 | 0.712 |
+  | Dense (BGE-base, title on every passage) | 0.487 | 0.416 | 0.487 |
+  | **Hybrid (BM25+ 0.7, BGE-base 0.3, RRF)** | **0.722** | **0.604** | **0.767** |
 
-```sh
-# Check code correctness
-.venv/bin/python -m pytest -q
+- **Latency and cost** (adaptive mode, 25 development questions, 16 GB laptop CPU): median
+  28.6 s per question (mean 30.0 s), about $0.013 per question.
+- **Live answer check** (same 25 questions, informal comparison with the reference answers):
+  17 answered: 7 correct, 2 partly correct, 8 wrong; 7 asked the user to clarify. Every
+  answer that cited a reference document was correct or partly correct; the wrong answers
+  came from similar documents when search missed the right one.
+- **Further experiments on `hira/dev`** (not in this release): longer evidence excerpts
+  (6,000 characters) and two agent fixes raised answered questions from 25 to 34 of 70, and
+  gave 7 correct and only 2 wrong answers on the 25 questions. Whole-document rerankers and
+  path headers were tested and not adopted. Details:
+  [docs/HIRA_DEV_EXPERIMENTS.md](docs/HIRA_DEV_EXPERIMENTS.md).
+- **Next:** combine the checklist critic with longer excerpts and a rule that answers must
+  cite a matching source; validate critic decisions and answer grades with human review.
 
-# Check BM25 artifact readiness
-.venv/bin/python -m src.agents.pilot
+<a id="documentation"></a>
 
-# Compare 20 development queries (choose a fresh label each time)
-.venv/bin/python -m src.evaluation.compare_fixes --label my-check
-```
+## Where to read next
 
-Add `--memory` to the comparison command for a separate full dense-index loading
-measurement without a query model. See [evaluation guidance](docs/EVALUATION.md)
-for the distinction between these checks and answer-quality evaluation.
-
-## Pilot options
-
-Reuse matching `.cache/corpus/documents.parquet`, `questions.jsonl`, and the entire
-`indexes/bm25/` directory. Saved result JSON files cannot replace these artifacts.
-Hybrid search also needs `indexes/dense/` and a query model matching its manifest.
-For an fp32 index, use `--retrieval hybrid --device cpu --no-fp16`; for Hira's
-Colab fp16 index, use `--retrieval hybrid --device cuda` on an NVIDIA GPU machine.
-CPU fp16 support varies; hybrid setup may download BGE if it is not cached.
-
-Live runs require `ANTHROPIC_API_KEY` and explicit model, total budget, and current
-prices per million tokens. Replace the placeholders before running:
-
-```sh
-python -m src.agents.pilot --live --count 1 \
-  --model MODEL_ID --budget-usd TOTAL_DOLLARS \
-  --input-price INPUT_DOLLARS_PER_MILLION \
-  --output-price OUTPUT_DOLLARS_PER_MILLION
-```
-
-Paid calls are off by default. One provider shares the run's budget; SDK retries
-are disabled. Use one worker; prices and token counts are estimates. Pilot outputs
-in `.cache/agent-pilot/<timestamp>/` include cases, a reference review sheet,
-usage summary, and a manifest with code/data/model/prompt/runtime versions.
-The pilot is a debugging tool; **C3 answer evaluation remains paused**.
-
-**Live demo:** open [`notebooks/demo_colab.ipynb`](notebooks/demo_colab.ipynb) in Colab to
-search all documents interactively and run the benchmark live.
-
-## Repository layout
-
-| Folder | Contents |
+| I want to… | Read this |
 | --- | --- |
-| `src/data/` | Building the dataset |
-| `src/retrieval/` | BM25+, BGE, hybrid fusion, and optional reranking |
-| `src/evaluation/` | Evaluation code: retrieval metrics, runner, splits, and offline comparisons |
-| `src/generation/` | Writing answers with an LLM (paid calls are off by default) |
-| `src/agents/` | Search Agent, Search Critic, routing, and development pilot |
-| `src/api/` | Planned web API |
-| `evaluation/` | Saved evaluation data only: frozen splits, corpus record, historical results |
-| `.cache/` | Local corpus/index artifacts and temporary experiment outputs (Git-ignored) |
-| `docs/` | Topic guides; start with this README for commands and navigation |
-| `notebooks/` | Colab notebooks: the BGE baseline, and a live search demo |
-| `tests/` | Four test modules: retrieval, generation/contracts, agents, evaluation |
+| Install and use the app | [Setup](docs/WEB_APP.md) |
+| Understand the search and agent workflow | [How the system works](docs/SYSTEM.md) |
+| See completed work and open issues | [Current status](docs/STATUS.md) |
+| Understand the dataset | [Dataset guide](docs/DATA_CARD.md) |
+| Understand the search models and settings | [Retriever guide](docs/model_card_hybrid_retriever.md) |
+| Test retrieval or answer quality | [Evaluation guide](docs/EVALUATION.md) |
+| Contribute code | [Contributing](CONTRIBUTING.md) |
+| Find a term or another document | [Documentation index and glossary](docs/README.md) |
 
-## Documentation
-
-Read these in order; each guide owns one topic:
-
-1. [System](docs/SYSTEM.md): workflow, component roles, status and limitations.
-2. [Baseline Results](docs/FULL_CORPUS.md): measured retrieval scores and exact run
-   settings. Start here after README for a TA progress review.
-3. [Evaluation](docs/EVALUATION.md): measurements, frozen splits and planned answer
-   rubric. C3 LLM answer evaluation is paused.
-4. [Data Card](docs/DATA_CARD.md): provenance, license, counts and dataset risks.
-
-Personal implementation and merge plans are kept separately under `docs/local/`
-and excluded from Git. They are historical planning records, not public status
-reports or evidence that tickets are complete.
-
-## Contributing
-
-Workflow: personal branch → `staging` → `main`.
-See [Contributing](CONTRIBUTING.md) and [Code of Conduct](CODE_OF_CONDUCT.md).
-
-## Team
-
-Hira Mian, Jane Choi, and Alexander Xykis.
-
-## License
-
-[MIT](LICENSE).
+Team: Hira Mian, Jane Choi and Alexander Xykis. [MIT License](LICENSE).
