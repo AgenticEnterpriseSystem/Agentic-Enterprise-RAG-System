@@ -65,6 +65,17 @@ Do not add an overall summary or confidence score. In citation_ids copy citation
 verbatim INCLUDING all colon-delimited offsets; only read_more_doc_ids uses doc_id.
 Never assume access to reference answers or sources outside this request."""
 
+# Appended only when a caller fixes the checklist. It changes who decides which
+# facts were requested, not how evidence is judged, so the two can be measured
+# separately (CAL-01 planning versus critic judgment).
+REQUESTED_FACTS_ADDENDUM = """
+
+The request includes requested_facts: the complete checklist of facts the user
+asked for, fixed before this assessment. Return exactly one facts entry per
+requested fact, copying its label verbatim as fact, in the given order. Do not
+add, merge, split or rename facts."""
+MAX_REQUESTED_FACTS = 10
+
 
 ERROR_CODES = frozenset({'agent_error', 'invalid_input', 'truncated_output', 'invalid_json',
     'invalid_schema', 'provider_error', 'invalid_citation', 'missing_claims'})
@@ -141,7 +152,14 @@ class EvidenceCritic:
         self.on_input = on_input
         self.max_output_tokens = max_output_tokens
 
-    def assess(self, request: GenerationRequest) -> tuple[CriticDecision, Usage]:
+    def assess(self, request: GenerationRequest, *,
+               requested_facts: tuple[str, ...] | None = None) -> tuple[CriticDecision, Usage]:
+        if requested_facts is not None:
+            requested_facts = tuple(requested_facts)
+            if (not 1 <= len(requested_facts) <= MAX_REQUESTED_FACTS
+                    or any(not isinstance(f, str) or not f.strip() for f in requested_facts)
+                    or len(set(requested_facts)) != len(requested_facts)):
+                raise AgentError('Requested facts must be 1 to 10 unique non-empty labels.', code='invalid_input')
         assert_dispatch_current(request.user)
         validate_evidence(request.user, request.evidence)
         if len(request.question) > self.config.max_question_chars:
@@ -153,6 +171,7 @@ class EvidenceCritic:
         # Freeze the wire payload before notifying an observer. The observer
         # receives independent DTOs and JSON, never the objects sent to a model.
         payload = json.dumps({"question": request.question,
+                              **({"requested_facts": list(requested_facts)} if requested_facts else {}),
                               "evidence": [evidence_payload(e) for e in selected]})
         try:
             if self.on_input is not None:
@@ -185,10 +204,15 @@ class EvidenceCritic:
             output_schema['properties']['facts']['minItems'] = 1
             fact_schema = output_schema['$defs']['FactAssessment']
             fact_schema['required'] = list(dict.fromkeys(fact_schema['required'] + ['claims']))
+        if requested_facts:
+            output_schema['$defs']['FactAssessment']['properties']['fact']['enum'] = list(requested_facts)
+            output_schema['properties']['facts']['minItems'] = len(requested_facts)
+            output_schema['properties']['facts']['maxItems'] = len(requested_facts)
+        system = self.system_prompt + (REQUESTED_FACTS_ADDENDUM if requested_facts else '')
         try:
             with output_token_limit(self.max_output_tokens):
                 assessment, usage = structured_completion(
-                    self.provider, self.system_prompt, json.loads(payload),
+                    self.provider, system, json.loads(payload),
                     response_model, output_schema=output_schema,
                 )
         finally:
@@ -232,8 +256,17 @@ class EvidenceCritic:
                                                        if claim.answers_requested_fact))})
             normalized_facts.append(fact)
         decision = decision.model_copy(update={'facts': tuple(normalized_facts)})
-        if decision.facts:
-            gaps = tuple(f.fact for f in decision.facts if f.status != 'supported')
+        if requested_facts:
+            # A fixed checklist is authoritative: an omitted or renamed requested
+            # fact is unresolved, and extra facts cannot block or grant approval.
+            statuses: dict[str, list[str]] = {}
+            for fact in decision.facts:
+                statuses.setdefault(fact.fact, []).append(fact.status)
+            gaps = tuple(label for label in requested_facts
+                         if not statuses.get(label) or any(s != 'supported' for s in statuses[label]))
+        else:
+            gaps = tuple(f.fact for f in decision.facts if f.status != 'supported') if decision.facts else None
+        if gaps is not None:
             decision = decision.model_copy(update={
                 'sufficient': not gaps,
                 'missing_facts': gaps,

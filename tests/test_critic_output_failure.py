@@ -204,3 +204,29 @@ def test_question_length_has_explicit_nonprovider_category():
     supplied = request().model_copy(update={'question': 'q' * 8001}); provider = NativeProvider({})
     with pytest.raises(AgentError) as raised: EvidenceCritic(provider).assess(supplied)
     assert raised.value.code == 'invalid_input' and not provider.calls
+
+
+@pytest.mark.parametrize('claims,expected_status,sufficient', [
+    # Live Haiku replies quoted the evidence but left the redundant citation list
+    # empty; the decision used to be rejected as invalid_schema and end the run.
+    ([True], 'supported', True),
+    # Claims that do not answer the fact are not support; same rule the critic
+    # applies after validation, so this stops searching only when evidence exists.
+    ([False], 'missing', False),
+])
+def test_quoted_fact_without_citation_ids_is_judged_from_its_claims(claims, expected_status, sufficient):
+    supplied = request(); output = assessment(supplied)
+    fact = output['facts'][0]
+    fact['citation_ids'] = []
+    fact['claims'] = [dict(fact['claims'][0], answers_requested_fact=answers) for answers in claims]
+    decision, _ = EvidenceCritic(NativeProvider(output)).assess(supplied)
+    assert decision.facts[0].status == expected_status and decision.sufficient is sufficient
+    assert decision.facts[0].citation_ids == ((supplied.evidence[0].citation_id,) if sufficient else ())
+
+
+def test_supported_fact_with_neither_claims_nor_citations_is_still_rejected():
+    supplied = request(); output = assessment(supplied)
+    output['facts'][0].update(claims=[], citation_ids=[])
+    with pytest.raises(AgentError) as error:
+        EvidenceCritic(NativeProvider(output)).assess(supplied)
+    assert error.value.code == 'invalid_schema'

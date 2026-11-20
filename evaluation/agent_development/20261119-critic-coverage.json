@@ -1,0 +1,67 @@
+{
+  "cases": 20,
+  "conditions": {
+    "given": {
+      "attempted": 20,
+      "clarifications": 6,
+      "complete_cases": 9,
+      "completed": 17,
+      "cost_usd": 0.060119,
+      "errors": {
+        "invalid_schema": 3
+      },
+      "input_tokens": 43384,
+      "missing_fact_cases": 8,
+      "output_tokens": 3347,
+      "premature_approval_causes": {},
+      "premature_approvals": 0,
+      "unnecessary_continuation_causes": {
+        "critic_judgment": 1
+      },
+      "unnecessary_continuations": 1
+    },
+    "own": {
+      "attempted": 20,
+      "clarifications": 6,
+      "complete_cases": 8,
+      "completed": 17,
+      "cost_usd": 0.059217,
+      "errors": {
+        "invalid_schema": 3
+      },
+      "input_tokens": 41252,
+      "missing_fact_cases": 9,
+      "output_tokens": 3593,
+      "premature_approval_causes": {},
+      "premature_approvals": 0,
+      "unnecessary_continuation_causes": {
+        "critic_judgment": 1
+      },
+      "unnecessary_continuations": 1
+    }
+  },
+  "manifest": {
+    "cases_sha256": "860d582783349b4bedee01c9284d40d7ae7216b5eebc2c22e1a410c281c137ea",
+    "code": {
+      "commit": "a4711defea7f740a4696efa0d09c9b2bfa204400",
+      "dirty": true
+    },
+    "critic_prompt_sha256": "3a96f07e1e01b11d7032f3ddfdf114652edd6e18c8356d5bc19c202fd0d3e847",
+    "provider": {
+      "allow_paid": true,
+      "budget_usd": 0.5,
+      "input_usd_per_million": 1.0,
+      "max_output_tokens": 2048,
+      "model": "claude-haiku-4-5-20251001",
+      "output_usd_per_million": 5.0,
+      "timeout_seconds": 60.0
+    },
+    "requested_facts_addendum_sha256": "919310d633abed3a36eb3f056ec607245ee406e00aed967c5272f7e328f3da33"
+  },
+  "not_measured": [
+    "retrieval_gap: evidence is fixed per case",
+    "generator_omission: no answer is generated",
+    "human_agreement: fixture labels are AI-proposed"
+  ],
+  "stopped_early": false
+}

@@ -382,6 +382,22 @@ The saved collection has nine outcomes from an original ten-question selection a
 
 Eight known whole-case costs total $0.087626. Known stages total $0.089757, including a router stage in an otherwise unknown-cost case. These totals overlap; do not add them. A critic stage and the original interrupted question remain unknown. Invoice amounts are unverified.
 
+### Separate planning errors from critic judgment errors
+
+The deployed critic writes its own fact checklist in each call, and sufficiency means "nothing on that list is unresolved". A requested fact it leaves off the list therefore cannot block approval. `EvidenceCritic.assess(..., requested_facts=...)` accepts a fixed checklist instead: the model must return exactly those labels, and an omitted or renamed label counts as unresolved. Without `requested_facts`, the request and decision are unchanged.
+
+`python -m src.evaluation.critic_coverage` runs the critic on [20 synthetic cases](../tests/fixtures/critic_coverage_cases.json) under two conditions on identical evidence: `own` (deployed behavior) and `given` (annotated checklist). It reports both error directions, **premature approvals** (stopping while a requested fact is missing) and **unnecessary continuations** (searching again or asking for clarification when every fact is present), and attributes each error to a cause: `planning_omission`, `critic_judgment`, `over_asking` or `checklist_noncompliance`. Evidence is fixed and nothing is generated, so retrieval gaps and generator omissions are excluded by construction rather than measured. Labels are AI-proposed, not human, and none of the cases are calibration or final-split questions. Without `--live` it validates the fixtures and prints the planned call count; `--live` needs an explicit model, budget and token prices, refuses to overwrite an earlier output, stops at the first provider failure and saves aggregate counts only.
+
+**Result, November 19, 2026** (`claude-haiku-4-5-20251001`, 40 calls, $0.119; [aggregate file](../evaluation/agent_development/20261119-critic-coverage.json)):
+
+| | `own` checklist | `given` checklist |
+| --- | --- | --- |
+| Premature approvals | 0 of 9 | 0 of 8 |
+| Unnecessary continuations | 1 of 8 (critic judgment) | 1 of 9 (critic judgment) |
+| Rejected critic output (`invalid_schema`) | 3 of 20 | 3 of 20 |
+
+On fixed evidence the critic did not approve too early, and supplying the requested facts changed nothing, so these cases do not support "the critic skips requested details". The larger problem was rejected output: a follow-up diagnostic ($0.054, rule names only) traced the failures to facts marked supported with quoting claims but an empty `citation_ids` list. In the agent, a rejected critic reply ends the question with an error. `FactAssessment` now derives `citation_ids` (or `missing`) from answering claims before validation, the same rule the critic already applied afterwards. A rerun with the fix ([aggregate file](../evaluation/agent_development/20261120-critic-coverage-after-fix.json), $0.119) completed all 40 decisions: 0 rejected, 0 of 18 premature approvals, 2 of 22 unnecessary continuations. The critic runs at temperature 0 and token counts matched the first run, so this confirms the fix on the same replies, not on new ones. Small synthetic sample, AI-proposed labels; it says nothing about retrieval, passage selection or generation.
+
 Four blank human judgments are available; mistake metrics and an accepted freeze are not. These private collected packets are provided separately rather than bundled with a fresh checkout. The current deployed code has since changed, so those older captures must retain their original source identity. Current successful two-round browser flows do not fill these human labels or retroactively calibrate that older packet. See [Current status](STATUS.md) for the next acceptance step.
 
 <a id="paid-answer-comparison"></a>

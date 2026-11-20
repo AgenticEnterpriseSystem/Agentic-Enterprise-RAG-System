@@ -131,6 +131,20 @@ class FactAssessment(Contract):
     status: Literal['supported', 'missing', 'conflicting', 'ambiguous']
     citation_ids: tuple[Identifier, ...] = Field(default=(), max_length=6)
 
+    @model_validator(mode='before')
+    @classmethod
+    def citations_from_claims(cls, data):
+        # Live models often quote the evidence in claims but leave this redundant
+        # list empty. The critic derives citations and status from answering
+        # claims anyway, so do that here instead of rejecting the whole decision.
+        if not isinstance(data, dict) or data.get('citation_ids') or not data.get('claims'):
+            return data
+        answering = [claim for claim in data['claims']
+                     if isinstance(claim, dict) and claim.get('answers_requested_fact') is True]
+        if answering:
+            return {**data, 'citation_ids': list(dict.fromkeys(claim.get('citation_id') for claim in answering))}
+        return {**data, 'status': 'missing'} if data.get('status') in ('supported', 'conflicting') else data
+
     @model_validator(mode='after')
     def supported_has_citations(self):
         if self.status in ('supported', 'conflicting') and not self.citation_ids:

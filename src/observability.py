@@ -70,6 +70,11 @@ _COMMON_ERROR_NAMES = frozenset({
     'SnapshotMismatch', 'HTTPException', 'PermissionError', 'ContextBudgetError',
     'FrozenContextError', 'OtherError',
 })
+_PROGRESS_REQUEST_FIELDS = ('status', 'http_status_code', 'worker_status', 'started_at', 'completed_at',
+                            'duration_ms', 'rounds', 'error_code', 'error_type', 'usage')
+_PROGRESS_STAGE_FIELDS = ('sequence', 'stage', 'event', 'status', 'round_number', 'duration_ms',
+                          'reason_code', 'stop_reason', 'sufficient', 'error_code', 'error_type',
+                          'returned_count', 'unique_document_count', 'selected_document_count')
 _CURRENT: ContextVar[RequestObservation | None] = ContextVar('rag_request_observation', default=None)
 
 
@@ -166,6 +171,8 @@ class Recorder:
         self._clock = clock
         self._lock = threading.RLock()
         self._requests = OrderedDict()
+        # token -> (request_id, owner); bounded because every entry needs a retained request.
+        self._progress = {}
         self._queue = Queue(maxsize=max(1, min(10000, int(queue_size))))
         self._closed = threading.Event()
         self._dropped_logs = self._logging_failures = self._evicted_requests = 0
@@ -203,6 +210,9 @@ class Recorder:
         while len(self._requests) > self.max_requests:
             self._requests.popitem(last=False)
             self._evicted_requests += 1
+        for token, (request_id, _owner) in tuple(self._progress.items()):
+            if request_id not in self._requests:
+                del self._progress[token]
 
     def start_request(self, request_id=None):
         observation = RequestObservation(self, _uuid(request_id) or str(uuid4()))
@@ -266,6 +276,46 @@ class Recorder:
         except Exception:
             return None
 
+    def bind_progress(self, observation, token, owner):
+        try:
+            key = _uuid(token)
+            if key is None or not isinstance(observation, RequestObservation):
+                return
+            with self._lock:
+                self._prune(self._now())
+                existing = self._progress.get(key)
+                if existing is not None and existing[0] != observation.request_id:
+                    return
+                if observation.request_id not in self._requests:
+                    return
+                # One token per request keeps the registry no larger than the request history.
+                if observation._progress_token not in (None, key):
+                    return
+                observation._progress_token = key
+                self._progress[key] = (observation.request_id, owner)
+        except Exception:
+            pass
+
+    def progress(self, token, owner):
+        try:
+            key = _uuid(token)
+            if key is None:
+                return None
+            with self._lock:
+                self._prune(self._now())
+                bound = self._progress.get(key)
+                if bound is None or bound[1] != owner:
+                    return None
+                observation = self._requests.get(bound[0])
+                if observation is None:
+                    return None
+                summary = observation._summary()
+                return {'request': {name: summary[name] for name in _PROGRESS_REQUEST_FIELDS},
+                        'stages': [{name: item[name] for name in _PROGRESS_STAGE_FIELDS if name in item}
+                                   for item in observation._events]}
+        except Exception:
+            return None
+
     def stats(self):
         with self._lock:
             self._prune(self._now())
@@ -285,6 +335,7 @@ class RequestObservation:
     def __init__(self, recorder, request_id):
         self.recorder, self.request_id = recorder, request_id
         self.run_id = None
+        self._progress_token = None
         self._started = recorder._now()
         self._started_at = recorder._timestamp()
         self._completed_at = None
@@ -426,6 +477,15 @@ def bind_run(run_id):
         observation = _CURRENT.get()
         if observation is not None:
             observation.bind_run(run_id)
+    except Exception:
+        pass
+
+
+def bind_progress(token, owner):
+    try:
+        observation = _CURRENT.get()
+        if observation is not None:
+            observation.recorder.bind_progress(observation, token, owner)
     except Exception:
         pass
 

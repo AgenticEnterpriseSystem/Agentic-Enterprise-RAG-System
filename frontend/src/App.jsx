@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createAuthLifecycle } from "./auth.js";
 import Observability from "./Observability.jsx";
+import QueryProgress from "./QueryProgress.jsx";
 import "./style.css";
 
 const stops = {
@@ -136,6 +137,7 @@ function App() {
     [error, setError] = useState("");
   const [selected, setSelected] = useState("");
   const [requestId, setRequestId] = useState("");
+  const [progress, setProgress] = useState(null), [elapsedMs, setElapsedMs] = useState(0);
   const [auth, setAuth] = useState({ status: "checking", enabled: null, error: "" });
   const [login, setLogin] = useState(""), [password, setPassword] = useState("");
   const cards = useRef({}), authClient = useRef(null), queryController = useRef(null);
@@ -165,7 +167,7 @@ function App() {
       queryController.current?.abort();
       queryController.current = null;
       setQuestion(""); setSource(""); setResult(null); setSelected(""); setError("");
-      setLoading(false); setLogin(""); setPassword(""); setRequestId(""); cards.current = {};
+      setProgress(null); setLoading(false); setLogin(""); setPassword(""); setRequestId(""); cards.current = {};
     } });
     authClient.current = client;
     client.start();
@@ -200,11 +202,41 @@ function App() {
     setRequestId("");
     setResult(null);
     setSelected("");
+    setProgress({ stages: [], outcome: "", unavailable: false });
+    setElapsedMs(0);
+    // The browser cannot know the server's request id until the response
+    // returns, so it supplies a correlation token for polling.
+    const progressId = crypto.randomUUID(), startedAt = performance.now();
+    let failures = 0, polling = false, gaveUp = false, outcome = "";
+    async function pollProgress() {
+      if (polling || gaveUp || !current()) return;
+      polling = true;
+      try {
+        const response = await fetch(`/api/query/progress/${progressId}`, {
+          credentials: "same-origin", cache: "no-store", signal: controller.signal });
+        if (!current()) return;
+        // Binding happens after authentication on the server, so early 404s are expected.
+        if (response.status === 404 && performance.now() - startedAt < 5000) return;
+        if (!response.ok) throw new Error("progress");
+        const body = await response.json();
+        if (!current()) return;
+        failures = 0;
+        setProgress((previous) => ({ ...previous, stages: Array.isArray(body.stages) ? body.stages : [], unavailable: false }));
+      } catch {
+        if (!current() || controller.signal.aborted) return;
+        if (++failures >= 3) {
+          gaveUp = true;
+          setProgress((previous) => ({ ...previous, unavailable: true }));
+        }
+      } finally { polling = false; }
+    }
+    const pollTimer = setInterval(pollProgress, 1000);
+    const clockTimer = setInterval(() => { if (current()) setElapsedMs(performance.now() - startedAt); }, 200);
     try {
       const response = await fetch("/api/query", {
         method: "POST",
         credentials: "same-origin", cache: "no-store", signal: controller.signal,
-        headers: { "Content-Type": "application/json",
+        headers: { "Content-Type": "application/json", "X-Query-Progress-ID": progressId,
           ...(session.enabled ? { "X-CSRF-Token": session.csrf_token } : {}) },
         body: JSON.stringify({
           question,
@@ -221,12 +253,14 @@ function App() {
       if (response.status === 403 && body.detail?.code === "csrf_failed") { client.revalidate(); return; }
       if (body.answer && body.trace && Array.isArray(body.sources)) {
         setResult(body);
+        outcome = body.answer.status === "error" ? stops.error : stops[body.trace.stop_reason] || body.trace.stop_reason;
         if (!response.ok && body.answer.status !== "error")
           setError(
             "The request reached its limit. Review the result and search steps below.",
           );
       } else {
         const detail = body.detail;
+        outcome = detail?.code ? `Request failed (${detail.code})` : `Request failed (HTTP ${response.status})`;
         setError(
           typeof detail === "string"
             ? detail
@@ -238,12 +272,22 @@ function App() {
       }
     } catch {
       if (!current()) return;
+      outcome = "Connection lost before the request finished";
       setError(
         "The request could not finish. Check the connection. The server may still be working; wait before retrying.",
       );
     } finally {
+      clearInterval(pollTimer);
+      clearInterval(clockTimer);
+      if (current()) {
+        // One last read so stages finished since the previous tick are shown.
+        gaveUp = false; polling = false;
+        if (!controller.signal.aborted) await pollProgress();
+      }
       if (current()) {
         if (queryController.current === controller) queryController.current = null;
+        setElapsedMs(performance.now() - startedAt);
+        setProgress((previous) => ({ ...previous, outcome }));
         setLoading(false);
         refresh();
       }
@@ -457,13 +501,17 @@ function App() {
           </div>
         </form>
         {loading && (
-          <div className="loading" role="status">
+          <div className="loading">
             <span className="spinner" /> Searching the permitted sources…
             <small>
               The agent may check evidence and search again. Please keep this
               page open.
             </small>
+            <QueryProgress progress={progress} loading elapsedMs={elapsedMs} outcome="" />
           </div>
+        )}
+        {!loading && progress && (progress.outcome || progress.stages.length > 0) && (
+          <QueryProgress progress={progress} loading={false} elapsedMs={elapsedMs} outcome={progress.outcome} />
         )}
         {error && (
           <div className="notice error" role="alert">

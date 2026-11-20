@@ -1,0 +1,408 @@
+{
+ "provenance": "Synthetic CAL-01 development fixtures. The first 14 cases copy critic_development_cases.json (left unchanged so its recorded hashes stay valid) and add per-fact annotations; the two signer cases are new. Requested-fact lists, answered flags and match_terms are AI-proposed, not human judgments, and none of these are calibration or final-split questions. Four complete cases (side_detail_not_requested, derived_answer, applies_rate_stated, unrequested_confirmation) model the historical over-asking refusals recorded on hira/dev (qst_0454, qst_0314, qst_0420, qst_0462 patterns); they are paraphrased synthetic text, not those questions.",
+ "cases": [
+  {
+   "id": "partial",
+   "question": "What are retention, standard turnaround, and the payer for ProofPoint escrow?",
+   "evidence": "ProofPoint escrow retention is 90 days. Standard access turnaround is 4 business hours; escalated is 1 business hour. Billing payer is still awaiting confirmation.",
+   "requested_facts": [
+    {
+     "label": "ProofPoint escrow retention",
+     "answered": true,
+     "match_terms": [
+      "retention",
+      "retain"
+     ]
+    },
+    {
+     "label": "ProofPoint escrow standard turnaround",
+     "answered": true,
+     "match_terms": [
+      "turnaround",
+      "sla"
+     ]
+    },
+    {
+     "label": "ProofPoint escrow payer",
+     "answered": false,
+     "match_terms": [
+      "pay",
+      "billing",
+      "billed"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "complete",
+   "question": "What are retention, standard turnaround, and the payer for ProofPoint escrow?",
+   "evidence": "ProofPoint escrow retention is 90 days. Standard access turnaround is 4 business hours; escalated is 1 business hour. AuditWorks storage fees are billed separately to the customer.",
+   "requested_facts": [
+    {
+     "label": "ProofPoint escrow retention",
+     "answered": true,
+     "match_terms": [
+      "retention",
+      "retain"
+     ]
+    },
+    {
+     "label": "ProofPoint escrow standard turnaround",
+     "answered": true,
+     "match_terms": [
+      "turnaround",
+      "sla"
+     ]
+    },
+    {
+     "label": "ProofPoint escrow payer",
+     "answered": true,
+     "match_terms": [
+      "pay",
+      "billing",
+      "billed"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "wrong_event",
+   "question": "What caused Acme EU vectorization requests to route to Asia during the March 15 incident?",
+   "evidence": "November 20 regional rehearsal for BetaCorp: policy-cache TTL mismatch routed requests to Asia.",
+   "requested_facts": [
+    {
+     "label": "Cause of March 15 Acme EU routing to Asia",
+     "answered": false,
+     "match_terms": [
+      "cause",
+      "rout",
+      "why"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "right_event",
+   "question": "What caused Acme EU vectorization requests to route to Asia during the March 15 incident?",
+   "evidence": "March 15 Acme EU vectorization incident RCA: control-plane heartbeat lag made residency stamps stale, so fallback selected the nearest healthy edge, including Asia.",
+   "requested_facts": [
+    {
+     "label": "Cause of March 15 Acme EU routing to Asia",
+     "answered": true,
+     "match_terms": [
+      "cause",
+      "rout",
+      "why"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "proposal_final",
+   "question": "What default grace window did the team choose?",
+   "evidence": "Review: suggest 30 seconds. Final decision: reject 30 seconds; choose 10 seconds as the default grace window.",
+   "requested_facts": [
+    {
+     "label": "Chosen default grace window",
+     "answered": true,
+     "match_terms": [
+      "grace",
+      "window"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "different_scope",
+   "question": "What are the multipart per-file and total request defaults?",
+   "evidence": "Multipart final defaults: max_file_size 10 MiB and max_total_request_size 50 MiB. A separate chunked-transfer endpoint caps aggregate uploads at 25 MiB.",
+   "requested_facts": [
+    {
+     "label": "Multipart per-file default",
+     "answered": true,
+     "match_terms": [
+      "per-file",
+      "per file",
+      "file size",
+      "max_file"
+     ]
+    },
+    {
+     "label": "Multipart total request default",
+     "answered": true,
+     "match_terms": [
+      "total",
+      "request size",
+      "aggregate"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "real_conflict",
+   "question": "What is the current multipart per-file default?",
+   "evidence": "Two current configuration records for the same endpoint and deployment disagree: record A says 10 MiB per file; record B says 20 MiB per file. Neither has a precedence rule.",
+   "requested_facts": [
+    {
+     "label": "Current multipart per-file default",
+     "answered": false,
+     "match_terms": [
+      "per-file",
+      "per file",
+      "file",
+      "default"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "unknown_date",
+   "question": "What is the current retention policy as of October 2026?",
+   "evidence": "Undated draft: retention may be 30 days. No effective date or finalized policy is included.",
+   "requested_facts": [
+    {
+     "label": "Retention policy in effect as of October 2026",
+     "answered": false,
+     "match_terms": [
+      "retention",
+      "policy"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "default_optional_extension",
+   "question": "What is the standard retention period and who pays for Beacon escrow?",
+   "evidence": "Beacon escrow policy: standard retention is 60 days; the customer pays storage fees. Customers may opt into a 180-day extension for an additional fee.",
+   "requested_facts": [
+    {
+     "label": "Beacon escrow standard retention",
+     "answered": true,
+     "match_terms": [
+      "retention",
+      "retain"
+     ]
+    },
+    {
+     "label": "Beacon escrow payer",
+     "answered": true,
+     "match_terms": [
+      "pay",
+      "billing",
+      "billed"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "unrelated_manifest_option",
+   "question": "What is the standard retention period and payer for Beacon escrow?",
+   "evidence": "Beacon escrow policy: the standard is 60 days, billed to the customer. A separate Delta deletion service offers a 6-month manifest-only audit archive.",
+   "requested_facts": [
+    {
+     "label": "Beacon escrow standard retention",
+     "answered": true,
+     "match_terms": [
+      "retention",
+      "retain"
+     ]
+    },
+    {
+     "label": "Beacon escrow payer",
+     "answered": true,
+     "match_terms": [
+      "pay",
+      "billing",
+      "billed"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cross_service_fact_splicing",
+   "question": "What are the default retention and payer for Beacon escrow?",
+   "evidence": "Beacon escrow default retention is 60 days. For Delta escrow, the customer pays storage fees. No Beacon billing arrangement is supplied.",
+   "requested_facts": [
+    {
+     "label": "Beacon escrow default retention",
+     "answered": true,
+     "match_terms": [
+      "retention",
+      "retain"
+     ]
+    },
+    {
+     "label": "Beacon escrow payer",
+     "answered": false,
+     "match_terms": [
+      "pay",
+      "billing",
+      "billed"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "universal_policy_requested",
+   "question": "What retention and payer policy applies to every escrow customer company-wide?",
+   "evidence": "Beacon customer-specific agreement: 60-day retention, customer pays storage fees. Other customer agreements are not described.",
+   "requested_facts": [
+    {
+     "label": "Company-wide escrow retention",
+     "answered": false,
+     "match_terms": [
+      "retention",
+      "retain"
+     ]
+    },
+    {
+     "label": "Company-wide escrow payer",
+     "answered": false,
+     "match_terms": [
+      "pay",
+      "billing",
+      "billed"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "unfinalized_default",
+   "question": "What retention default is currently in effect for Beacon escrow?",
+   "evidence": "Draft proposal: consider a 60-day standard, customer pays. Approval and effective date are still pending.",
+   "requested_facts": [
+    {
+     "label": "Beacon escrow retention default in effect",
+     "answered": false,
+     "match_terms": [
+      "retention",
+      "default",
+      "standard"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "ambiguous_services",
+   "question": "How long are artifacts retained and who pays?",
+   "evidence": "Beacon escrow stores test bundles for 60 days, paid by customers. Delta diagnostics stores logs for 14 days, paid by the vendor. No intended service is specified.",
+   "requested_facts": [
+    {
+     "label": "Artifact retention period",
+     "answered": false,
+     "match_terms": [
+      "retention",
+      "retain",
+      "how long"
+     ]
+    },
+    {
+     "label": "Artifact storage payer",
+     "answered": false,
+     "match_terms": [
+      "pay",
+      "billing",
+      "billed"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "wrong_role_signer",
+   "question": "Who signed the Halcyon Freight master services agreement?",
+   "evidence": "Halcyon Freight delivery receipt DR-4471 for the March pallet shipment was signed by Priya Natarajan at the Newark dock.",
+   "requested_facts": [
+    {
+     "label": "Signer of the Halcyon Freight master services agreement",
+     "answered": false,
+     "match_terms": [
+      "sign"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "right_role_signer",
+   "question": "Who signed the Halcyon Freight master services agreement?",
+   "evidence": "Halcyon Freight master services agreement, executed copy: signed by Priya Natarajan, VP Operations, on February 2.",
+   "requested_facts": [
+    {
+     "label": "Signer of the Halcyon Freight master services agreement",
+     "answered": true,
+     "match_terms": [
+      "sign"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "side_detail_not_requested",
+   "question": "On what date is the Orion data-center cleaning scheduled?",
+   "evidence": "Facilities notice: the Orion data-center cleaning is scheduled for June 12. Time windows will be shared by the vendor later.",
+   "requested_facts": [
+    {
+     "label": "Orion data-center cleaning date",
+     "answered": true,
+     "match_terms": [
+      "date",
+      "clean",
+      "schedul",
+      "when"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "derived_answer",
+   "question": "When does the Lumen canary rollout start?",
+   "evidence": "Lumen release plan: the canary rollout starts two weeks after the July 1 code freeze, which is July 15.",
+   "requested_facts": [
+    {
+     "label": "Lumen canary rollout start date",
+     "answered": true,
+     "match_terms": [
+      "start",
+      "canary",
+      "date",
+      "when"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "applies_rate_stated",
+   "question": "What per-GB egress rate applies to the Kestrel archive tier?",
+   "evidence": "Kestrel pricing sheet: the archive tier is billed at $0.09 per GB of egress.",
+   "requested_facts": [
+    {
+     "label": "Kestrel archive tier egress rate",
+     "answered": true,
+     "match_terms": [
+      "rate",
+      "egress",
+      "price",
+      "cost",
+      "per-gb",
+      "per gb"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "unrequested_confirmation",
+   "question": "What did the Nimbus incident review identify as the root cause?",
+   "evidence": "Nimbus incident review, final: root cause was an expired TLS certificate on the internal load balancer. Follow-up audits are scheduled.",
+   "requested_facts": [
+    {
+     "label": "Root cause identified by the Nimbus incident review",
+     "answered": true,
+     "match_terms": [
+      "cause",
+      "root",
+      "why"
+     ]
+    }
+   ]
+  }
+ ]
+}

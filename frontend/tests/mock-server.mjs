@@ -13,7 +13,7 @@ function reset() {
   }
   state = { counter: 0, sessions: new Map(), pending: [], queries: [], meCalls: 0,
     delayNext: 0, logoutFailure: false, queryFailure: null, meFailure: false,
-    readyFailure: false, queryCsrfFailure: false, enabled: true, responseKind: "passage" };
+    readyFailure: false, queryCsrfFailure: false, scriptedProgress: null, progress: new Map(), enabled: true, responseKind: "passage" };
 }
 reset();
 const users = {
@@ -50,6 +50,39 @@ function session(request) {
 function sessionBody(current) {
   return { user: users[current.login], csrf_token: current.csrf,
     expires_at: new Date(Date.now() + 15 * 60_000).toISOString() };
+}
+// Stage timeline (ms after the query arrives) served by the progress endpoint.
+const progressTimeline = [
+  // The real backend nests these sub-steps and the whole-run agent span; the UI must not repeat them as rows.
+  { stage: "policy.resolve", round: null, start: 0, end: 0 },
+  { stage: "policy.grants", round: null, start: 0, end: 0 },
+  { stage: "policy.register", round: null, start: 0, end: 0 },
+  { stage: "agent", round: null, start: 0, end: 2600 },
+  { stage: "route", round: 1, start: 0, end: 300 },
+  { stage: "text_search", round: 1, start: 300, end: 1500 },
+  { stage: "critic", round: 1, start: 1500, end: 2200 },
+  { stage: "generate", round: null, start: 2200, end: 2600 },
+];
+const progressTotalMs = 2600;
+function progressBody(entry) {
+  const elapsed = Date.now() - entry.startedAt, stages = [];
+  let sequence = 1;
+  for (const item of entry.script ? progressTimeline : []) {
+    const base = { stage: item.stage, ...(item.round ? { round_number: item.round } : {}) };
+    if (elapsed >= item.start) stages.push({ sequence: sequence++, event: "start", status: "in_progress", ...base });
+    if (elapsed < item.end) continue;
+    const failed = entry.script.failStage === item.stage;
+    stages.push(failed
+      ? { sequence: sequence++, event: "error", status: "error", error_code: "provider_error", error_type: "ProviderError",
+          duration_ms: item.end - item.start, ...base }
+      : { sequence: sequence++, event: "end", status: "ok", duration_ms: item.end - item.start, ...base });
+  }
+  const done = elapsed >= progressTotalMs || !entry.script;
+  return { request: { status: done ? "ok" : "in_progress", http_status_code: done ? 200 : null,
+      worker_status: done ? "ok" : "running", started_at: new Date(entry.startedAt).toISOString(),
+      completed_at: done ? new Date().toISOString() : null, duration_ms: elapsed, rounds: 1, error_code: null,
+      error_type: null, usage: { input_tokens: null, output_tokens: null, api_calls: null, estimated_cost_usd: null } },
+    stages };
 }
 function answer(login, request) {
   const text = login === "executive" ? "EXECUTIVE_PRIVATE_EVIDENCE_TEST_ONLY" : "INTERN_PRIVATE_EVIDENCE_TEST_ONLY";
@@ -175,6 +208,13 @@ async function api(request, response) {
     response.writeHead(204, { "Cache-Control": "no-store", "Set-Cookie": "rag_session=; Max-Age=0; HttpOnly; SameSite=Strict; Path=/" });
     return response.end();
   }
+  if (path.startsWith("/api/query/progress/")) {
+    const current = state.enabled === false ? { login: "intern" } : session(request);
+    if (!current) return failure(response, 401, "authentication_required", "Sign in to continue.");
+    const entry = state.progress.get(path.split("/").pop());
+    if (!entry || entry.login !== current.login) return failure(response, 404, "not_found", "Progress is unavailable or has expired.");
+    return json(response, 200, progressBody(entry));
+  }
   if (path === "/api/query") {
     const current = state.enabled === false ? { login: "intern" } : session(request);
     if (!current) return failure(response, 401, "session_expired", "Session expired. Sign in again.");
@@ -186,12 +226,17 @@ async function api(request, response) {
     }
     const value = await body(request), id = ++state.counter;
     state.queries.push({ id, login: current.login, question: value.question, mode: value.mode });
+    const progressId = request.headers["x-query-progress-id"];
+    if (progressId) state.progress.set(progressId, { login: current.login, startedAt: Date.now(), script: state.scriptedProgress });
     if (state.queryFailure) return failure(response, 503, "policy_unavailable", "Synthetic test search is unavailable.");
     const payload = state.responseKind === "passage" ? answer(current.login, value) : nativeAnswer(current.login, value);
     if (state.delayNext > 0) {
       state.delayNext--;
       state.pending.push({ id, login: current.login, response, payload });
       return;
+    }
+    if (state.scriptedProgress) {
+      await new Promise((resolve) => setTimeout(resolve, progressTotalMs));
     }
     return json(response, 200, payload);
   }

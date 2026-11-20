@@ -19,7 +19,7 @@ from src.api.runtime import (AuthenticatedRuntime, WebSettings, RuntimeConfigura
 from src.access.contracts import (AccessDenied, AccessError, EvidenceValidationError,
                                  PolicyUnavailable, SessionExpired, SnapshotMismatch, StaleContext)
 from src.contracts import QueryRequest, QueryResponse
-from src.observability import Recorder, current_observation, emit, span
+from src.observability import Recorder, bind_progress, current_observation, emit, span
 from src.api.diagnostics import QueryObservationMiddleware, create_diagnostics_router
 
 log = logging.getLogger(__name__)
@@ -172,7 +172,8 @@ def create_app(settings=None, runtime_factory=None, *, auth_settings=None, auth_
     origins = auth_settings.allowed_origins if auth_enabled else settings.allowed_origins
     app.add_middleware(CORSMiddleware, allow_origins=list(origins),
                        allow_methods=['GET', 'POST'], allow_credentials=auth_enabled,
-                       allow_headers=['Content-Type', 'X-CSRF-Token'] if auth_enabled else ['Content-Type'],
+                       allow_headers=(['Content-Type', 'X-CSRF-Token', 'X-Query-Progress-ID'] if auth_enabled
+                                      else ['Content-Type', 'X-Query-Progress-ID']),
                        expose_headers=['X-Request-ID'])
     app.add_middleware(QueryObservationMiddleware, recorder=recorder)
     app.include_router(create_diagnostics_router(settings, recorder, auth_service=auth_service,
@@ -242,6 +243,7 @@ def create_app(settings=None, runtime_factory=None, *, auth_settings=None, auth_
         origin = request.headers.get('origin')
         if origin and origin not in origins:
             raise failure(403, 'origin_denied', 'This browser origin is not allowed.')
+        owner = None
         if auth_enabled:
             token = request.cookies.get('rag_session')
             if not token:
@@ -253,6 +255,11 @@ def create_app(settings=None, runtime_factory=None, *, auth_settings=None, auth_
             if (not origin or origin not in origins or not hmac.compare_digest(
                     session.response.csrf_token.encode('ascii'), supplied_csrf.encode('utf-8'))):
                 raise failure(403, 'csrf_failed', 'Request verification failed.')
+            owner = session.identity.user_id
+        # Bound before admission checks so a busy/not-ready rejection is also visible.
+        progress_id = request.headers.get('X-Query-Progress-ID')
+        if progress_id:
+            bind_progress(progress_id, owner)
         if app.state.runtime is None or app.state.closing:
             raise failure(503, 'not_ready', app.state.error or 'Retriever is still loading.')
         if app.state.busy:
@@ -304,6 +311,29 @@ def create_app(settings=None, runtime_factory=None, *, auth_settings=None, auth_
         status = 502 if response.answer.status == 'error' else (429 if response.trace.stop_reason == 'budget' else 200)
         return JSONResponse(status_code=status, content=response.model_dump(mode='json'),
             headers={'Cache-Control': 'no-store'} if auth_enabled else None)
+
+    @app.get('/api/query/progress/{progress_id}')
+    async def query_progress(progress_id: str, request: Request):
+        """Content-free stage events; deliberately outside the busy flag and query executor."""
+        headers = {'Cache-Control': 'no-store'}
+
+        def failure(status, code, message):
+            return HTTPException(status, detail={'code': code, 'message': message}, headers=headers)
+
+        origin = request.headers.get('origin')
+        if origin and origin not in origins:
+            raise failure(403, 'origin_denied', 'This browser origin is not allowed.')
+        owner = None
+        if auth_enabled:
+            token = request.cookies.get('rag_session')
+            if not token:
+                raise failure(401, 'authentication_required', 'Authentication is required.')
+            session = await auth_worker.call(auth_service.authenticate, token, touch=False)
+            owner = session.identity.user_id
+        result = recorder.progress(progress_id, owner)
+        if result is None:
+            raise failure(404, 'not_found', 'Progress is unavailable or has expired.')
+        return JSONResponse(content=result, headers=headers)
 
     if auth_enabled:
         @app.get('/api/runs/{run_id}')
