@@ -1,31 +1,29 @@
 # Contributing
 
-Use this guide when changing code or documentation. To run the app first, follow
-[Setup](docs/WEB_APP.md). Please follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+To run the app first, follow the [quick start](docs/QUICKSTART.md). Please follow
+the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Workflow
 
-1. Start from the version your task is meant to change. For teammate testing,
-   use the testing branch or exact commit shared by the team. For ordinary team
-   integration, the existing flow is a personal branch into `staging`, then a
-   separate reviewed change from `staging` into `main`.
-2. Create your own branch, such as `hira/fix-login-message`. A branch keeps your
-   changes separate until the team reviews them.
+1. Start from the version your task changes. For teammate testing, use the
+   branch or commit the team shared. Otherwise, the flow is a personal branch
+   into `staging`, then a separately reviewed change from `staging` into `main`.
+2. Create your own branch, such as `hira/fix-login-message`. Don't overwrite
+   someone else's.
 3. Make one focused change. Update the relevant guide if behavior changes.
-4. Run checks that cover your change. See the commands below.
-5. Commit the files you intend to share, push your branch, and open a **pull
-   request (PR)**: a request for teammates to review and merge your changes.
-6. In the PR, explain what changed, why, and which checks passed. Get a teammate's
-   review and passing automated checks before merging.
+4. Run the checks below that cover your change.
+5. Commit the files you mean to share, push, and open a **pull request (PR)**: a
+   request for teammates to review and merge your changes.
+6. In the PR, say what changed, why, and which checks passed. Merge after a
+   teammate's review and passing automated checks.
 
-Do not overwrite someone else's branch. A new feature or bug fix should include
-useful tests; a wording-only change usually needs a link and accuracy check.
+A feature or bug fix should include tests. A wording-only change needs a link
+and accuracy check.
 
 ## Check Python changes
 
-From the repository root, use Python 3.11. The commands below use a macOS/Linux
-shell, matching the documented app setup. A native Windows app installation has
-not been validated.
+Use Python 3.11 on macOS or Linux. A native Windows installation hasn't been
+validated.
 
 ```sh
 python3.11 -m venv .venv
@@ -34,17 +32,18 @@ python -m pip install -r requirements.txt
 python -m pytest
 ```
 
-Tests use local fake model responses. A normal test run does not require a paid
-API key. Database tests need a separate disposable PostgreSQL database and three
-`RAG_TEST_*_URL` settings; all three must point to the same database, whose name
-must start with `rag_test_`. Without them, those tests are skipped. Passing a run
-with skipped database tests is not the same as passing the database checks.
-The [CI workflow](.github/workflows/ci.yml) shows the disposable test setup.
-Never use your working app's database as the test database.
+Tests use fake model responses, so they need no paid API key.
+
+Database tests need a separate disposable PostgreSQL database and three
+`RAG_TEST_*_URL` settings. All three must point to the same database, and its
+name must start with `rag_test_`. Without them these tests are **skipped**, and
+a run with skipped tests has not passed the database checks. See the
+[CI workflow](.github/workflows/ci.yml) for the setup. Never use your working
+app's database for tests.
 
 ## Check frontend changes
 
-Use Node.js **22.12 or later**. From the repository root:
+Use Node.js **22.12 or later**.
 
 ```sh
 cd frontend
@@ -53,36 +52,31 @@ npm run build
 npm run test:browser
 ```
 
-If the browser is missing, run `npm run test:browser:install`, then run the tests
-again. These browser tests use fake API responses and do not call a model.
-See the [browser test guide](frontend/tests/README.md) for the separate
-Observability checks.
+If the browser is missing, run `npm run test:browser:install` and try again.
+These tests use fake API responses and call no model. See the
+[browser test guide](frontend/tests/README.md).
 
 ## Choose files for a commit
 
-Include source files, relevant tests, setup files and documentation. New files
-must be added too; committing only already-tracked changes can leave a teammate
-with missing modules.
+Include source, tests, setup files and docs. Add new files too, or teammates will
+get missing modules.
 
-Keep these local: real `.env` files, API keys, passwords, session cookies, model
-caches, indexes, downloaded data, `local-v2/`, `node_modules/` and generated build
-files. `.env.example` is the shareable template. Check `git status` and the staged
-diff before committing; editor settings and result spreadsheets may be untracked
-without being ignored.
+Keep these local: real `.env` files, API keys, passwords, cookies, model caches,
+indexes, downloaded data, `local-v2/`, `node_modules/` and build output.
+`.env.example` is the shareable template. Check `git status` and the staged diff
+first. Editor settings and result spreadsheets can be untracked but not ignored.
 
 ## Issues
 
-For a bug, include the question or action that triggered it, expected behavior,
-actual behavior and reproduction steps. Use a request ID or sanitized error code
-when available. Do not attach passwords, API keys, cookies or private excerpts.
-
-Use these labels to help the team find work:
+For a bug, give the question or action, expected and actual behavior, and steps
+to reproduce. Add a request ID or sanitized error code if you have one. Never
+attach passwords, API keys, cookies or private excerpts.
 
 | Label | Meaning |
 | --- | --- |
-| `bug` | Something does not work as expected |
+| `bug` | Something doesn't work as expected |
 | `enhancement` | A new feature or improvement |
-| `documentation` | A guide or explanation needs updating |
+| `documentation` | A guide needs updating |
 | `question` | A clarification is needed |
-| `good first issue` | A small task suitable for a new contributor |
-| `help wanted` | Another contributor's help would be useful |
+| `good first issue` | A small task for a new contributor |
+| `help wanted` | Extra help would be useful |

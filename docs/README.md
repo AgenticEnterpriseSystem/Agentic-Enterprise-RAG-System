@@ -1,28 +1,29 @@
 # Documentation
 
-New to the project? Read [Setup](WEB_APP.md) to run the app, or
-[How the system works](SYSTEM.md) to understand it first.
+New here? Start with the [quick start](QUICKSTART.md) to run the app. To
+understand it first, read [How the system works](SYSTEM.md).
 
 ## Choose a guide
 
 | Guide | What it explains |
 | --- | --- |
-| [Project README](../README.md) | What the app does and where to start |
-| [Setup](WEB_APP.md) | Install, prepare data, start Docker, create accounts, grant access and use the app |
+| [Project README](../README.md) | What the app does and the key results |
+| [Quick start](QUICKSTART.md) | **Start here.** Step-by-step setup, from clone to a working search page |
+| [Reference guide](WEB_APP.md) | Extra setup details: hand-picked access, Observability, live mode, settings, backup |
 | [Current status](STATUS.md) | What was checked, known issues and remaining work |
-| [How the system works](SYSTEM.md) | Login, permissions, hybrid search, the critic and final answers |
+| [How the system works](SYSTEM.md) | Login, permissions, hybrid search, critic and answers |
 | [Dataset](DATA_CARD.md) | Where the documents come from and what they contain |
 | [Retriever](model_card_hybrid_retriever.md) | Keyword search, embeddings, ranking settings and measured retrieval results |
-| [Full-corpus guide](FULL_CORPUS.md) | Prepare the complete dataset and understand earlier retrieval experiments |
-| [Evaluation](EVALUATION.md) | Test search, the agent and answers without mixing their results |
-| [Human-versus-LLM answer review](ANSWER_REVIEW.md) | Score saved answers yourself, then compare with the machine grades |
-| [Historical answer baseline](ANSWER_EVALUATION.md) | Understand the older BM25/GPT-OSS answers and same-model judge |
-| [System card](system_card.md) | Intended use, important limits, data flows and safety checks |
-| [Milestone review](MILESTONE2.md) | Review milestone evidence and distinguish old results from the current app |
-| [Contributing](../CONTRIBUTING.md) | Make a change, check it and share it for review |
-| [Browser tests](../frontend/tests/README.md) | Check the interface using fake test responses |
-| [Deployment tests](../tests/deployment/README.md) | Check a small real database and Docker installation |
-| [Evaluation files](../evaluation/README.md) | Find dataset splits and saved experiment results |
+| [Full-corpus guide](FULL_CORPUS.md) | Prepare the full dataset; earlier retrieval experiments |
+| [Evaluation](EVALUATION.md) | Test search, the agent and answers separately |
+| [Human-versus-LLM answer review](ANSWER_REVIEW.md) | Grade saved answers yourself, then compare with machine grades |
+| [Historical answer baseline](ANSWER_EVALUATION.md) | The older BM25/GPT-OSS answers and same-model judge |
+| [System card](system_card.md) | Intended use, limits, data flows and safety checks |
+| [Milestone review](MILESTONE2.md) | Milestone evidence, kept apart from current-app results |
+| [Contributing](../CONTRIBUTING.md) | Make, check and share a change |
+| [Browser tests](../frontend/tests/README.md) | Interface tests using fake responses |
+| [Deployment tests](../tests/deployment/README.md) | Small real database and Docker test |
+| [Evaluation files](../evaluation/README.md) | Dataset splits and saved experiment results |
 
 For the current separate grading and citation-review steps, use
 [the Evaluation guide](EVALUATION.md#offline-bridge-to-the-rc2-evaluator).
@@ -63,10 +64,10 @@ For the current separate grading and citation-review steps, use
 
 ## How to read the results
 
-A **functional check** asks whether a specific workflow ran correctly. An
-**answer-quality check** asks whether the answer was correct, complete and
-supported. Passing the first does not imply passing the second.
+A **functional check** asks whether a workflow ran correctly. An
+**answer-quality check** asks whether answers were correct, complete and
+supported. Passing one does not mean passing the other.
 
-Historical experiments keep their original model, settings and dataset split.
-They describe those experiments, not every later version of the app. Start with
-[Current status](STATUS.md) before using an older score in a report or demo.
+Old experiments keep their original model, settings and data split, so they
+don't describe later versions. Read [Current status](STATUS.md) before quoting
+an older score.

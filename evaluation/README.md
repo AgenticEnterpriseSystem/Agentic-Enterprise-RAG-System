@@ -1,13 +1,13 @@
 <a id="saved-evaluation-artifacts"></a>
 # Saved evaluation files
 
-This directory contains question splits and saved experiment results. Reading these files does not call a model. For what the numbers mean and how to run a new check, use [Evaluation](../docs/EVALUATION.md). For the current release state, use [Current status](../docs/STATUS.md).
+This directory holds question splits and saved experiment results. Reading them calls no model. To learn what the numbers mean or run a new check, see [Evaluation](../docs/EVALUATION.md). For the release state, see [Current status](../docs/STATUS.md).
 
 ## Where to start
 
-1. Open a result directory's `summary.json` for its measurements and settings.
-2. Open `predictions.jsonl` to inspect individual questions and ranked document IDs, where that file is present.
-3. Check its manifest/provenance before comparing it with another run. Older unrestricted retrieval results and newer user-permission-aware results use different reference counts.
+1. `summary.json` in a result directory has its measurements and settings.
+2. `predictions.jsonl` (where present) has per-question ranked document IDs.
+3. Check the manifest before comparing runs. Older unrestricted retrieval results and newer permission-aware results use different reference counts.
 
 | File or directory | What it contains |
 | --- | --- |
@@ -29,11 +29,11 @@ This directory contains question splits and saved experiment results. Reading th
 
 ## Avoid these comparison mistakes
 
-- Do not tune on the final question split.
+- Don't tune on the final question split.
 - A retrieved reference document is not proof of a correct answer.
 - A model's `answered` status or critic decision is not a human label.
 - Blank review sheets do not mean review is complete.
 - A current source fix does not change what an older saved experiment measured.
 - New runs need new output directories. Keep failures and unknown costs visible.
 
-Large document/index/model files and private execution/review records are excluded from Git. A fresh checkout therefore does not contain every local experiment. The sanitized [status page](../docs/STATUS.md) describes the current 30-outcome baseline, three-case external-judge pilot, pending human critic review and functional browser checks without requiring private local folders.
+Large data, index and model files and private review records are not in Git, so a fresh checkout lacks some local experiments. The [status page](../docs/STATUS.md) describes the current 30-outcome baseline, three-case external-judge pilot, pending human critic review and browser checks.
