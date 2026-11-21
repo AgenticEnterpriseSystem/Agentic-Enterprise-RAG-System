@@ -24,3 +24,6 @@ rag-dense [0-9]*/
 
 # Raw judge output written by answer-metrics tests and failed judge calls
 outputs/alex_evaluation/judge_debug/
+
+# Red-team raw evidence (responses, traces); share only reviewed summaries
+outputs/red_team/
