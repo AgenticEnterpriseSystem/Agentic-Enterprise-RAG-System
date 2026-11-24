@@ -162,6 +162,10 @@ class WebSettings(RetrievalSettings):
     max_rounds: int = Field(default=2, ge=1, le=5)
     top_k: int = Field(default=5, ge=1, le=20)
     evidence_doc_limit: Literal[5, 8, 10] = 8
+    # Experiment options (hira/testing); the defaults keep main's behaviour.
+    read_more_chars: int = Field(default=3000, ge=0, le=6000)  # 0 turns read-more off
+    clarification: bool = True
+    matching_source: bool = False
     observability_admin_user_ids: tuple[str, ...] = ()
 
     @field_validator('allowed_sources', 'allowed_origins', 'observability_admin_user_ids', mode='before')
@@ -287,12 +291,13 @@ class Runtime:
         output_limit = (provider.config.max_output_tokens if provider is not None and isinstance(provider, AnthropicProvider)
                         else settings.model_max_output_tokens)
         self.agent = (SearchAgent(retriever, EvidenceCritic(provider, generation,
-                max_output_tokens=settings.critic_max_output_tokens),
+                max_output_tokens=settings.critic_max_output_tokens, matching_source=settings.matching_source),
             GroundedGenerator(provider, generation), config=AgentConfig(
                 max_rounds=settings.max_rounds, max_context_chars=settings.max_context_chars,
                 evidence_doc_limit=settings.evidence_doc_limit,
                 critic_max_output_tokens=settings.critic_max_output_tokens,
                 generation_max_output_tokens=output_limit,
+                read_more_chars=settings.read_more_chars, clarification=settings.clarification,
                 max_tokens=settings.max_tokens, max_seconds=settings.max_seconds,
                 max_cost_usd=settings.question_budget_usd if settings.mode == 'live' else 0))
             if provider else None)
@@ -807,10 +812,12 @@ class AuthenticatedRuntime:
                     'Verified native Jira records and exact counts of canonical source records; native keys may repeat.',
                     ('lookup', 'filter', 'count'), ('doc_id', 'native_key', 'status', 'priority', 'project_id'))}
                 agent = SearchAgent(bridge, EvidenceCritic(self.provider, generation, on_input=on_critic_input,
-                        max_output_tokens=self.settings.critic_max_output_tokens),
+                        max_output_tokens=self.settings.critic_max_output_tokens,
+                        matching_source=self.settings.matching_source),
                     GroundedGenerator(self.provider, generation, on_input=on_input), router=self.router,
                     tools=tools, config=AgentConfig(max_rounds=self.settings.max_rounds,
                         evidence_doc_limit=self.settings.evidence_doc_limit,
+                        read_more_chars=self.settings.read_more_chars, clarification=self.settings.clarification,
                         critic_max_output_tokens=self.settings.critic_max_output_tokens,
                         generation_max_output_tokens=(self.provider.config.max_output_tokens
                             if isinstance(self.provider, AnthropicProvider) else getattr(self,

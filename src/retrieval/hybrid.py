@@ -12,6 +12,9 @@ class HybridConfig(Contract):
     rrf_k: float = Field(default=60, ge=0)
     bm25_weight: float = Field(default=1, ge=0)
     dense_weight: float = Field(default=1, ge=0)
+    # Excerpt size per returned result, re-cut from the whole document so that it contains
+    # the matched passage; None keeps each method's own excerpt.
+    passage_chars: int | None = Field(default=None, ge=500, le=20000)
 
 
 def matches_filters(item, request):
@@ -36,6 +39,27 @@ class HybridRetriever:
                          "bm25": getattr(bm25, "manifest", {}),
                          "dense": getattr(dense, "manifest", {}),
                          "reranker": getattr(reranker, "identity", None)}
+
+    def widen(self, item, query):
+        """Re-cut an excerpt of `passage_chars` from the whole document around the match.
+
+        The matched passage (a BGE passage or a BM25+ slice) stays inside the new excerpt,
+        which extends evenly on both sides; a longer match is narrowed to its best window.
+        """
+        size = self.config.passage_chars
+        full_text = getattr(self.bm25, "full_text", None)
+        text = full_text(item.chunk.doc_id) if full_text else None
+        chunk = item.chunk
+        if not text or text[chunk.start_char:chunk.end_char] != chunk.text:
+            return item  # Offsets do not refer to the whole document; keep the excerpt.
+        if chunk.end_char - chunk.start_char >= size:
+            return bounded_passage(item, query, size)
+        start = max(0, chunk.start_char - (size - len(chunk.text)) // 2)
+        end = min(len(text), start + size)
+        start = max(0, end - size)
+        key = f"{chunk.doc_id}:{start}:{end}"
+        return item.model_copy(update={"citation_id": key, "chunk": chunk.model_copy(update={
+            "chunk_id": key, "text": text[start:end], "start_char": start, "end_char": end})})
 
     def read_more(self, request: SearchRequest, anchors, *, max_chars=3000):
         validate_evidence(request.user, anchors)
@@ -93,6 +117,9 @@ class HybridRetriever:
                 for item in result
             ):
                 raise ValueError("Reranker returned evidence outside filtered candidates")
+            if self.config.passage_chars:  # Only the returned results are re-cut.
+                result = tuple(self.widen(item, request.query) for item in result)
+                validate_evidence(request.user, result)
             validate_evidence(request.user, result)
             observed.set(fused_count=len(fused), returned_count=len(result), reranker_enabled=self.reranker is not None)
             return result

@@ -402,6 +402,9 @@ class AnthropicProvider:
             input_tokens * config.input_usd_per_million
             + output_tokens * config.output_usd_per_million
         ) / 1_000_000
+        # Settle the worst-case reservation to the actual cost, so unused output allowance
+        # does not count against the provider's spending cap.
+        self.reserved_usd += cost - reservation
         if allowance:
             allowance.consume(tokens=input_tokens + output_tokens, cost_usd=cost,
                               seconds=time.monotonic() - began)

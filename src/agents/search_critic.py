@@ -65,6 +65,18 @@ Do not add an overall summary or confidence score. In citation_ids copy citation
 verbatim INCLUDING all colon-delimited offsets; only read_more_doc_ids uses doc_id.
 Never assume access to reference answers or sources outside this request."""
 
+# Experiment option (hira/testing, RAG_MATCHING_SOURCE=true): in earlier runs every wrong
+# answer cited a similar but different document (another customer, incident or design).
+MATCHING_SOURCE_RULE = """
+
+Matching-source rule: before setting answers_requested_fact=true, check that the passage is
+about the SAME specific subject the question names: the same customer or account, incident
+(ID, date or affected service), product, project, design or document. A passage about a
+similar but different customer, incident, project or design never answers the question,
+even when it contains the requested kind of detail: set answers_requested_fact=false and say
+so in scope_reason. If the question names a subject and no supplied passage is clearly about
+it, mark the fact missing and suggest a query that names that subject."""
+
 
 ERROR_CODES = frozenset({'agent_error', 'invalid_input', 'truncated_output', 'invalid_json',
     'invalid_schema', 'provider_error', 'invalid_citation', 'missing_claims'})
@@ -132,12 +144,15 @@ def structured_completion(provider, system, payload, schema, *, output_schema=No
 
 class EvidenceCritic:
     def __init__(self, provider: Provider, config: GenerationConfig | None = None,
-                 *, system_prompt: str = SYSTEM_PROMPT, on_input=None, max_output_tokens: int = 2048):
+                 *, system_prompt: str = SYSTEM_PROMPT, on_input=None, max_output_tokens: int = 2048,
+                 matching_source: bool = False):
         if type(max_output_tokens) is not int or not 1 <= max_output_tokens <= 8192:
             raise ValueError('Critic output token limit must be an integer from 1 to 8192')
         self.provider = provider
         self.config = config or GenerationConfig()
-        self.system_prompt = system_prompt
+        # The native checklist schema applies to the default prompt, with or without the rule.
+        self.native_prompt = system_prompt == SYSTEM_PROMPT
+        self.system_prompt = system_prompt + (MATCHING_SOURCE_RULE if matching_source else '')
         self.on_input = on_input
         self.max_output_tokens = max_output_tokens
 
@@ -171,7 +186,7 @@ class EvidenceCritic:
                 missing_facts=("Evidence answering the question",),
                 suggested_queries=(request.question,),
             ), Usage(estimated_cost_usd=0)
-        native_checklist = self.system_prompt == SYSTEM_PROMPT and getattr(
+        native_checklist = self.native_prompt and getattr(
             self.provider, 'supports_structured_output', callable(
                 getattr(self.provider, 'complete_structured', None)))
         response_model = EvidenceAssessment if native_checklist else CriticDecision

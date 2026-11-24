@@ -36,6 +36,10 @@ class AgentConfig(Contract):
     evidence_doc_limit: int | None = Field(default=None, strict=True, ge=1, le=20)
     critic_max_output_tokens: int | None = Field(default=None, strict=True, ge=1, le=8192)
     generation_max_output_tokens: int | None = Field(default=None, strict=True, ge=1, le=8192)
+    # Experiment options (hira/testing). Characters per read-more expansion; 0 turns read-more off.
+    read_more_chars: int = Field(default=3000, strict=True, ge=0, le=6000)
+    # False: an ambiguous question ends as insufficient evidence instead of a clarification.
+    clarification: bool = True
 
 
 class SearchAgent:
@@ -283,7 +287,8 @@ class SearchAgent:
             try:
                 expand = getattr(self.retriever, 'read_more', None)
                 anchors = ()
-                if not single_pass and feedback and feedback.read_more_doc_ids and expand and last_context:
+                if (not single_pass and feedback and feedback.read_more_doc_ids and expand and last_context
+                        and config.read_more_chars):
                     candidates = tuple(item for item in last_context.evidence if isinstance(item, Evidence))
                     anchors = tuple(max((e for e in candidates if e.chunk.doc_id == doc),
                                         key=lambda e: e.chunk.end_char)
@@ -302,7 +307,7 @@ class SearchAgent:
                 if anchors and expand is not None:
                     active_tool, began = 'read_more', self.clock()
                     with span('read_more', round_number=round_number) as observed:
-                        expanded = tuple(perform(expand, request, anchors, max_chars=3000))
+                        expanded = tuple(perform(expand, request, anchors, max_chars=config.read_more_chars))
                         observed.set(returned_count=len(expanded), unique_document_count=len(document_ids(expanded)))
                     if any(e.chunk.doc_id not in {a.chunk.doc_id for a in anchors} for e in expanded):
                         raise AgentError('Document expansion returned an unrelated document.')
@@ -456,7 +461,7 @@ class SearchAgent:
                                    if fact.status == 'ambiguous' for e in context.evidence
                                    if e.citation_id in fact.citation_ids and isinstance(e, (Evidence, StructuredRecord))}
                                   if feedback else set())
-                if (not single_pass and feedback and feedback.clarification_question
+                if (not single_pass and feedback and feedback.clarification_question and config.clarification
                         and (len(ambiguous_docs) > 1 or not feedback.read_more_doc_ids
                              or round_number == config.max_rounds)):
                     # Clarification is a normal stop, not evidence of a complete answer.
